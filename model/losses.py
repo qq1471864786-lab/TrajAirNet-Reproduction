@@ -3,9 +3,9 @@ from torch import nn
 
 
 def rmse_loss(prediction, target):
-    """ACTrajNet-style RMSE: compute per-agent RMSE, then sum across agents."""
-    mse_per_agent = (prediction - target).pow(2).mean(dim=(0, 2))
-    return torch.sqrt(mse_per_agent).sum()
+    """ACTrajNet-style RMSE: sqrt(MSE over all elements)."""
+    criterion = nn.MSELoss()
+    return torch.sqrt(criterion(prediction, target))
 
 
 class HAINetLoss(nn.Module):
