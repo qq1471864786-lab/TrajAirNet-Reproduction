@@ -373,8 +373,17 @@ class HAINet(nn.Module):
             use_interaction and use_height_feedback) else None
 
         # --- CVAE ---
-        social_dim = gat_hidden if use_interaction else 0
-        condition_dim = base_condition_dim + social_dim
+        # Gate-based fusion: social info modulates base condition additively
+        # CVAE condition stays at base_condition_dim (139), no wasted zero dims
+        if use_interaction:
+            self.social_gate = nn.Sequential(
+                nn.Linear(gat_hidden, base_condition_dim), nn.Sigmoid())
+            self.social_proj = nn.Linear(gat_hidden, base_condition_dim)
+        else:
+            self.social_gate = None
+            self.social_proj = None
+
+        condition_dim = base_condition_dim
 
         # Encoder input: future_flat_dim = n_classes * n_classes = 144
         future_flat_dim = self.n_classes * self.n_classes  # 144
@@ -414,7 +423,8 @@ class HAINet(nn.Module):
         Encode a single agent's trajectory (batched).
         x_agent: (batch, channels, seq_len) — trajectory
         context_agent: (batch, 2, seq_len) — wind context
-        Returns: h_fused_flat (batch, n_classes*obs_len), h_alt_flat (batch, 1*obs_len)
+        Returns: h_fused_flat (batch, n_classes*obs_len), h_alt_flat (batch, 1*obs_len),
+                 encoded_traj (batch, n_classes, seq_len) — raw TCN output before flatten
         """
         # Altitude: (batch, 1, seq_len)
         altitude = x_agent[:, 2:3, :]
@@ -427,19 +437,19 @@ class HAINet(nn.Module):
             gate = self.sig_a_X(self.fc_a_X(encoded_alt))  # (batch, 1, n_classes)
             gate = gate.transpose(1, 2)  # (batch, n_classes, 1)
             # Broadcast gate across time dimension
-            encoded_traj = encoded_traj * gate  # (batch, n_classes, seq_len)
+            fused_traj = encoded_traj * gate  # (batch, n_classes, seq_len)
         else:
             encoded_alt = self.tcn_encoder_altitude_Y(altitude)
             encoded_traj = self.tcn_encoder_y(x_agent)
             gate = self.sig_a_Y(self.fc_a_Y(encoded_alt))
             gate = gate.transpose(1, 2)
-            encoded_traj = encoded_traj * gate
+            fused_traj = encoded_traj * gate
 
         # Flatten full sequence
-        h_fused_flat = encoded_traj.reshape(x_agent.size(0), -1)  # (batch, n_classes*seq_len)
+        h_fused_flat = fused_traj.reshape(x_agent.size(0), -1)  # (batch, n_classes*seq_len)
         h_alt_flat = encoded_alt.reshape(x_agent.size(0), -1)  # (batch, 1*seq_len)
 
-        return h_fused_flat, h_alt_flat
+        return h_fused_flat, h_alt_flat, encoded_traj
 
     def forward(self, obs, context, target=None, scene_ids=None, scene_slices=None):
         """
@@ -459,7 +469,7 @@ class HAINet(nn.Module):
         obs_input = obs.permute(1, 2, 0)  # (N, 3, obs_len)
         ctx_input = context.permute(1, 2, 0)  # (N, 2, obs_len)
 
-        h_fused_flat, h_alt_flat = self._encode_agent(obs_input, ctx_input, is_obs=True)
+        h_fused_flat, h_alt_flat, encoded_traj_cache = self._encode_agent(obs_input, ctx_input, is_obs=True)
         # h_fused_flat: (N, 132), h_alt_flat: (N, 11)
 
         # --- Wind/Context encoding ---
@@ -494,28 +504,25 @@ class HAINet(nn.Module):
                 # --- Interaction -> Height feedback (innovation) ---
                 if self.height_feedback is not None:
                     h_alt_updated = self.height_feedback(h_alt_flat, h_social)
-                    # Second-round CAF with updated altitude
+                    # Second-round CAF with updated altitude, reuse cached TCN output
                     h_alt_updated_2d = h_alt_updated.unsqueeze(1)  # (N, 1, 11)
-                    encoded_traj = self.tcn_encoder_x(obs_input)  # re-encode
                     gate2 = self.sig_a_X2(self.fc_a_X2(h_alt_updated_2d))
                     gate2 = gate2.transpose(1, 2)
-                    encoded_traj = encoded_traj * gate2
-                    h_fused_flat = encoded_traj.reshape(N, -1)
+                    fused_traj2 = encoded_traj_cache * gate2
+                    h_fused_flat = fused_traj2.reshape(N, -1)
                     condition_base = torch.cat([h_fused_flat, h_wind], dim=-1)
 
-        # --- Build full condition ---
-        parts = [condition_base]
+        # --- Gate-based social fusion ---
         if h_social is not None:
-            parts.append(h_social)
-        elif self.use_interaction:
-            parts.append(torch.zeros(N, self.gat.out_features, device=obs.device))
-        condition = torch.cat(parts, dim=-1)
+            condition = condition_base + self.social_gate(h_social) * self.social_proj(h_social)
+        else:
+            condition = condition_base
 
         # --- CVAE ---
         if target is not None:
             # Training: encode future
             target_input = target.permute(1, 2, 0)  # (N, 3, pred_steps)
-            h_future_flat, _ = self._encode_agent(target_input, ctx_input, is_obs=False)
+            h_future_flat, _, _ = self._encode_agent(target_input, ctx_input, is_obs=False)
             # h_future_flat: (N, n_classes * n_classes) = (N, 144)
 
             H_yy, means, log_var, z = self.cvae(

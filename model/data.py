@@ -33,6 +33,13 @@ def resolve_split_dir(project_root, dataset_variant, dataset_name, split):
                 project_root,
                 "dataset",
                 "no_social",
+                dataset_name,
+                split,
+            ),
+            os.path.join(
+                project_root,
+                "dataset",
+                "no_social",
                 f"{dataset_name}_no_social",
                 split,
             ),
