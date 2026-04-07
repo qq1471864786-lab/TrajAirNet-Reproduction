@@ -4,13 +4,13 @@ from torch import nn
 
 def rmse_loss(prediction, target):
     """
-    Per-agent RMSE sum — matches original ACTrajNet loss_func loop:
-      for agent in range(N): loss += sqrt(MSE(pred_agent, target_agent))
+    Per-agent RMSE, averaged over agents.
+    Preserves the same recon/KL ratio as original ACTrajNet (per-agent loss),
+    but normalised by N so gradient magnitude is independent of batch size.
     prediction/target: (pred_steps, N, 3)
     """
-    # MSE per agent: average over (time, channels), keep agent dim
     mse_per_agent = (prediction - target).pow(2).mean(dim=(0, 2))  # (N,)
-    return torch.sqrt(mse_per_agent + 1e-8).sum()
+    return torch.sqrt(mse_per_agent + 1e-8).mean()
 
 
 class HAINetLoss(nn.Module):
@@ -26,13 +26,15 @@ class HAINetLoss(nn.Module):
 
     def kl_divergence(self, mu, logvar):
         """
-        Per-agent KL sum — matches original: each agent's KL summed over latent,
-        then summed across agents.  mu/logvar: (N, latent_dim)
+        Per-agent KL, averaged over agents.
+        Each agent: sum over latent dims.  Then mean over agents.
+        mu/logvar: (N, latent_dim)
         """
         kl_per_element = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
         if self.free_bits > 0:
             kl_per_element = torch.clamp(kl_per_element, min=self.free_bits)
-        return kl_per_element.sum()
+        kl_per_agent = kl_per_element.sum(dim=-1)  # (N,)
+        return kl_per_agent.mean()
 
     def forward(self, prediction, target, mu, logvar):
         recon = rmse_loss(prediction, target)
