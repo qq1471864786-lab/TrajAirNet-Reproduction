@@ -71,7 +71,7 @@ def build_parser():
     parser.add_argument("--tcn_channels", type=int, default=256)
     parser.add_argument("--tcn_layers", type=int, default=2)
     parser.add_argument("--tcn_kernel", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dropout", type=float, default=0.05)  # ACTrajNet original: 0.05
     parser.add_argument("--gat_hidden", type=int, default=256)
     parser.add_argument("--gat_heads", type=int, default=8)
     parser.add_argument("--gat_dropout", type=float, default=0.05)
@@ -95,11 +95,11 @@ def build_parser():
     parser.add_argument("--weight_decay", type=float, default=3e-4)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["none", "cosine"])
-    parser.add_argument("--kl_weight", type=float, default=0.1)
+    parser.add_argument("--kl_weight", type=float, default=1.0)  # ACTrajNet original: implicit 1.0
     parser.add_argument("--free_bits", type=float, default=0.0,
                         help="Free-bits KL floor per latent dimension")
-    parser.add_argument("--kl_anneal_epochs", type=int, default=20,
-                        help="Linear KL annealing over this many epochs")
+    parser.add_argument("--kl_anneal_epochs", type=int, default=0,
+                        help="Linear KL annealing over this many epochs (0=no annealing, ACTrajNet original)")
 
     # Evaluation
     parser.add_argument("--best_of_n", type=int, default=5,

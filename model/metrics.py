@@ -8,24 +8,39 @@ def _pairwise_distance(prediction, target):
     return torch.linalg.norm(prediction - target, dim=-1)
 
 
-def _per_agent_metrics(distance, altitude_error):
+def _scene_slices_or_full(scene_slices, agent_count, device):
+    if scene_slices is None:
+        return torch.tensor([[0, agent_count]], dtype=torch.long, device=device)
+    return scene_slices
+
+
+def _scene_metric_means(distance, altitude_error, scene_slices):
+    metrics = {name: [] for name in METRIC_NAMES}
+    for start, end in scene_slices.tolist():
+        scene_distance = distance[:, start:end]
+        scene_altitude = altitude_error[:, start:end]
+        metrics["ADE"].append(scene_distance.mean())
+        metrics["FDE"].append(scene_distance[-1].mean())
+        metrics["MDE"].append(scene_distance.max(dim=0).values.mean())
+        metrics["AADE"].append(scene_altitude.mean())
+        metrics["AFDE"].append(scene_altitude[-1].mean())
+        metrics["AMDE"].append(scene_altitude.max(dim=0).values.mean())
+    return {name: torch.stack(values) for name, values in metrics.items()}
+
+
+def _scene_metric_totals(distance, altitude_error, scene_slices):
+    scene_metrics = _scene_metric_means(distance, altitude_error, scene_slices)
     return {
-        "ADE": distance.mean(dim=0),
-        "FDE": distance[-1],
-        "MDE": distance.max(dim=0).values,
-        "AADE": altitude_error.mean(dim=0),
-        "AFDE": altitude_error[-1],
-        "AMDE": altitude_error.max(dim=0).values,
+        name: values.sum().item() for name, values in scene_metrics.items()
     }
 
 
 def metric_totals(prediction, target, scene_slices=None):
     distance = _pairwise_distance(prediction, target)
     altitude_error = torch.abs(prediction[..., 2] - target[..., 2])
-    per_agent_metrics = _per_agent_metrics(distance, altitude_error)
-    agent_count = int(distance.size(1))
-    totals = {name: values.sum().item() for name, values in per_agent_metrics.items()}
-    return totals, agent_count
+    resolved_scene_slices = _scene_slices_or_full(scene_slices, distance.size(1), distance.device)
+    totals = _scene_metric_totals(distance, altitude_error, resolved_scene_slices)
+    return totals, int(resolved_scene_slices.size(0))
 
 
 def evaluate_trajectory_batch(prediction, target, scene_slices=None):
@@ -36,12 +51,13 @@ def evaluate_trajectory_batch(prediction, target, scene_slices=None):
 
 def select_best_of_n_prediction(model, obs, target, context, scene_ids, scene_slices, n_samples):
     """
-    Draw N samples and keep the best sample for each agent independently.
-    This avoids batch-level best-of-N bias when a batch contains many scenes.
+    Draw N samples and keep the best sample for each scene independently.
+    This matches the baseline best-of-5 protocol at scene level.
     """
     best_prediction = None
-    best_agent_ade = None
+    best_scene_ade = None
     sample_mean_ades = []
+    resolved_scene_slices = _scene_slices_or_full(scene_slices, target.size(1), target.device)
 
     for _ in range(n_samples):
         prediction = model(
@@ -51,18 +67,24 @@ def select_best_of_n_prediction(model, obs, target, context, scene_ids, scene_sl
             scene_ids=scene_ids,
             scene_slices=scene_slices,
         )
-        per_agent_ade = _pairwise_distance(prediction, target).mean(dim=0)
-        sample_mean_ades.append(per_agent_ade.mean().item())
+        distance = _pairwise_distance(prediction, target)
+        altitude_error = torch.abs(prediction[..., 2] - target[..., 2])
+        scene_ade = _scene_metric_means(distance, altitude_error, resolved_scene_slices)["ADE"]
+        sample_mean_ades.append(scene_ade.mean().item())
 
         if best_prediction is None:
             best_prediction = prediction.clone()
-            best_agent_ade = per_agent_ade
+            best_scene_ade = scene_ade
             continue
 
-        better_mask = per_agent_ade < best_agent_ade
+        better_mask = scene_ade < best_scene_ade
         if better_mask.any():
-            best_prediction[:, better_mask, :] = prediction[:, better_mask, :]
-            best_agent_ade = torch.minimum(best_agent_ade, per_agent_ade)
+            for scene_index, is_better in enumerate(better_mask.tolist()):
+                if not is_better:
+                    continue
+                start, end = resolved_scene_slices[scene_index].tolist()
+                best_prediction[:, start:end, :] = prediction[:, start:end, :]
+            best_scene_ade = torch.minimum(best_scene_ade, scene_ade)
 
     diversity = 0.0
     if len(sample_mean_ades) > 1:

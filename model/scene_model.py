@@ -534,8 +534,14 @@ class HAINet(nn.Module):
 
             return prediction, means.squeeze(1), log_var.squeeze(1), acc.permute(0, 2, 1)
         else:
-            # Inference: sample from prior
-            z = torch.randn(N, self.cvae.latent_size, device=obs.device)
+            # Inference: sample one latent per scene, matching baseline scene-level sampling.
+            if scene_slices is not None and scene_slices.numel() > 0:
+                z = torch.empty(N, self.cvae.latent_size, device=obs.device)
+                for start, end in scene_slices.tolist():
+                    scene_z = torch.randn(1, self.cvae.latent_size, device=obs.device)
+                    z[start:end] = scene_z.expand(end - start, -1)
+            else:
+                z = torch.randn(N, self.cvae.latent_size, device=obs.device)
             H_yy = self.cvae.inference(z.unsqueeze(1), condition.unsqueeze(1))
             H_yy = H_yy.squeeze(1)
             H_yy = H_yy.view(N, self.input_channels, -1)

@@ -3,32 +3,25 @@ from torch import nn
 
 
 def rmse_loss(prediction, target):
-    """RMSE loss — matches ACTrajNet original."""
-    return torch.sqrt(nn.functional.mse_loss(prediction, target))
+    """ACTrajNet-style RMSE: compute per-agent RMSE, then sum across agents."""
+    mse_per_agent = (prediction - target).pow(2).mean(dim=(0, 2))
+    return torch.sqrt(mse_per_agent).sum()
 
 
 class HAINetLoss(nn.Module):
     """
-    Combined loss: RMSE + KL divergence with anti-collapse measures.
-
-    Anti-collapse strategy:
-    1. KL uses mean (not sum) to balance with RMSE regardless of latent dim
-    2. Free bits: minimum KL per dimension prevents full collapse
-    3. Cyclical annealing: controlled externally via kl_weight
+    Combined loss aligned with ACTrajNet baseline:
+    sum(agent_RMSE) + kl_weight * sum(agent_KL)
     """
 
-    def __init__(self, kl_weight=1.0, free_bits=0.05):
+    def __init__(self, kl_weight=1.0, free_bits=0.0):
         super().__init__()
         self.kl_weight = kl_weight
         self.free_bits = free_bits
 
     def kl_divergence(self, mu, logvar):
-        """KL(N(mu, sigma) || N(0, I)) — sum over latent dims, mean over batch.
-        Matches ACTrajNet original per-sample KL behavior."""
-        kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
-        if self.free_bits > 0:
-            kl_per_dim = torch.clamp(kl_per_dim, min=self.free_bits)
-        return kl_per_dim.sum(dim=-1).mean()
+        """KL(N(mu, sigma) || N(0, I)) summed over agents and latent dims."""
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
     def forward(self, prediction, target, mu, logvar):
         recon = rmse_loss(prediction, target)
