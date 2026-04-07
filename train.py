@@ -98,8 +98,8 @@ def build_parser():
     parser.add_argument("--kl_weight", type=float, default=1.0)  # ACTrajNet original: implicit 1.0
     parser.add_argument("--free_bits", type=float, default=0.0,
                         help="Free-bits KL floor per latent dimension")
-    parser.add_argument("--kl_anneal_epochs", type=int, default=0,
-                        help="Linear KL annealing over this many epochs (0=no annealing, ACTrajNet original)")
+    parser.add_argument("--kl_anneal_epochs", type=int, default=10,
+                        help="KL annealing ramp epochs (0=no annealing)")
 
     # Evaluation
     parser.add_argument("--best_of_n", type=int, default=5,
@@ -361,7 +361,7 @@ def main():
             diag_latent_count = 0
             diag_grad_norm_sum = 0.0
             kl_w = get_kl_weight(epoch, args.kl_anneal_epochs, args.kl_weight,
-                                 cyclical=False, n_cycles=4, total_epochs=args.epochs)
+                                 cyclical=True, n_cycles=4, total_epochs=args.epochs)
             criterion.kl_weight = kl_w
 
             for raw_batch in tqdm(
@@ -385,7 +385,7 @@ def main():
                 )
                 loss, recon, kl = criterion(prediction, batch["target"], mu, logvar)
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 # Collect diagnostics

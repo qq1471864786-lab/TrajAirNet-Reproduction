@@ -412,6 +412,20 @@ class HAINet(nn.Module):
         self.context_linear.weight.data.normal_(0, 0.05)
         self.context_conv.weight.data.normal_(0, 0.1)
 
+        # Social gates start near zero — residual design:
+        # untrained GAT noise won't leak into base model
+        if self.social_gate is not None:
+            nn.init.zeros_(self.social_gate[0].weight)
+            nn.init.constant_(self.social_gate[0].bias, -3.0)
+            nn.init.normal_(self.social_proj.weight, 0, 0.01)
+            nn.init.zeros_(self.social_proj.bias)
+
+        if self.height_feedback is not None:
+            nn.init.zeros_(self.height_feedback.gate[0].weight)
+            nn.init.constant_(self.height_feedback.gate[0].bias, -3.0)
+            nn.init.normal_(self.height_feedback.update[0].weight, 0, 0.01)
+            nn.init.zeros_(self.height_feedback.update[0].bias)
+
     def _build_adj_mask(self, scene_ids):
         N = scene_ids.size(0)
         same_scene = scene_ids.unsqueeze(0) == scene_ids.unsqueeze(1)
