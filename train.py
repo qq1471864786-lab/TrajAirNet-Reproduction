@@ -71,10 +71,10 @@ def build_parser():
     parser.add_argument("--tcn_channels", type=int, default=256)
     parser.add_argument("--tcn_layers", type=int, default=2)
     parser.add_argument("--tcn_kernel", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.05)  # ACTrajNet original: 0.05
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--gat_hidden", type=int, default=256)
     parser.add_argument("--gat_heads", type=int, default=8)
-    parser.add_argument("--gat_dropout", type=float, default=0.05)
+    parser.add_argument("--gat_dropout", type=float, default=0.1)
     parser.add_argument("--cvae_latent", type=int, default=128)
     parser.add_argument("--cvae_hidden", type=int, default=128)
     parser.add_argument("--cvae_layers", type=int, default=2)
@@ -89,9 +89,9 @@ def build_parser():
     parser.add_argument("--disable_height_feedback", action="store_true",
                         help="Remove interaction->height feedback (single direction)")
 
-    # Training (aligned with TrajAirNet: lr=1e-4, grad_clip=1.0)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--min_lr", type=float, default=2e-5)
+    # Training
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--min_lr", type=float, default=1e-6)
     parser.add_argument("--weight_decay", type=float, default=3e-4)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["none", "cosine"])
@@ -361,7 +361,7 @@ def main():
             diag_latent_count = 0
             diag_grad_norm_sum = 0.0
             kl_w = get_kl_weight(epoch, args.kl_anneal_epochs, args.kl_weight,
-                                 cyclical=True, n_cycles=4, total_epochs=args.epochs)
+                                 cyclical=False, n_cycles=4, total_epochs=args.epochs)
             criterion.kl_weight = kl_w
 
             for raw_batch in tqdm(
