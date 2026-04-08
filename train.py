@@ -74,7 +74,7 @@ def build_parser():
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--gat_hidden", type=int, default=256)
     parser.add_argument("--gat_heads", type=int, default=8)
-    parser.add_argument("--gat_dropout", type=float, default=0.1)
+    parser.add_argument("--gat_dropout", type=float, default=0.05)
     parser.add_argument("--cvae_latent", type=int, default=128)
     parser.add_argument("--cvae_hidden", type=int, default=128)
     parser.add_argument("--cvae_layers", type=int, default=2)
@@ -93,13 +93,17 @@ def build_parser():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--min_lr", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=3e-4)
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["none", "cosine"])
     parser.add_argument("--kl_weight", type=float, default=1.0)  # ACTrajNet original: implicit 1.0
-    parser.add_argument("--free_bits", type=float, default=0.0,
+    parser.add_argument("--free_bits", type=float, default=0.1,
                         help="Free-bits KL floor per latent dimension")
-    parser.add_argument("--kl_anneal_epochs", type=int, default=10,
+    parser.add_argument("--kl_anneal_epochs", type=int, default=20,
                         help="KL annealing ramp epochs (0=no annealing)")
+    parser.add_argument("--grad_clip", type=float, default=5.0,
+                        help="Max gradient norm for clipping")
+    parser.add_argument("--patience", type=int, default=15,
+                        help="Early stopping patience (0=disabled)")
 
     # Evaluation
     parser.add_argument("--best_of_n", type=int, default=5,
@@ -385,7 +389,7 @@ def main():
                 )
                 loss, recon, kl = criterion(prediction, batch["target"], mu, logvar)
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
 
                 # Collect diagnostics
@@ -472,6 +476,11 @@ def main():
 
             if scheduler is not None:
                 scheduler.step()
+
+            # Early stopping
+            if args.patience > 0 and (epoch - best_epoch) >= args.patience:
+                print(f"  early stop | no improvement for {args.patience} epochs since epoch {best_epoch}")
+                break
 
         if best_metrics is not None:
             summary = recorder.finalize(best_epoch, best_metrics, save_path)

@@ -409,17 +409,17 @@ class HAINet(nn.Module):
         self.context_linear.weight.data.normal_(0, 0.05)
         self.context_conv.weight.data.normal_(0, 0.1)
 
-        # Social gates start near zero — residual design:
-        # untrained GAT noise won't leak into base model
+        # Social gates start moderately open — let interaction signal flow early
+        # so GAT and feedback modules can learn effectively with cosine LR
         if self.social_gate is not None:
             nn.init.zeros_(self.social_gate[0].weight)
-            nn.init.constant_(self.social_gate[0].bias, -3.0)
+            nn.init.constant_(self.social_gate[0].bias, -1.0)
             nn.init.normal_(self.social_proj.weight, 0, 0.01)
             nn.init.zeros_(self.social_proj.bias)
 
         if self.height_feedback is not None:
             nn.init.zeros_(self.height_feedback.gate[0].weight)
-            nn.init.constant_(self.height_feedback.gate[0].bias, -3.0)
+            nn.init.constant_(self.height_feedback.gate[0].bias, -1.0)
             nn.init.normal_(self.height_feedback.update[0].weight, 0, 0.01)
             nn.init.zeros_(self.height_feedback.update[0].bias)
 
