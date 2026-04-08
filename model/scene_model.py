@@ -366,11 +366,8 @@ class HAINet(nn.Module):
             gat_hidden, alt_flat_dim
         ) if (use_interaction and use_height_feedback) else None
 
-        # Second CAF gate for after feedback
-        self.fc_a_X2 = nn.Linear(obs_len, self.n_classes) if (
-            use_interaction and use_height_feedback) else None
-        self.sig_a_X2 = nn.Sigmoid() if (
-            use_interaction and use_height_feedback) else None
+        # Second-round CAF reuses fc_a_X / sig_a_X (shared weights)
+        # — no separate fc_a_X2 needed
 
         # --- CVAE ---
         # Gate-based fusion: social info modulates base condition additively
@@ -518,12 +515,15 @@ class HAINet(nn.Module):
                 # --- Interaction -> Height feedback (innovation) ---
                 if self.height_feedback is not None:
                     h_alt_updated = self.height_feedback(h_alt_flat, h_social)
-                    # Second-round CAF with updated altitude, reuse cached TCN output
+                    # Second-round CAF: reuse first CAF weights (fc_a_X / sig_a_X)
                     h_alt_updated_2d = h_alt_updated.unsqueeze(1)  # (N, 1, 11)
-                    gate2 = self.sig_a_X2(self.fc_a_X2(h_alt_updated_2d))
+                    gate2 = self.sig_a_X(self.fc_a_X(h_alt_updated_2d))
                     gate2 = gate2.transpose(1, 2)
                     fused_traj2 = encoded_traj_cache * gate2
-                    h_fused_flat = fused_traj2.reshape(N, -1)
+                    h_fused_new = fused_traj2.reshape(N, -1)
+                    # Only update agents that have neighbors; others keep first CAF result
+                    mask = has_neighbor.unsqueeze(-1).float()
+                    h_fused_flat = h_fused_flat * (1 - mask) + h_fused_new * mask
                     condition_base = torch.cat([h_fused_flat, h_wind], dim=-1)
 
         # --- Gate-based social fusion ---

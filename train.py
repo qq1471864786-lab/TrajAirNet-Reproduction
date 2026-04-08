@@ -90,8 +90,8 @@ def build_parser():
                         help="Remove interaction->height feedback (single direction)")
 
     # Training
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--min_lr", type=float, default=1e-6)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--min_lr", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=3e-4)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["none", "cosine"])
