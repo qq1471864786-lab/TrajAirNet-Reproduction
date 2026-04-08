@@ -80,6 +80,7 @@ def build_parser():
     parser.add_argument("--cvae_layers", type=int, default=2)
     parser.add_argument("--cvae_channel_size", type=int, default=128)
     parser.add_argument("--mlp_layer", type=int, default=32)
+    parser.add_argument("--condition_dropout", type=float, default=0.1)
 
     # Ablation switches (only 3, clean)
     parser.add_argument("--disable_interaction", action="store_true",
@@ -212,6 +213,7 @@ def build_model(args):
         gat_hidden=args.gat_hidden,
         gat_heads=args.gat_heads,
         gat_dropout=args.gat_dropout,
+        condition_dropout=args.condition_dropout,
         use_interaction=not args.disable_interaction,
         use_height_conditioning=not args.disable_height_conditioning,
         use_height_feedback=not args.disable_height_feedback,
@@ -472,20 +474,23 @@ def main():
                 print(green_text(f"  best    | epoch={best_epoch:03d} | {format_metrics(best_metrics)}"))
                 print(f"  save    | {save_path}")
             elif best_metrics is not None:
-                print(f"  best    | epoch={best_epoch:03d} | {format_metrics(best_metrics)}")
+                no_improve = epoch - best_epoch
+                patience_str = f" | patience {no_improve}/{args.patience}" if args.patience > 0 else ""
+                print(f"  best    | epoch={best_epoch:03d} | {format_metrics(best_metrics)}{patience_str}")
 
             if scheduler is not None:
                 scheduler.step()
 
             # Early stopping
             if args.patience > 0 and (epoch - best_epoch) >= args.patience:
-                print(f"  early stop | no improvement for {args.patience} epochs since epoch {best_epoch}")
+                print(green_text(f"  early stop | no improvement for {args.patience} epochs since epoch {best_epoch}"))
                 break
 
         if best_metrics is not None:
             summary = recorder.finalize(best_epoch, best_metrics, save_path)
-            print("Best checkpoint:", save_path)
-            print("Best metrics:", " ".join(f"{name}={value:.4f}" for name, value in best_metrics.items()))
+            print(green_text(f"Best checkpoint: {save_path}"))
+            print(green_text(f"Best epoch: {best_epoch}"))
+            print(green_text(f"Best metrics: {format_metrics(best_metrics)}"))
             print("Run summary:", os.path.join(checkpoint_dir(args), "run_summary.json"))
             if summary.get("diagnostics"):
                 print("Diagnostics:", " | ".join(summary["diagnostics"]))

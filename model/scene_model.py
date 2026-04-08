@@ -303,11 +303,13 @@ class HAINet(nn.Module):
         gat_hidden=256,
         gat_heads=8,
         gat_dropout=0.05,
+        condition_dropout=0.1,
         use_interaction=True,
         use_height_conditioning=True,
         use_height_feedback=True,
     ):
         super().__init__()
+        self.condition_dropout = condition_dropout
         self.obs_len = obs_len
         self.n_classes = int(math.ceil(pred_len / pred_step))  # 12
         self.input_channels = input_channels
@@ -539,6 +541,10 @@ class HAINet(nn.Module):
             condition = condition_base
 
         # --- CVAE ---
+        # Condition dropout: force decoder to rely on z during training
+        if self.training and self.condition_dropout > 0:
+            condition = F.dropout(condition, p=self.condition_dropout, training=True)
+
         if target is not None:
             # Training: encode future
             target_input = target.permute(1, 2, 0)  # (N, 3, pred_steps)
