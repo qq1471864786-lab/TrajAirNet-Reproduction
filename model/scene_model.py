@@ -261,7 +261,7 @@ class InteractionHeightFeedback(nn.Module):
     def __init__(self, social_dim, alt_dim):
         super().__init__()
         self.gate = nn.Sequential(nn.Linear(social_dim, alt_dim), nn.Sigmoid())
-        self.update = nn.Sequential(nn.Linear(social_dim, alt_dim), nn.ReLU())
+        self.update = nn.Sequential(nn.Linear(social_dim, alt_dim), nn.Tanh())
 
     def forward(self, h_alt, h_social):
         return h_alt + self.gate(h_social) * self.update(h_social)
