@@ -526,9 +526,11 @@ class HAINet(nn.Module):
                     h_fused_flat = h_fused_flat * (1 - mask) + h_fused_new * mask
                     condition_base = torch.cat([h_fused_flat, h_wind], dim=-1)
 
-        # --- Gate-based social fusion ---
+        # --- Gate-based social fusion (only for agents with neighbors) ---
         if h_social is not None:
-            condition = condition_base + self.social_gate(h_social) * self.social_proj(h_social)
+            social_contrib = self.social_gate(h_social) * self.social_proj(h_social)
+            social_contrib = social_contrib * has_neighbor.unsqueeze(-1).float()
+            condition = condition_base + social_contrib
         else:
             condition = condition_base
 
