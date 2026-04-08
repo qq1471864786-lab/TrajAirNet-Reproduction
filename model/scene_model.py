@@ -155,10 +155,14 @@ class CVAEDecoder(nn.Module):
         input_size = (num_labels + latent_size) if conditional else latent_size
 
         self.MLP = nn.Sequential()
+        num_layers = len(layer_sizes)
         for i, (in_size, out_size) in enumerate(zip([input_size] + layer_sizes[:-1], layer_sizes)):
             self.MLP.add_module(f"L{i}", nn.Linear(in_size, out_size))
-            # All layers use Tanh (matching ACTrajNet original)
-            self.MLP.add_module(f"A{i}", nn.Tanh())
+            if i < num_layers - 1:
+                self.MLP.add_module(f"A{i}", nn.ReLU())
+            else:
+                # Last layer: Tanh to bound output range
+                self.MLP.add_module(f"A{i}", nn.Tanh())
 
     def forward(self, c, z):
         if self.conditional:
