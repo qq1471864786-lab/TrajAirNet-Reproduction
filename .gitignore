@@ -11,6 +11,9 @@ dataset/
 save_model/
 saved_models/
 tmp/
+tmp_smoke_*/
+tmp_smoke_*
+__pycache__/
 
 .deploy_manifest.json
 .last_sync

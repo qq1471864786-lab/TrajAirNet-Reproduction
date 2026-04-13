@@ -23,6 +23,20 @@ def _safe_ratio(numerator, denominator):
     return numerator / denominator if abs(denominator) > 1e-12 else 0.0
 
 
+def _select_primary_metric(metrics):
+    for candidate in ("ADE_best5", "ADE", "ADE_1"):
+        if candidate in metrics:
+            return candidate
+    return next(iter(metrics.keys()))
+
+
+def _select_vertical_metric(metrics):
+    for candidate in ("z-ADE_best5", "z-ADE", "z-ADE_1"):
+        if candidate in metrics:
+            return candidate
+    return None
+
+
 def build_run_summary(history, best_epoch, best_metrics, best_checkpoint):
     if not history:
         return {
@@ -35,34 +49,43 @@ def build_run_summary(history, best_epoch, best_metrics, best_checkpoint):
     last = history[-1]
     diagnostics = []
     suggestions = []
+    primary_key = _select_primary_metric(best_metrics)
+    vertical_key = _select_vertical_metric(best_metrics)
 
-    ade_drop = first["metrics"]["ADE"] - best_metrics["ADE"]
-    aade_drop = first["metrics"]["AADE"] - best_metrics["AADE"]
+    primary_drop = first["metrics"][primary_key] - best_metrics[primary_key]
     best_epoch_ratio = _safe_ratio(best_epoch, len(history))
 
-    if best_epoch_ratio <= 0.35 and last["metrics"]["ADE"] > best_metrics["ADE"] * 1.10:
-        diagnostics.append("Best ADE appeared early and later epochs regressed, indicating instability or overfitting.")
+    if best_epoch_ratio <= 0.35 and last["metrics"][primary_key] > best_metrics[primary_key] * 1.10:
+        diagnostics.append(
+            f"Best {primary_key} appeared early and later epochs regressed, indicating instability or overfitting."
+        )
         suggestions.append("Try reducing learning rate or stopping earlier.")
 
-    if best_epoch == len(history) and last["metrics"]["ADE"] <= first["metrics"]["ADE"] * 0.75:
-        diagnostics.append("ADE was still improving at the last epoch.")
+    if best_epoch == len(history) and last["metrics"][primary_key] <= first["metrics"][primary_key] * 0.75:
+        diagnostics.append(f"{primary_key} was still improving at the last epoch.")
         suggestions.append("Increase epochs before changing architecture.")
 
-    if last["train_loss"] > first["train_loss"] * 0.90 and last["metrics"]["ADE"] > first["metrics"]["ADE"] * 0.90:
-        diagnostics.append("Training loss and ADE both improved only slightly.")
+    if last["train_loss"] > first["train_loss"] * 0.90 and last["metrics"][primary_key] > first["metrics"][primary_key] * 0.90:
+        diagnostics.append(f"Training loss and {primary_key} both improved only slightly.")
         suggestions.append("This run is likely undertrained or under-capacity.")
 
-    if best_metrics["ADE"] < last["metrics"]["ADE"] and best_metrics["AADE"] > last["metrics"]["AADE"]:
-        diagnostics.append("Trajectory and altitude objectives peaked at different epochs.")
-        suggestions.append("Recheck altitude_loss_weight because trajectory and height optimization are pulling in different directions.")
+    if (
+        vertical_key is not None
+        and best_metrics[primary_key] < last["metrics"][primary_key]
+        and best_metrics[vertical_key] > last["metrics"].get(vertical_key, best_metrics[vertical_key])
+    ):
+        diagnostics.append("Trajectory and vertical objectives peaked at different epochs.")
+        suggestions.append("Recheck state-conditioning strength because the main and vertical objectives are peaking at different epochs.")
 
-    if ade_drop <= 0:
-        diagnostics.append("ADE did not improve over the run.")
+    if primary_drop <= 0:
+        diagnostics.append(f"{primary_key} did not improve over the run.")
         suggestions.append("Check optimizer settings or data batching before changing the model.")
 
-    if aade_drop <= 0:
-        diagnostics.append("Altitude error did not improve over the run.")
-        suggestions.append("Check altitude supervision weight and vertical branch capacity.")
+    if vertical_key is not None:
+        vertical_drop = first["metrics"][vertical_key] - best_metrics[vertical_key]
+        if vertical_drop <= 0:
+            diagnostics.append(f"{vertical_key} did not improve over the run.")
+            suggestions.append("Check vertical-state features and conditioning strength.")
 
     if not diagnostics:
         diagnostics.append("Run behavior looked stable under the current training budget.")
@@ -73,6 +96,7 @@ def build_run_summary(history, best_epoch, best_metrics, best_checkpoint):
         "history_length": len(history),
         "best_epoch": best_epoch,
         "best_checkpoint": best_checkpoint,
+        "primary_metric": primary_key,
         "best_metrics": best_metrics,
         "last_epoch_metrics": last["metrics"],
         "last_train_loss": last["train_loss"],

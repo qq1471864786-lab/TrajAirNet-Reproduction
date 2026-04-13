@@ -72,6 +72,8 @@ def read_txt_file(path, delim=" "):
 
 
 class SceneTrajectoryDataset(Dataset):
+    CACHE_VERSION = 2
+
     def __init__(
         self,
         data_dir,
@@ -101,11 +103,24 @@ class SceneTrajectoryDataset(Dataset):
         if cache_path and os.path.isfile(cache_path):
             print(f"[Cache] loading from {cache_path}")
             cached = torch.load(cache_path, weights_only=False)
-            self.file_records = cached["file_records"]
-            self.sample_index = cached["sample_index"]
-            self.samples = self.sample_index
-            print(f"[Cache] ready  samples={len(self.sample_index):,}")
-            return
+            sample_index = cached.get("sample_index", [])
+            schema_ok = (
+                cached.get("cache_version") == self.CACHE_VERSION
+                and (
+                    len(sample_index) == 0
+                    or all(
+                        "agent_count" in sample and "future_vertical_range" in sample
+                        for sample in sample_index
+                    )
+                )
+            )
+            if schema_ok:
+                self.file_records = cached["file_records"]
+                self.sample_index = sample_index
+                self.samples = self.sample_index
+                print(f"[Cache] ready  samples={len(self.sample_index):,}")
+                return
+            print("[Cache] stale schema detected, rebuilding cache.")
 
         # --- Normal build ---
         file_names = sorted(os.listdir(data_dir))
@@ -140,7 +155,14 @@ class SceneTrajectoryDataset(Dataset):
         # --- Save cache ---
         if cache_path:
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            torch.save({"file_records": self.file_records, "sample_index": self.sample_index}, cache_path)
+            torch.save(
+                {
+                    "cache_version": self.CACHE_VERSION,
+                    "file_records": self.file_records,
+                    "sample_index": self.sample_index,
+                },
+                cache_path,
+            )
             print(f"[Cache] saved to {cache_path}")
 
     @staticmethod
@@ -149,7 +171,10 @@ class SceneTrajectoryDataset(Dataset):
         file_names = sorted(os.listdir(data_dir))
         if not file_names:
             return None
-        key_str = f"{data_dir}|{file_names}|{obs_len}|{pred_len}|{pred_step}|{skip}|{min_agents}"
+        key_str = (
+            f"{SceneTrajectoryDataset.CACHE_VERSION}|{data_dir}|{file_names}|"
+            f"{obs_len}|{pred_len}|{pred_step}|{skip}|{min_agents}"
+        )
         key_hash = hashlib.md5(key_str.encode()).hexdigest()[:12]
         cache_dir = os.path.join(data_dir, ".cache")
         return os.path.join(cache_dir, f"dataset_{key_hash}.pt")
@@ -182,6 +207,7 @@ class SceneTrajectoryDataset(Dataset):
             agent_ids = np.unique(window_data[:, 1])
 
             valid_agent_ids = []
+            future_vertical_ranges = []
 
             for agent_id in agent_ids:
                 agent_rows = window_data[window_data[:, 1] == agent_id]
@@ -197,6 +223,7 @@ class SceneTrajectoryDataset(Dataset):
                     continue
 
                 valid_agent_ids.append(agent_id)
+                future_vertical_ranges.append(float(future[2].max() - future[2].min()))
 
             if len(valid_agent_ids) < self.min_agents:
                 continue
@@ -206,6 +233,8 @@ class SceneTrajectoryDataset(Dataset):
                     "file_index": file_index,
                     "start_idx": start_idx,
                     "agent_ids": valid_agent_ids,
+                    "agent_count": len(valid_agent_ids),
+                    "future_vertical_range": max(future_vertical_ranges) if future_vertical_ranges else 0.0,
                 }
             )
 
@@ -242,6 +271,8 @@ class SceneTrajectoryDataset(Dataset):
             "target": torch.tensor(np.stack(fut_agents, axis=1), dtype=torch.float32),
             "context": torch.tensor(np.stack(ctx_agents, axis=1), dtype=torch.float32),
             "source_path": file_record["source_path"],
+            "agent_count": sample_meta["agent_count"],
+            "future_vertical_range": sample_meta["future_vertical_range"],
         }
 
 
@@ -256,12 +287,16 @@ def scene_batch_collate(batch):
     scene_ids = []
     scene_slices = []
     source_paths = []
+    agent_counts = []
+    future_vertical_ranges = []
     start = 0
     for scene_index, item in enumerate(batch):
         agent_count = item["obs"].shape[1]
         scene_ids.append(torch.full((agent_count,), scene_index, dtype=torch.long))
         scene_slices.append((start, start + agent_count))
         source_paths.append(item["source_path"])
+        agent_counts.append(item["agent_count"])
+        future_vertical_ranges.append(item["future_vertical_range"])
         start += agent_count
 
     return {
@@ -271,5 +306,7 @@ def scene_batch_collate(batch):
         "scene_ids": torch.cat(scene_ids, dim=0),
         "scene_slices": torch.tensor(scene_slices, dtype=torch.long),
         "scene_count": len(batch),
+        "agent_counts": torch.tensor(agent_counts, dtype=torch.long),
+        "future_vertical_ranges": torch.tensor(future_vertical_ranges, dtype=torch.float32),
         "source_path": source_paths,
     }

@@ -9,9 +9,9 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from model import (
-    HAINet,
-    HAINetLoss,
     SceneTrajectoryDataset,
+    TrajectoryForecastLoss,
+    VerticalRelationTrajectoryModel,
     average_metric_sums,
     init_metric_sums,
     metric_totals,
@@ -21,18 +21,6 @@ from model import (
     update_metric_sums,
 )
 from model.run_logging import RunRecorder
-
-
-def format_metrics(metrics):
-    ordered_names = ("ADE", "FDE", "MDE", "AADE", "AFDE", "AMDE")
-    return " | ".join(f"{name}={metrics[name]:.4f}" for name in ordered_names)
-
-
-def format_epoch_header(epoch, total_epochs, train_loss, train_batches, eval_scenes):
-    return (
-        f"[Epoch {epoch:03d}/{total_epochs:03d}] "
-        f"loss={train_loss:.4f} | train_batches={train_batches} | eval_scenes={eval_scenes}"
-    )
 
 
 def progress_enabled():
@@ -49,9 +37,30 @@ def green_text(text):
     return f"\033[92m{text}\033[0m"
 
 
+def format_epoch_header(epoch, total_epochs, train_loss, train_batches, eval_scenes):
+    return (
+        f"[Epoch {epoch:03d}/{total_epochs:03d}] "
+        f"loss={train_loss:.4f} | train_batches={train_batches} | eval_scenes={eval_scenes}"
+    )
+
+
+def format_metrics(metrics):
+    keys = (
+        "ADE_best5",
+        "FDE_best5",
+        "MDE_best5",
+        "ADE_1",
+        "FDE_1",
+        "multi_agent_ADE_best5",
+        "strong_vertical_ADE_best5",
+        "z-ADE_best5",
+    )
+    return " | ".join(f"{key}={metrics[key]:.4f}" for key in keys if key in metrics)
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(description="Train HAINet")
-    # Data
+    parser = argparse.ArgumentParser(description="Train TrajAir rebuild model")
+
     parser.add_argument("--dataset_variant", type=str, default="social", choices=["social", "no_social"])
     parser.add_argument("--dataset_name", type=str, default="7days1")
     parser.add_argument("--obs", type=int, default=11)
@@ -67,51 +76,41 @@ def build_parser():
     parser.add_argument("--min_train_agents", type=int, default=1)
     parser.add_argument("--min_eval_agents", type=int, default=1)
 
-    # Model architecture
+    parser.add_argument("--variant", type=str, default="base", choices=["base", "interaction", "state", "full", "naive"])
+    parser.add_argument("--protocol", type=str, default="bestof5", choices=["bestof5", "single"])
     parser.add_argument("--tcn_channels", type=int, default=256)
-    parser.add_argument("--tcn_layers", type=int, default=2)
+    parser.add_argument("--context_hidden", type=int, default=32)
+    parser.add_argument("--state_hidden", type=int, default=128)
+    parser.add_argument("--interaction_hidden", type=int, default=256)
+    parser.add_argument("--interaction_heads", type=int, default=8)
+    parser.add_argument("--interaction_topk", type=int, default=3)
+    parser.add_argument("--interaction_integration", type=str, default="concat", choices=["concat", "residualgate"])
+    parser.add_argument("--social_scale_init", type=float, default=None)
+    parser.add_argument("--state_scale_init", type=float, default=None)
     parser.add_argument("--tcn_kernel", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--gat_hidden", type=int, default=256)
-    parser.add_argument("--gat_heads", type=int, default=8)
-    parser.add_argument("--gat_dropout", type=float, default=0.05)
     parser.add_argument("--cvae_latent", type=int, default=128)
-    parser.add_argument("--cvae_hidden", type=int, default=128)
     parser.add_argument("--cvae_layers", type=int, default=2)
     parser.add_argument("--cvae_channel_size", type=int, default=128)
-    parser.add_argument("--mlp_layer", type=int, default=32)
-    parser.add_argument("--condition_dropout", type=float, default=0.1)
+    parser.add_argument("--condition_dropout", type=float, default=0.0)
 
-    # Ablation switches (only 3, clean)
-    parser.add_argument("--disable_interaction", action="store_true",
-                        help="Remove AC-GAT (like ACTrajNet)")
-    parser.add_argument("--disable_height_conditioning", action="store_true",
-                        help="Remove altitude bias in GAT attention")
-    parser.add_argument("--disable_height_feedback", action="store_true",
-                        help="Remove interaction->height feedback (single direction)")
-
-    # Training
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--min_lr", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=3e-4)
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["none", "cosine"])
-    parser.add_argument("--kl_weight", type=float, default=1.0)  # ACTrajNet original: implicit 1.0
-    parser.add_argument("--free_bits", type=float, default=0.1,
-                        help="Free-bits KL floor per latent dimension")
-    parser.add_argument("--kl_anneal_epochs", type=int, default=20,
-                        help="KL annealing ramp epochs (0=no annealing)")
-    parser.add_argument("--grad_clip", type=float, default=5.0,
-                        help="Max gradient norm for clipping")
-    parser.add_argument("--patience", type=int, default=15,
-                        help="Early stopping patience (0=disabled)")
+    parser.add_argument("--kl_weight", type=float, default=1.0)
+    parser.add_argument("--free_bits", type=float, default=0.1)
+    parser.add_argument("--kl_anneal_epochs", type=int, default=20)
+    parser.add_argument("--vertical_loss_weight", type=float, default=0.0)
+    parser.add_argument("--endpoint_loss_weight", type=float, default=0.0)
+    parser.add_argument("--grad_clip", type=float, default=5.0)
+    parser.add_argument("--patience", type=int, default=20)
 
-    # Evaluation
-    parser.add_argument("--best_of_n", type=int, default=5,
-                        help="Best-of-N sampling at test time")
+    parser.add_argument("--best_of_n", type=int, default=5)
+    parser.add_argument("--subset_vertical_quantile", type=float, default=0.70)
 
-    # Misc
-    parser.add_argument("--save_dir", type=str, default="save_model")
+    parser.add_argument("--save_dir", type=str, default="save_model_rebuild")
     parser.add_argument("--save_name", type=str, default="")
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
@@ -119,7 +118,9 @@ def build_parser():
     parser.add_argument("--disable_shuffle", action="store_true")
     parser.add_argument("--multi_agent_weight", type=float, default=None)
     parser.add_argument(
-        "--multi_agent_weight_mode", type=str, default="binary",
+        "--multi_agent_weight_mode",
+        type=str,
+        default="binary",
         choices=["binary", "linear", "pair_count"],
     )
     return parser
@@ -151,10 +152,16 @@ def build_dataloader(project_root, args, split):
     loader_generator.manual_seed(args.seed + (0 if split == "train" else 10_000))
     sampler = None
     shuffle = split == "train" and not args.disable_shuffle
-    has_multi_agent_scene = any(len(s["agent_ids"]) > 1 for s in dataset.sample_index)
-    if split == "train" and args.multi_agent_weight > 1.0 and has_multi_agent_scene:
+    has_multi_agent_scene = any(sample["agent_count"] > 1 for sample in dataset.sample_index)
+
+    if (
+        split == "train"
+        and args.multi_agent_weight is not None
+        and args.multi_agent_weight > 1.0
+        and has_multi_agent_scene
+    ):
         def sample_weight(sample_meta):
-            agent_count = len(sample_meta["agent_ids"])
+            agent_count = sample_meta["agent_count"]
             if agent_count <= 1:
                 return 1.0
             if args.multi_agent_weight_mode == "binary":
@@ -164,7 +171,7 @@ def build_dataloader(project_root, args, split):
             pair_count = agent_count * (agent_count - 1) / 2.0
             return 1.0 + pair_count * (args.multi_agent_weight - 1.0)
 
-        sample_weights = [sample_weight(s) for s in dataset.sample_index]
+        sample_weights = [sample_weight(sample) for sample in dataset.sample_index]
         sampler = WeightedRandomSampler(
             weights=torch.tensor(sample_weights, dtype=torch.double),
             num_samples=len(sample_weights),
@@ -172,6 +179,7 @@ def build_dataloader(project_root, args, split):
             generator=loader_generator,
         )
         shuffle = False
+
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -198,30 +206,38 @@ def select_device(device_arg):
 
 
 def build_model(args):
-    return HAINet(
+    return VerticalRelationTrajectoryModel(
+        variant=args.variant,
         obs_len=args.obs,
         pred_len=args.preds,
         pred_step=args.preds_step,
-        tcn_channel_size=args.tcn_channels,
-        tcn_layers=args.tcn_layers,
+        traj_hidden=args.tcn_channels,
+        context_hidden=args.context_hidden,
+        state_hidden=args.state_hidden,
+        interaction_hidden=args.interaction_hidden,
+        interaction_heads=args.interaction_heads,
+        interaction_topk=args.interaction_topk,
         tcn_kernel=args.tcn_kernel,
         dropout=args.dropout,
-        cvae_hidden=args.cvae_latent,
+        cvae_latent=args.cvae_latent,
         cvae_layers=args.cvae_layers,
         cvae_channel_size=args.cvae_channel_size,
-        mlp_layer=args.mlp_layer,
-        gat_hidden=args.gat_hidden,
-        gat_heads=args.gat_heads,
-        gat_dropout=args.gat_dropout,
         condition_dropout=args.condition_dropout,
-        use_interaction=not args.disable_interaction,
-        use_height_conditioning=not args.disable_height_conditioning,
-        use_height_feedback=not args.disable_height_feedback,
+        state_scale_init=args.state_scale_init,
+        social_scale_init=args.social_scale_init,
+        interaction_integration=args.interaction_integration,
     )
 
 
 def checkpoint_dir(args):
-    return os.path.join(args.save_dir, args.dataset_variant, args.dataset_name, str(args.seed))
+    return os.path.join(
+        args.save_dir,
+        args.variant,
+        args.protocol,
+        args.dataset_variant,
+        args.dataset_name,
+        str(args.seed),
+    )
 
 
 def checkpoint_path(args):
@@ -237,68 +253,151 @@ def move_batch_to_device(batch, device):
         "scene_ids": batch["scene_ids"].to(device, non_blocking=True),
         "scene_slices": batch["scene_slices"].to(device, non_blocking=True),
         "scene_count": batch["scene_count"],
+        "agent_counts": batch["agent_counts"].to(device, non_blocking=True),
+        "future_vertical_ranges": batch["future_vertical_ranges"].to(device, non_blocking=True),
         "source_path": batch["source_path"],
     }
 
 
-def get_kl_weight(epoch, anneal_epochs, max_weight, cyclical=True, n_cycles=4, total_epochs=50):
-    """
-    KL annealing schedule.
-    cyclical=True: cyclical annealing (Fu et al. 2019) — prevents KL collapse
-    cyclical=False: linear annealing 0 -> max_weight over anneal_epochs
-    """
+def get_kl_weight(epoch, anneal_epochs, max_weight):
     if anneal_epochs <= 0:
-        return max_weight
-    if cyclical:
-        cycle_len = total_epochs / n_cycles
-        pos_in_cycle = (epoch - 1) % cycle_len
-        ramp = cycle_len * 0.5  # first half ramps up, second half stays
-        if pos_in_cycle < ramp:
-            return (pos_in_cycle / ramp) * max_weight
         return max_weight
     return min(1.0, epoch / anneal_epochs) * max_weight
 
 
-def evaluate_best_of_n(model, loader, device, n_samples=5, limit_batches=0, desc="Eval"):
-    """Best-of-N evaluation with per-agent sample selection."""
+def compute_vertical_threshold(dataset, quantile):
+    ranges = [sample["future_vertical_range"] for sample in dataset.sample_index]
+    if not ranges:
+        return 0.0
+    return float(np.quantile(np.asarray(ranges, dtype=np.float32), quantile))
+
+
+def flatten_metrics(metric_groups):
+    flattened = {}
+    for subset_name, protocol_metrics in metric_groups.items():
+        subset_prefix = "" if subset_name == "all" else f"{subset_name}_"
+        for protocol_name, metrics in protocol_metrics.items():
+            protocol_suffix = "best5" if protocol_name == "best5" else "1"
+            for metric_name, value in metrics.items():
+                flattened[f"{subset_prefix}{metric_name}_{protocol_suffix}"] = value
+    return flattened
+
+
+def empty_metric_groups():
+    return {
+        subset_name: {
+            "best5": init_metric_sums(),
+            "single": init_metric_sums(),
+        }
+        for subset_name in ("all", "multi_agent", "strong_vertical")
+    }
+
+
+def empty_count_groups():
+    return {
+        subset_name: {
+            "best5": 0,
+            "single": 0,
+        }
+        for subset_name in ("all", "multi_agent", "strong_vertical")
+    }
+
+
+def subset_masks(batch, vertical_threshold):
+    multi_agent_mask = batch["agent_counts"] >= 2
+    strong_vertical_mask = batch["future_vertical_ranges"] >= vertical_threshold
+    return {
+        "all": torch.ones(batch["scene_count"], dtype=torch.bool, device=batch["obs"].device),
+        "multi_agent": multi_agent_mask,
+        "strong_vertical": strong_vertical_mask,
+    }
+
+
+def evaluate_model(model, loader, device, best_of_n, vertical_threshold, limit_batches=0, desc="Eval"):
     model.eval()
-    metric_sums = init_metric_sums()
-    processed_batches = 0
-    total_agents = 0
+    metric_groups = empty_metric_groups()
+    count_groups = empty_count_groups()
     total_scenes = 0
     diversity_sum = 0.0
     diversity_count = 0
+
     with torch.no_grad():
         for raw_batch in tqdm(
-            loader, desc=desc, unit="batch",
-            disable=not progress_enabled(), leave=False,
-            dynamic_ncols=True, ascii=True, mininterval=0.5,
+            loader,
+            desc=desc,
+            unit="batch",
+            disable=not progress_enabled(),
+            leave=False,
+            dynamic_ncols=True,
+            ascii=True,
+            mininterval=0.5,
             bar_format="{desc:<12} {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
         ):
-            if limit_batches and processed_batches >= limit_batches:
+            if limit_batches and total_scenes >= limit_batches * loader.batch_size:
                 break
             batch = move_batch_to_device(raw_batch, device)
-            obs = batch["obs"]
             target = batch["target"]
-            context = batch["context"]
-            scene_ids = batch["scene_ids"]
             scene_slices = batch["scene_slices"]
 
-            best_prediction, sample_diversity = select_best_of_n_prediction(
-                model, obs, target, context, scene_ids, scene_slices, n_samples
+            single_prediction = model(
+                batch["obs"],
+                batch["context"],
+                target=None,
+                scene_ids=batch["scene_ids"],
+                scene_slices=batch["scene_slices"],
+                latent_mode="zero",
             )
 
-            if n_samples > 1:
+            if best_of_n > 1:
+                best_prediction, sample_diversity = select_best_of_n_prediction(
+                    model,
+                    batch["obs"],
+                    target,
+                    batch["context"],
+                    batch["scene_ids"],
+                    batch["scene_slices"],
+                    best_of_n,
+                )
                 diversity_sum += sample_diversity
                 diversity_count += 1
+            else:
+                best_prediction = single_prediction
+                sample_diversity = 0.0
 
-            batch_metric_totals, agent_count = metric_totals(best_prediction, target, scene_slices)
-            update_metric_sums(metric_sums, batch_metric_totals)
-            processed_batches += 1
-            total_agents += agent_count
+            masks = subset_masks(batch, vertical_threshold)
+            predictions = {
+                "best5": best_prediction,
+                "single": single_prediction,
+            }
+
+            for subset_name, scene_mask in masks.items():
+                for protocol_name, prediction in predictions.items():
+                    totals, scene_count = metric_totals(
+                        prediction,
+                        target,
+                        scene_slices=scene_slices,
+                        scene_mask=scene_mask,
+                    )
+                    update_metric_sums(metric_groups[subset_name][protocol_name], totals)
+                    count_groups[subset_name][protocol_name] += scene_count
+
             total_scenes += batch["scene_count"]
-    avg_diversity = diversity_sum / max(diversity_count, 1)
-    return average_metric_sums(metric_sums, total_agents), total_scenes, avg_diversity
+
+    averaged = {
+        subset_name: {
+            protocol_name: average_metric_sums(metrics, count_groups[subset_name][protocol_name])
+            for protocol_name, metrics in protocol_metrics.items()
+        }
+        for subset_name, protocol_metrics in metric_groups.items()
+    }
+    flattened = flatten_metrics(averaged)
+    subset_counts = {
+        f"{subset_name}_{protocol_name}_scenes": count_groups[subset_name][protocol_name]
+        for subset_name in count_groups
+        for protocol_name in count_groups[subset_name]
+    }
+    average_diversity = diversity_sum / max(diversity_count, 1)
+    return flattened, subset_counts, total_scenes, average_diversity
 
 
 def main():
@@ -316,6 +415,9 @@ def main():
 
         train_loader = build_dataloader(project_root, args, "train")
         test_loader = build_dataloader(project_root, args, "test")
+        vertical_threshold = compute_vertical_threshold(train_loader.dataset, args.subset_vertical_quantile)
+        print(f"[Eval] strong_vertical threshold={vertical_threshold:.6f} (quantile={args.subset_vertical_quantile:.2f})")
+
         recorder = RunRecorder(
             checkpoint_dir(args),
             vars(args),
@@ -323,30 +425,31 @@ def main():
                 "device": str(device),
                 "train_scenes": len(train_loader.dataset),
                 "test_scenes": len(test_loader.dataset),
+                "vertical_threshold": vertical_threshold,
             },
         )
 
         model = build_model(args).to(device)
-        param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[Model] HAINet | params={param_count:,} | device={device}")
-        print(f"[Model] interaction={not args.disable_interaction} | "
-              f"height_cond={not args.disable_height_conditioning} | "
-              f"height_feedback={not args.disable_height_feedback}")
+        param_count = sum(param.numel() for param in model.parameters() if param.requires_grad)
+        print(f"[Model] variant={args.variant} | params={param_count:,} | device={device}")
 
-        criterion = HAINetLoss(
+        criterion = TrajectoryForecastLoss(
             kl_weight=args.kl_weight,
             free_bits=args.free_bits,
+            vertical_loss_weight=args.vertical_loss_weight,
+            endpoint_loss_weight=args.endpoint_loss_weight,
         )
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
-        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
         scheduler = None
         if args.lr_scheduler == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=args.epochs, eta_min=args.min_lr,
+                optimizer,
+                T_max=args.epochs,
+                eta_min=args.min_lr,
             )
 
-        best_ade = float("inf")
+        primary_key = "ADE_best5" if args.protocol == "bestof5" else "ADE_1"
+        best_primary = float("inf")
         best_metrics = None
         best_epoch = 0
         save_path = checkpoint_path(args)
@@ -356,26 +459,29 @@ def main():
             epoch_loss = 0.0
             epoch_recon = 0.0
             epoch_kl = 0.0
+            epoch_vertical = 0.0
+            epoch_endpoint = 0.0
             batch_count = 0
-            # Diagnostic accumulators
-            diag_acc_abs_sum = 0.0
-            diag_acc_abs_max = 0.0
+            diag_delta_abs_sum = 0.0
+            diag_delta_abs_max = 0.0
             diag_mu_sum = 0.0
             diag_mu_sq_sum = 0.0
             diag_logvar_sum = 0.0
             diag_logvar_sq_sum = 0.0
             diag_latent_count = 0
             diag_grad_norm_sum = 0.0
-            kl_w = get_kl_weight(epoch, args.kl_anneal_epochs, args.kl_weight,
-                                 cyclical=False, n_cycles=4, total_epochs=args.epochs)
-            criterion.kl_weight = kl_w
+
+            criterion.kl_weight = get_kl_weight(epoch, args.kl_anneal_epochs, args.kl_weight)
 
             for raw_batch in tqdm(
                 train_loader,
                 desc=f"Train {epoch:03d}/{args.epochs:03d}",
                 unit="batch",
-                disable=not progress_enabled(), leave=False,
-                dynamic_ncols=True, ascii=True, mininterval=0.5,
+                disable=not progress_enabled(),
+                leave=False,
+                dynamic_ncols=True,
+                ascii=True,
+                mininterval=0.5,
                 bar_format="{desc:<12} {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
             ):
                 if args.limit_train_batches and batch_count >= args.limit_train_batches:
@@ -383,22 +489,22 @@ def main():
                 batch = move_batch_to_device(raw_batch, device)
                 optimizer.zero_grad()
 
-                prediction, mu, logvar, acc = model(
-                    batch["obs"], batch["context"],
+                prediction, mu, logvar, decoded_deltas = model(
+                    batch["obs"],
+                    batch["context"],
                     target=batch["target"],
                     scene_ids=batch["scene_ids"],
                     scene_slices=batch["scene_slices"],
                 )
-                loss, recon, kl = criterion(prediction, batch["target"], mu, logvar)
+                loss, recon, kl, vertical_aux, endpoint_aux = criterion(prediction, batch["target"], mu, logvar)
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
 
-                # Collect diagnostics
                 with torch.no_grad():
-                    acc_abs = acc.abs()
-                    diag_acc_abs_sum += acc_abs.mean().item()
-                    diag_acc_abs_max = max(diag_acc_abs_max, acc_abs.max().item())
+                    delta_abs = decoded_deltas.abs()
+                    diag_delta_abs_sum += delta_abs.mean().item()
+                    diag_delta_abs_max = max(diag_delta_abs_max, delta_abs.max().item())
                     diag_mu_sum += mu.mean().item()
                     diag_mu_sq_sum += (mu ** 2).mean().item()
                     diag_logvar_sum += logvar.mean().item()
@@ -409,79 +515,109 @@ def main():
                 epoch_loss += loss.item()
                 epoch_recon += recon.item()
                 epoch_kl += kl.item()
+                epoch_vertical += vertical_aux.item()
+                epoch_endpoint += endpoint_aux.item()
                 batch_count += 1
 
-            test_metrics, eval_scene_count, sample_diversity = evaluate_best_of_n(
-                model, test_loader, device,
-                n_samples=args.best_of_n,
+            eval_metrics, subset_counts, eval_scene_count, sample_diversity = evaluate_model(
+                model,
+                test_loader,
+                device,
+                best_of_n=args.best_of_n,
+                vertical_threshold=vertical_threshold,
                 limit_batches=args.limit_eval_batches,
                 desc=f"Eval  {epoch:03d}/{args.epochs:03d}",
             )
+
             train_loss = epoch_loss / max(batch_count, 1)
             train_recon = epoch_recon / max(batch_count, 1)
             train_kl = epoch_kl / max(batch_count, 1)
+            train_vertical = epoch_vertical / max(batch_count, 1)
+            train_endpoint = epoch_endpoint / max(batch_count, 1)
 
             if diag_latent_count > 0:
-                avg_acc_abs = diag_acc_abs_sum / diag_latent_count
+                avg_delta_abs = diag_delta_abs_sum / diag_latent_count
                 avg_mu = diag_mu_sum / diag_latent_count
                 avg_mu_sq = diag_mu_sq_sum / diag_latent_count
-                mu_std = max(0, avg_mu_sq - avg_mu ** 2) ** 0.5
+                mu_std = max(0.0, avg_mu_sq - avg_mu ** 2) ** 0.5
                 avg_logvar = diag_logvar_sum / diag_latent_count
                 avg_logvar_sq = diag_logvar_sq_sum / diag_latent_count
-                logvar_std = max(0, avg_logvar_sq - avg_logvar ** 2) ** 0.5
-                avg_grad = diag_grad_norm_sum / batch_count
+                logvar_std = max(0.0, avg_logvar_sq - avg_logvar ** 2) ** 0.5
+                avg_grad = diag_grad_norm_sum / max(batch_count, 1)
             else:
-                avg_acc_abs = avg_mu = mu_std = avg_logvar = logvar_std = avg_grad = 0.0
+                avg_delta_abs = avg_mu = mu_std = avg_logvar = logvar_std = avg_grad = 0.0
 
             recorder.log_epoch(
                 epoch=epoch,
                 train_loss=train_loss,
-                metrics=test_metrics,
+                metrics=eval_metrics,
                 train_batches=batch_count,
                 eval_scenes=eval_scene_count,
                 best_epoch=best_epoch,
                 best_metrics=best_metrics,
                 best_checkpoint=save_path if best_metrics is not None else None,
                 model_state={
-                    "kl_weight": kl_w, "recon": train_recon, "kl": train_kl,
-                    "acc_mean": avg_acc_abs, "acc_max": diag_acc_abs_max,
-                    "mu_mean": avg_mu, "logvar_mean": avg_logvar,
-                    "grad_norm": avg_grad, "bo_n_diversity": sample_diversity,
+                    "kl_weight": criterion.kl_weight,
+                    "recon": train_recon,
+                    "kl": train_kl,
+                    "vertical_aux": train_vertical,
+                    "endpoint_aux": train_endpoint,
+                    "delta_mean": avg_delta_abs,
+                    "delta_max": diag_delta_abs_max,
+                    "mu_mean": avg_mu,
+                    "logvar_mean": avg_logvar,
+                    "grad_norm": avg_grad,
+                    "best_of_n_diversity": sample_diversity,
+                    **subset_counts,
                 },
             )
-            print(format_epoch_header(epoch, args.epochs, train_loss, batch_count, eval_scene_count))
-            print(f"  loss    | recon={train_recon:.4f} | kl={train_kl:.4f} | kl_w={kl_w:.3f}")
-            print(f"  metrics | {format_metrics(test_metrics)}")
-            print(f"  diag    | acc_mean={avg_acc_abs:.6f} acc_max={diag_acc_abs_max:.6f} grad={avg_grad:.4f}")
-            print(f"  diag    | mu={avg_mu:.4f}({mu_std:.4f}) logvar={avg_logvar:.4f}({logvar_std:.4f}) bo{args.best_of_n}_div={sample_diversity:.6f}")
 
-            if test_metrics["ADE"] < best_ade:
-                best_ade = test_metrics["ADE"]
-                best_metrics = test_metrics
+            print(format_epoch_header(epoch, args.epochs, train_loss, batch_count, eval_scene_count))
+            print(
+                f"  loss    | recon={train_recon:.4f} | kl={train_kl:.4f} | "
+                f"vert={train_vertical:.4f} | end={train_endpoint:.4f} | "
+                f"kl_w={criterion.kl_weight:.3f}"
+            )
+            print(f"  metrics | {format_metrics(eval_metrics)}")
+            print(
+                "  diag    | "
+                f"delta_mean={avg_delta_abs:.6f} delta_max={diag_delta_abs_max:.6f} "
+                f"grad={avg_grad:.4f} bo{args.best_of_n}_div={sample_diversity:.6f}"
+            )
+            print(
+                "  diag    | "
+                f"mu={avg_mu:.4f}({mu_std:.4f}) logvar={avg_logvar:.4f}({logvar_std:.4f})"
+            )
+
+            if eval_metrics[primary_key] < best_primary:
+                best_primary = eval_metrics[primary_key]
+                best_metrics = eval_metrics
                 best_epoch = epoch
                 torch.save(
                     {
                         "args": vars(args),
                         "model_state_dict": model.state_dict(),
-                        "metrics": test_metrics,
+                        "metrics": eval_metrics,
+                        "vertical_threshold": vertical_threshold,
                     },
                     save_path,
                 )
                 recorder.log_checkpoint(
-                    epoch=epoch, checkpoint_path=save_path,
-                    metrics=test_metrics, reason="best_ade",
+                    epoch=epoch,
+                    checkpoint_path=save_path,
+                    metrics=eval_metrics,
+                    reason=f"best_{primary_key}",
                 )
-                print(green_text(f"  best    | epoch={best_epoch:03d} | {format_metrics(best_metrics)}"))
+                print(green_text(f"  best    | epoch={best_epoch:03d} | {primary_key}={best_metrics[primary_key]:.4f}"))
                 print(f"  save    | {save_path}")
             elif best_metrics is not None:
                 no_improve = epoch - best_epoch
                 patience_str = f" | patience {no_improve}/{args.patience}" if args.patience > 0 else ""
-                print(f"  best    | epoch={best_epoch:03d} | {format_metrics(best_metrics)}{patience_str}")
+                print(green_text(f"  best    | epoch={best_epoch:03d} | {primary_key}={best_metrics[primary_key]:.4f}{patience_str}"))
 
             if scheduler is not None:
                 scheduler.step()
 
-            # Early stopping
             if args.patience > 0 and (epoch - best_epoch) >= args.patience:
                 print(green_text(f"  early stop | no improvement for {args.patience} epochs since epoch {best_epoch}"))
                 break
@@ -490,7 +626,7 @@ def main():
             summary = recorder.finalize(best_epoch, best_metrics, save_path)
             print(green_text(f"Best checkpoint: {save_path}"))
             print(green_text(f"Best epoch: {best_epoch}"))
-            print(green_text(f"Best metrics: {format_metrics(best_metrics)}"))
+            print(green_text(f"Best {primary_key}: {best_metrics[primary_key]:.4f}"))
             print("Run summary:", os.path.join(checkpoint_dir(args), "run_summary.json"))
             if summary.get("diagnostics"):
                 print("Diagnostics:", " | ".join(summary["diagnostics"]))
@@ -502,9 +638,11 @@ def main():
         if recorder is not None:
             recorder.finalize_incomplete("failed", f"{type(exc).__name__}: {exc}")
         crash_log = os.path.join(checkpoint_dir(args), "crash.log")
-        with open(crash_log, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(crash_log), exist_ok=True)
+        with open(crash_log, "w", encoding="utf-8") as handle:
             import traceback
-            traceback.print_exc(file=f)
+
+            traceback.print_exc(file=handle)
         raise
 
 
