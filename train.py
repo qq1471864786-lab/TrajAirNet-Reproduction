@@ -462,8 +462,11 @@ def supports_color():
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
-def has_best_ade_update(best_updates):
-    return any(item.get("metric_key", "").startswith("ADE@") for item in best_updates)
+def has_main_line_best_update(best_updates):
+    return any(
+        item.get("metric_key", "").startswith("ADE@")
+        for item in best_updates
+    )
 
 
 def maybe_green(text, enabled):
@@ -527,15 +530,6 @@ def _metric_lines(args, metrics):
     return eval_main, eval_aux
 
 
-def format_best_update(update):
-    metric_key = update.get("metric_key", "?")
-    previous_value = update.get("previous_value")
-    new_value = update.get("value")
-    if previous_value is None or math.isinf(previous_value):
-        return f"{metric_key}=new->{format_scalar(new_value)}"
-    return f"{metric_key}={format_scalar(previous_value)}->{format_scalar(new_value)}"
-
-
 def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss_stats, metrics, lr, memory_mb, best_updates):
     train_parts = [
         f"total={format_scalar(train_loss)}",
@@ -551,16 +545,16 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
     eval_main, eval_aux = _metric_lines(args, metrics)
-    best_text = ", ".join(format_best_update(item) for item in best_updates) if best_updates else "none"
+    best_text = ", ".join(item.get("metric_key", "?") for item in best_updates) if best_updates else "none"
     header = (
         f"[Epoch {epoch:03d}/{total_epochs:03d}] phase={phase_name} "
         f"lr={lr:.2e} mem={memory_mb:.0f}MB best_update={best_text}"
     )
     return "\n".join(
         [
-            maybe_green(header, has_best_ade_update(best_updates)),
+            header,
             f"  train_loss: {' '.join(train_parts)}",
-            f"  eval_main : {' '.join(eval_main)}",
+            maybe_green(f"  eval_main : {' '.join(eval_main)}", has_main_line_best_update(best_updates)),
             f"  eval_aux  : {' '.join(eval_aux)}",
         ]
     )
