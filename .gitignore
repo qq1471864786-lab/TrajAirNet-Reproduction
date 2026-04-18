@@ -9,16 +9,21 @@ __pycache__/
 
 dataset/
 save_model/
+save_model_piq/
 saved_models/
 tmp/
 tmp_smoke_*/
 tmp_smoke_*
 __pycache__/
+model/__pycache__/
+dataset/**/.cache/
 
 .deploy_manifest.json
 .last_sync
 crash.log
 nohup.out
+.remote_sync_state.json
+.remote_runs/
 
 .pytest_cache/
 .mypy_cache/

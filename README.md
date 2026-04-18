@@ -1,97 +1,85 @@
-# ACTrajNet
+# ProtoBasis-Flight
 
-## introduction
+Current active project:
 
-This repository provides the source code for the paper **"Altitude-Aware Trajectory Prediction Methods for Non-Towered Terminal Airspace"**, which presents an altitude-aware trajectory prediction approach. The method independently extracts altitude features using a temporal convolutional network (TCN) and employs a channel attention fusion mechanism to dynamically integrate altitude features into different trajectory representation channels. This significantly enhances the model’s ability to capture complex flight patterns in the vertical dimension. The specific structure of the proposed model is as follows:
+- `ProtoBasis-Flight (Prototype-Conditioned Residual Basis Query Network for Terminal Airspace Forecasting)`
 
-![1](images/1.jpg)
+Current default protocol:
 
+- `protocol_name = trajair_40to120_best20`
+- `dataset_variant = social`
+- `dataset_name = 111_days`
+- `obs = 40`
+- `preds = 120`
+- `max_agents = 7`
+- `topk_proto = 5`
+- `micro_per_proto = 4`
+- `basis_dim = 16`
+- `best@5 / best@20`
 
-## Repository Structure
+Current default training command:
 
-```markdown
-dataset
-│  7days1_no_social
-│  ├─test (Archive for the test data)
-│  └─train (Archive for the training data)
-│  7days2_no_social
-│  ├─test (Archive for the test data)
-│  └─train (Archive for the training data)
-│  7days3_no_social
-│  ├─test (Archive for the test data)
-│  └─train (Archive for the training data)
-│  7days4_no_social
-│  ├─test (Archive for the test data)
-│  └─train (Archive for the training data)
-├─model
-│  CAF_bilstm.py
-│  CAF_lstm.py
-│  CAF_tcn.py
-│  cave_base.py
-│  gat_layers.py
-│  gat_model.py
-│  HCC_bilstm.py
-│  HCC_lstm.py
-│  HCC_tcn.py
-│  lstm_model.py
-│  tcn_model.py
-│  utils.py
-│  VCC_bilstm.py
-│  VCC_lstm.py
-│  VCC_tcn.py
-├─save_models
-├─requirements.txt
-├─test.py
-├─train.py
-└─images
+```bash
+python train.py --dataset_variant social --dataset_name 111_days
 ```
 
-## Package Requirements
+Current default evaluation command:
 
-- Python == 3.8.10
-- torch == 2.2.2+cu121
-- geographiclib==2.0
-- metar==1.11.0
-- numpy==1.23.5
-- pandas==1.5.3
-- scipy==1.6.3
-- tqdm==4.64.1
-
-# Instructions
-
-## installation
-
-### clone this repository
-
-```shell
-git clone https://github.com/zhixiangbaipiao/ACTrajNet.git
+```bash
+python test.py --checkpoint save_model/111_days/seed3407/last.pt --dataset_variant social --dataset_name 111_days
 ```
 
-### Create proper software and hardware environment
+Primary reported metrics:
 
-You are recommended to create a conda environment with the package requirements mentioned above, and conduct the training and test on the suggested system configurations.
+- `ADE@5`
+- `FDE@5`
+- `ADE@20`
+- `FDE@20`
+- `GLeV_report@5`
+- `GLeV_report@20`
+- `GLeV_raw@5`
+- `GLeV_raw@20`
+- `rare_FDE@20`
 
-### Training
+Ablation switches:
 
-The training script is provided by `train.py` for the flight trajectory prediction. The arguments for the training process are defined bellow:
+- `--disable_social`
+- `--disable_router`
+- `--disable_refiner`
 
-To train the ACTrajNet, use the following command, There are three types of `model_arch`: VCC, HCC, and CAF, corresponding to the three different fusion mechanisms mentioned in the article. There are also three types of `model_type`: TCN, BiLSTM, and LSTM, corresponding to the three different altitude feature extractors mentioned in the article. When training the model, it is important to choose the appropriate `model_arch` and `model_type`.
+Protocol scaffolding:
 
-```shell
-python train.py --model_arch xxx --model_type xxx
+- implemented: `trajair_40to120_best20`
+- scaffolded for later appendix alignment: `legacy_11_best5`, `legacy_16_best5`
+
+Project note:
+
+- old ACT / HAINet / kinematic query decoder lines are no longer the active workflow
+- this repository is now reserved for ProtoBasis-Flight only
+- roadmap is recorded in `notes/PROTOBASIS_EXECUTION_ROADMAP.md`
+
+Remote workflow:
+
+- Sync modified source files to the server:
+
+```bash
+python scripts/sync_remote.py
 ```
 
-### Test
+- Launch a remote training job with tracked logs:
 
-The test script is provided by `test.py` for the evaluation.
-
-To test the model, use the following command.The `epoch` parameter specifies the model checkpoint from a particular training epoch to be loaded for testing. The `model_arch` parameter defines the fusion mechanism, while the `model_type` parameter specifies the altitude feature extractor.
-
-```shell
-python test.py --epoch xxx --model_arch xxx --model_type xxx
+```bash
+python scripts/launch_remote_train.py -- --dataset_variant social --dataset_name 111_days
 ```
 
-### Dataset
+- Inspect the latest remote run, including run status, process info, logs, and optional system snapshot:
 
-In this repository, the dataset are provided for evaluation. They can be accessed in the /data.The data comes from https://theairlab.org/trajair/. Since this study does not consider aircraft interactions, multiple aircraft in the same TXT file were separated into different TXT files, with each file containing only a single aircraft.
+```bash
+python scripts/server_status.py --show-logs --show-epochs --show-system
+```
 
+Automation note:
+
+- `scripts/sync_remote.py` performs incremental source sync and records the last sync timestamp locally.
+- `scripts/launch_remote_train.py` starts remote training under `.remote_runs/<timestamp_name>/` and preserves command/stdout/stderr.
+- `scripts/server_status.py` can now be used as the main remote "eyes" script: it reports project-related processes, latest run artifacts, best metrics, recent logs, GPU/memory/disk snapshot, and remote git state.
