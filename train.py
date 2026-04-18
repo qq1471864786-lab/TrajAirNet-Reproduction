@@ -50,6 +50,9 @@ LOSS_STAT_KEYS = (
     "winner_ade",
 )
 
+ANSI_GREEN = "\033[92m"
+ANSI_RESET = "\033[0m"
+
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Train ProtoBasis-Net")
@@ -301,7 +304,7 @@ def tracked_best_specs(args, run_dir):
     primary_k = args.eval_topk_primary
     secondary_k = args.eval_topk_secondary
     rare_k = secondary_k if secondary_k != primary_k else primary_k
-    return {
+    specs = {
         f"fde{secondary_k}": {
             "metric_key": f"FDE@{secondary_k}",
             "path": os.path.join(run_dir, f"best_fde{secondary_k}.pt"),
@@ -319,6 +322,12 @@ def tracked_best_specs(args, run_dir):
             "path": os.path.join(run_dir, f"best_rare_fde{rare_k}.pt"),
         },
     }
+    if secondary_k != primary_k:
+        specs[f"ade{secondary_k}"] = {
+            "metric_key": f"ADE@{secondary_k}",
+            "path": os.path.join(run_dir, f"best_ade{secondary_k}.pt"),
+        }
+    return specs
 
 
 def init_best_records(args, run_dir):
@@ -449,6 +458,20 @@ def format_scalar(value, precision=4):
     return str(value)
 
 
+def supports_color():
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def has_best_ade_update(best_updates):
+    return any(item.startswith("ADE@") for item in best_updates)
+
+
+def maybe_green(text, enabled):
+    if not enabled or not supports_color():
+        return text
+    return f"{ANSI_GREEN}{text}{ANSI_RESET}"
+
+
 def progress_postfix(batch_loss, loss_stats):
     return {
         "loss": format_scalar(batch_loss),
@@ -520,9 +543,13 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
     ]
     eval_main, eval_aux = _metric_lines(args, metrics)
     best_text = ", ".join(best_updates) if best_updates else "none"
+    header = (
+        f"[Epoch {epoch:03d}/{total_epochs:03d}] phase={phase_name} "
+        f"lr={lr:.2e} mem={memory_mb:.0f}MB best_update={best_text}"
+    )
     return "\n".join(
         [
-            f"[Epoch {epoch:03d}/{total_epochs:03d}] phase={phase_name} lr={lr:.2e} mem={memory_mb:.0f}MB best_update={best_text}",
+            maybe_green(header, has_best_ade_update(best_updates)),
             f"  train_loss: {' '.join(train_parts)}",
             f"  eval_main : {' '.join(eval_main)}",
             f"  eval_aux  : {' '.join(eval_aux)}",
