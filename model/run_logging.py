@@ -98,11 +98,22 @@ class RunRecorder:
                 "updated_at": datetime.now(),
                 "current_epoch": self.resume_state.get("last_epoch", 0),
                 "best": self.resume_state.get("best", {}),
+                "latest_epoch": {},
                 "extra_metadata": self.extra_metadata,
             },
         )
 
-    def log_epoch(self, epoch, phase_name, train_loss, metrics, lr, peak_memory_mb):
+    def log_epoch(
+        self,
+        epoch,
+        phase_name,
+        train_loss,
+        metrics,
+        lr,
+        peak_memory_mb,
+        loss_stats=None,
+        best_updates=None,
+    ):
         payload = {
             "timestamp": datetime.now(),
             "epoch": epoch,
@@ -110,12 +121,25 @@ class RunRecorder:
             "train_loss": train_loss,
             "lr": lr,
             "peak_memory_mb": peak_memory_mb,
+            "loss_stats": loss_stats or {},
             "metrics": metrics,
+            "best_updates": best_updates or [],
         }
         self.history.append(payload)
         _append_jsonl(self.epoch_metrics_path, payload)
 
-    def update_live_status(self, epoch, best):
+    def update_live_status(
+        self,
+        epoch,
+        best,
+        phase_name=None,
+        train_loss=None,
+        loss_stats=None,
+        metrics=None,
+        lr=None,
+        peak_memory_mb=None,
+        best_updates=None,
+    ):
         _write_json(
             self.live_status_path,
             {
@@ -124,17 +148,28 @@ class RunRecorder:
                 "updated_at": datetime.now(),
                 "current_epoch": epoch,
                 "best": best,
+                "latest_epoch": {
+                    "phase": phase_name,
+                    "train_loss": train_loss,
+                    "loss_stats": loss_stats or {},
+                    "metrics": metrics or {},
+                    "lr": lr,
+                    "peak_memory_mb": peak_memory_mb,
+                    "best_updates": best_updates or [],
+                },
                 "extra_metadata": self.extra_metadata,
             },
         )
 
     def finalize(self, best):
+        latest_epoch = self.history[-1] if self.history else {}
         payload = {
             "status": "completed",
             "started_at": self.started_at,
             "finished_at": datetime.now(),
             "history_length": len(self.history),
             "best": best,
+            "latest_epoch": latest_epoch,
             "run_dir": self.run_dir,
             "extra_metadata": self.extra_metadata,
         }
@@ -147,17 +182,20 @@ class RunRecorder:
                 "finished_at": datetime.now(),
                 "current_epoch": len(self.history),
                 "best": best,
+                "latest_epoch": latest_epoch,
                 "extra_metadata": self.extra_metadata,
             },
         )
 
     def finalize_incomplete(self, status, error_message):
+        latest_epoch = self.history[-1] if self.history else {}
         payload = {
             "status": status,
             "started_at": self.started_at,
             "finished_at": datetime.now(),
             "history_length": len(self.history),
             "error_message": error_message,
+            "latest_epoch": latest_epoch,
             "run_dir": self.run_dir,
             "extra_metadata": self.extra_metadata,
         }

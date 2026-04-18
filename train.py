@@ -2,8 +2,14 @@ import argparse
 import math
 import os
 import random
+import sys
+import warnings
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+warnings.filterwarnings(
+    "ignore",
+    message="enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True",
+)
 from contextlib import nullcontext
 from functools import partial
 
@@ -30,6 +36,19 @@ from model import (
     update_metric_sums,
 )
 from model.run_logging import RunRecorder
+
+LOSS_STAT_KEYS = (
+    "xyz",
+    "fde",
+    "proto",
+    "res",
+    "score",
+    "rank",
+    "div",
+    "coeff",
+    "smooth",
+    "winner_ade",
+)
 
 
 def build_parser():
@@ -407,24 +426,108 @@ def load_resume_checkpoint(args, run_dir, model, optimizer, device):
     return start_epoch, global_step, best_records
 
 
-def format_epoch_summary(args, metrics):
+def init_loss_sums():
+    return {name: 0.0 for name in LOSS_STAT_KEYS}
+
+
+def update_loss_sums(loss_sums, loss_stats):
+    for name in LOSS_STAT_KEYS:
+        loss_sums[name] += float(loss_stats.get(name, 0.0))
+
+
+def average_loss_sums(loss_sums, count):
+    return {name: value / max(count, 1) for name, value in loss_sums.items()}
+
+
+def format_scalar(value, precision=4):
+    if value is None:
+        return "n/a"
+    if isinstance(value, (int, float)):
+        if math.isnan(value):
+            return "nan"
+        return f"{value:.{precision}f}"
+    return str(value)
+
+
+def progress_postfix(batch_loss, loss_stats):
+    return {
+        "loss": format_scalar(batch_loss),
+        "xyz": format_scalar(loss_stats.get("xyz")),
+        "fde": format_scalar(loss_stats.get("fde")),
+        "proto": format_scalar(loss_stats.get("proto")),
+        "wADE": format_scalar(loss_stats.get("winner_ade")),
+    }
+
+
+def _metric_lines(args, metrics):
     primary_k = args.eval_topk_primary
     secondary_k = args.eval_topk_secondary
-    parts = [
-        f"ADE@{primary_k}={metrics[f'ADE@{primary_k}']:.4f}",
-        f"FDE@{primary_k}={metrics[f'FDE@{primary_k}']:.4f}",
+    rare_k = secondary_k if secondary_k != primary_k else primary_k
+
+    eval_main = [
+        f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
+        f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
+    ]
+    eval_aux = [
+        f"GLeV_report@{primary_k}={format_scalar(metrics[f'GLeV_report@{primary_k}'])}",
+        f"GLeV_raw@{primary_k}={format_scalar(metrics[f'GLeV_raw@{primary_k}'])}",
     ]
     if secondary_k != primary_k:
-        parts.extend(
+        eval_main.extend(
             [
-                f"ADE@{secondary_k}={metrics[f'ADE@{secondary_k}']:.4f}",
-                f"FDE@{secondary_k}={metrics[f'FDE@{secondary_k}']:.4f}",
-                f"GLeV_report@{secondary_k}={metrics[f'GLeV_report@{secondary_k}']:.4f}",
+                f"ADE@{secondary_k}={format_scalar(metrics[f'ADE@{secondary_k}'])}",
+                f"FDE@{secondary_k}={format_scalar(metrics[f'FDE@{secondary_k}'])}",
             ]
         )
-    else:
-        parts.append(f"GLeV_report@{primary_k}={metrics[f'GLeV_report@{primary_k}']:.4f}")
-    return " ".join(parts)
+        eval_aux.extend(
+            [
+                f"GLeV_report@{secondary_k}={format_scalar(metrics[f'GLeV_report@{secondary_k}'])}",
+                f"GLeV_raw@{secondary_k}={format_scalar(metrics[f'GLeV_raw@{secondary_k}'])}",
+            ]
+        )
+
+    eval_main.extend(
+        [
+            f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
+            f"Top1_ADE={format_scalar(metrics['Top1_ADE'])}",
+            f"Top1_FDE={format_scalar(metrics['Top1_FDE'])}",
+        ]
+    )
+    eval_aux.extend(
+        [
+            f"proto_top1_acc={format_scalar(metrics['proto_top1_acc'])}",
+            f"proto_rare_recall={format_scalar(metrics['proto_rare_recall'])}",
+            f"score_entropy={format_scalar(metrics['score_entropy'])}",
+            f"endpoint_var={format_scalar(metrics['endpoint_var'])}",
+        ]
+    )
+    return eval_main, eval_aux
+
+
+def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss_stats, metrics, lr, memory_mb, best_updates):
+    train_parts = [
+        f"total={format_scalar(train_loss)}",
+        f"xyz={format_scalar(loss_stats['xyz'])}",
+        f"fde={format_scalar(loss_stats['fde'])}",
+        f"proto={format_scalar(loss_stats['proto'])}",
+        f"res={format_scalar(loss_stats['res'])}",
+        f"score={format_scalar(loss_stats['score'])}",
+        f"rank={format_scalar(loss_stats['rank'])}",
+        f"div={format_scalar(loss_stats['div'])}",
+        f"coeff={format_scalar(loss_stats['coeff'])}",
+        f"smooth={format_scalar(loss_stats['smooth'])}",
+        f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
+    ]
+    eval_main, eval_aux = _metric_lines(args, metrics)
+    best_text = ", ".join(best_updates) if best_updates else "none"
+    return "\n".join(
+        [
+            f"[Epoch {epoch:03d}/{total_epochs:03d}] phase={phase_name} lr={lr:.2e} mem={memory_mb:.0f}MB best_update={best_text}",
+            f"  train_loss: {' '.join(train_parts)}",
+            f"  eval_main : {' '.join(eval_main)}",
+            f"  eval_aux  : {' '.join(eval_aux)}",
+        ]
+    )
 
 
 def main():
@@ -534,11 +637,19 @@ def main():
             model.train()
             optimizer.zero_grad(set_to_none=True)
             train_loss_sum = 0.0
+            epoch_loss_sums = init_loss_sums()
             seen_batches = 0
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
 
-            progress = tqdm(train_loader, ncols=110, leave=False)
+            progress = tqdm(
+                train_loader,
+                leave=False,
+                dynamic_ncols=True,
+                desc=f"E{epoch:03d}/{args.epochs:03d} {cfg['name']}",
+                file=sys.stdout,
+                bar_format="{l_bar}{bar:24}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+            )
             for batch_index, raw_batch in enumerate(progress):
                 if args.limit_train_batches and batch_index >= args.limit_train_batches:
                     break
@@ -553,6 +664,7 @@ def main():
                     )
                     loss, loss_stats = loss_fn(outputs, batch, cfg)
 
+                batch_loss = float(loss.detach().item())
                 loss = loss / max(args.grad_accum, 1)
                 if use_amp:
                     scaler.scale(loss).backward()
@@ -571,12 +683,10 @@ def main():
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
 
-                train_loss_sum += float(loss.detach().item()) * max(args.grad_accum, 1)
+                train_loss_sum += batch_loss
+                update_loss_sums(epoch_loss_sums, loss_stats)
                 seen_batches += 1
-                progress.set_description(
-                    f"{cfg['name']} xyz={loss_stats['xyz']:.4f} fde={loss_stats['fde']:.4f} "
-                    f"proto={loss_stats['proto']:.4f} coeff={loss_stats['coeff']:.4f}"
-                )
+                progress.set_postfix(progress_postfix(batch_loss, loss_stats), refresh=False)
 
             if seen_batches and seen_batches % args.grad_accum != 0:
                 if use_amp:
@@ -601,6 +711,7 @@ def main():
             )
             memory_mb = peak_memory_mb(device)
             train_loss = train_loss_sum / max(seen_batches, 1)
+            avg_loss_stats = average_loss_sums(epoch_loss_sums, seen_batches)
 
             ckpt = checkpoint_payload(
                 model=model,
@@ -614,6 +725,7 @@ def main():
             )
             save_checkpoint(last_path, ckpt)
 
+            best_updates = []
             for best_key, spec in best_specs.items():
                 value = metrics[spec["metric_key"]]
                 if math.isnan(value):
@@ -622,13 +734,48 @@ def main():
                     best_records[best_key]["value"] = value
                     best_records[best_key]["epoch"] = epoch
                     save_checkpoint(spec["path"], ckpt)
+                    best_updates.append(spec["metric_key"])
 
-            recorder.log_epoch(epoch, cfg["name"], train_loss, metrics, current_lr, memory_mb)
-            recorder.update_live_status(epoch, best_records)
-            print(f"[Epoch {epoch:03d}/{args.epochs:03d}] phase={cfg['name']} loss={train_loss:.4f} {format_epoch_summary(args, metrics)}")
+            progress.close()
+            recorder.log_epoch(
+                epoch,
+                cfg["name"],
+                train_loss,
+                metrics,
+                current_lr,
+                memory_mb,
+                loss_stats=avg_loss_stats,
+                best_updates=best_updates,
+            )
+            recorder.update_live_status(
+                epoch,
+                best_records,
+                phase_name=cfg["name"],
+                train_loss=train_loss,
+                loss_stats=avg_loss_stats,
+                metrics=metrics,
+                lr=current_lr,
+                peak_memory_mb=memory_mb,
+                best_updates=best_updates,
+            )
+            print(
+                format_epoch_summary(
+                    args,
+                    epoch,
+                    args.epochs,
+                    cfg["name"],
+                    train_loss,
+                    avg_loss_stats,
+                    metrics,
+                    current_lr,
+                    memory_mb,
+                    best_updates,
+                ),
+                flush=True,
+            )
 
         recorder.finalize(best_records)
-        print("[Done] ProtoBasis-Net training finished.")
+        print("[Done] ProtoBasis-Net training finished.", flush=True)
 
     except KeyboardInterrupt:
         recorder.finalize_incomplete("interrupted", "Training interrupted by user.")

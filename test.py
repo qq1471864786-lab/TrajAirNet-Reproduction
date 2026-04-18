@@ -1,14 +1,28 @@
 import argparse
 import os
+import warnings
 from contextlib import nullcontext
 from functools import partial
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+warnings.filterwarnings(
+    "ignore",
+    message="enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True",
+)
 
 import torch
 from torch.utils.data import DataLoader
 
-from model import ProtoBasisNet, ProtoBasisSceneDataset, proto_basis_collate, summarize_batch_metrics
+from model import (
+    ProtoBasisNet,
+    ProtoBasisSceneDataset,
+    average_metric_sums,
+    init_metric_sums,
+    metric_names_for_protocol,
+    proto_basis_collate,
+    summarize_batch_metrics,
+    update_metric_sums,
+)
 from model.data import resolve_split_dir
 
 
@@ -63,8 +77,13 @@ def build_model(config, checkpoint):
 
 
 def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0):
-    sums = {}
-    count = 0
+    metric_names = metric_names_for_protocol(
+        config.get("eval_topk_primary", 5),
+        config.get("eval_topk_secondary", 20),
+    )
+    metric_sums = init_metric_sums(metric_names)
+    total_count = 0
+    rare_count = 0
     model.eval()
     with torch.no_grad():
         for batch_index, raw_batch in enumerate(loader):
@@ -84,10 +103,10 @@ def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0)
                 glev_topn_primary=config.get("glev_topn_primary", 2),
                 glev_topn_secondary=config.get("glev_topn_secondary", 5),
             )
-            for name, value in metrics.items():
-                sums[name] = sums.get(name, 0.0) + value * batch_count
-            count += batch_count
-    return {name: value / max(count, 1) for name, value in sums.items()}
+            update_metric_sums(metric_sums, metrics, batch_count)
+            total_count += batch_count
+            rare_count += int(batch["is_rare"].sum().item())
+    return average_metric_sums(metric_sums, total_count, rare_count)
 
 
 @torch.no_grad()
@@ -127,6 +146,17 @@ def build_loader(dataset, batch_size, args, max_agents):
         persistent_workers=args.persistent_workers and args.num_workers > 0,
         prefetch_factor=args.prefetch_factor if args.num_workers > 0 else None,
     )
+
+
+def ordered_metric_items(config, metrics):
+    ordered_names = list(
+        metric_names_for_protocol(
+            config.get("eval_topk_primary", 5),
+            config.get("eval_topk_secondary", 20),
+        )
+    )
+    ordered_names.extend(name for name in metrics.keys() if name not in ordered_names)
+    return [(name, metrics[name]) for name in ordered_names if name in metrics]
 
 
 def main():
@@ -194,7 +224,7 @@ def main():
                 metrics[f"latency_bs{bs}_p50_ms"] = latency["latency_p50_ms"]
                 metrics[f"latency_bs{bs}_p90_ms"] = latency["latency_p90_ms"]
 
-    print(" ".join(f"{name}={value:.4f}" for name, value in metrics.items()))
+    print(" ".join(f"{name}={value:.4f}" for name, value in ordered_metric_items(config, metrics)))
 
 
 if __name__ == "__main__":
