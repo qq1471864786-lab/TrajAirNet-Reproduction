@@ -35,11 +35,19 @@ def protocol_hash(config: Dict[str, Any]) -> str:
         "dataset_name",
         "obs",
         "preds",
+        "obs_stride",
+        "pred_stride",
+        "obs_horizon_sec",
+        "pred_horizon_sec",
         "max_agents",
         "topk_proto",
         "micro_per_proto",
         "basis_dim",
         "n_proto",
+        "eval_topk_primary",
+        "eval_topk_secondary",
+        "glev_topn_primary",
+        "glev_topn_secondary",
     ]
     subset = {key: config.get(key) for key in keys}
     return stable_hash(subset)
@@ -54,6 +62,10 @@ def model_artifact_hash(model_artifact: Dict[str, Any]) -> str:
         "n_proto": model_artifact["n_proto"],
         "basis_dim": model_artifact["basis_dim"],
         "rare_threshold": model_artifact["rare_threshold"],
+        "obs_len": model_artifact.get("obs_len"),
+        "pred_len": model_artifact.get("pred_len"),
+        "obs_stride": model_artifact.get("obs_stride"),
+        "pred_stride": model_artifact.get("pred_stride"),
     }
     return stable_hash(subset)
 

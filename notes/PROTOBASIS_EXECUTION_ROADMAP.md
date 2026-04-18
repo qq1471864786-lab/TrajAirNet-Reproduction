@@ -1,4 +1,4 @@
-# ProtoBasis-Flight Roadmap
+# ProtoBasis-Net Roadmap
 
 ## Locked Main Protocol
 
@@ -34,9 +34,9 @@
 
 ## Required Main Experiments
 
-1. `111_days` ProtoBasis-Flight 1 seed sanity.
+1. `111_days` ProtoBasis-Net 1 seed sanity.
 2. `111_days` strongest kinematic baseline 1 seed.
-3. `111_days` ProtoBasis-Flight 3 seeds.
+3. `111_days` ProtoBasis-Net 3 seeds.
 4. `111_days` strongest kinematic baseline 3 seeds.
 5. Core ablations:
    - `--disable_router`

@@ -1,19 +1,21 @@
 import argparse
 import os
+from contextlib import nullcontext
+from functools import partial
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-from functools import partial
 
 import torch
 from torch.utils.data import DataLoader
 
-from model import ProtoBasisFlight, ProtoBasisSceneDataset, proto_basis_collate, resolve_split_dir, summarize_batch_metrics
-
+from model import ProtoBasisNet, ProtoBasisSceneDataset, proto_basis_collate, summarize_batch_metrics
+from model.data import resolve_split_dir
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Evaluate ProtoBasis-Flight checkpoints")
-    parser.add_argument("--checkpoint", type=str, required=True)
+    parser = argparse.ArgumentParser(description="Evaluate ProtoBasis-Net checkpoints")
+    parser.add_argument("checkpoint", nargs="?", default="", help="Checkpoint path.")
+    parser.add_argument("--checkpoint", dest="checkpoint_flag", default="", help="Checkpoint path.")
     parser.add_argument("--dataset_variant", type=str, default="")
     parser.add_argument("--dataset_name", type=str, default="")
     parser.add_argument("--split", type=str, default="test")
@@ -26,13 +28,19 @@ def build_parser():
     parser.add_argument("--limit_eval_batches", type=int, default=0)
     parser.add_argument("--measure_latency", action="store_true")
     parser.add_argument("--latency_batch_sizes", type=str, default="1,16")
+    parser.add_argument("--no_amp", action="store_true")
+    parser.add_argument("--allow_cpu", action="store_true", help="Allow CPU fallback when CUDA is unavailable.")
     return parser
 
 
+def autocast_context(device, use_amp):
+    if device.type == "cuda" and use_amp:
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
+
 
 def build_model(config, checkpoint):
-    meta = checkpoint.get("meta", {})
-    return ProtoBasisFlight(
+    return ProtoBasisNet(
         obs_len=config["obs"],
         pred_len=config["preds"],
         d_model=config["d_model"],
@@ -54,8 +62,7 @@ def build_model(config, checkpoint):
     )
 
 
-
-def evaluate(model, loader, device, limit_eval_batches=0):
+def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0):
     sums = {}
     count = 0
     model.eval()
@@ -67,8 +74,16 @@ def evaluate(model, loader, device, limit_eval_batches=0):
                 key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
                 for key, value in raw_batch.items()
             }
-            outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=True)
-            metrics, batch_count, _ = summarize_batch_metrics(outputs, batch)
+            with autocast_context(device, use_amp):
+                outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=True)
+            metrics, batch_count, _ = summarize_batch_metrics(
+                outputs,
+                batch,
+                primary_k=config.get("eval_topk_primary", 5),
+                secondary_k=config.get("eval_topk_secondary", 20),
+                glev_topn_primary=config.get("glev_topn_primary", 2),
+                glev_topn_secondary=config.get("glev_topn_secondary", 5),
+            )
             for name, value in metrics.items():
                 sums[name] = sums.get(name, 0.0) + value * batch_count
             count += batch_count
@@ -101,7 +116,6 @@ def measure_latency_ms(model, batch, warmup=30, iters=100):
     }
 
 
-
 def build_loader(dataset, batch_size, args, max_agents):
     return DataLoader(
         dataset,
@@ -115,11 +129,22 @@ def build_loader(dataset, batch_size, args, max_agents):
     )
 
 
-
 def main():
     args = build_parser().parse_args()
-    device = torch.device(args.device) if args.device else torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    checkpoint_path = args.checkpoint or args.checkpoint_flag
+    if not checkpoint_path:
+        raise SystemExit("checkpoint path is required")
+
+    if args.device:
+        device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda:0")
+    elif args.allow_cpu:
+        device = torch.device("cpu")
+    else:
+        raise SystemExit("CUDA is not available. Use --allow_cpu only if you really want to run on CPU.")
+    use_amp = device.type == "cuda" and not args.no_amp
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
     dataset_variant = args.dataset_variant or config["dataset_variant"]
     dataset_name = args.dataset_name or config["dataset_name"]
@@ -134,12 +159,18 @@ def main():
         "n_proto": config["n_proto"],
         "basis_dim": config["basis_dim"],
         "rare_threshold": config["rare_threshold"],
+        "obs_len": config["obs"],
+        "pred_len": config["preds"],
+        "obs_stride": config.get("obs_stride", 1),
+        "pred_stride": config.get("pred_stride", 1),
     }
     dataset = ProtoBasisSceneDataset(
         data_dir=split_dir,
         split_name=args.split,
         obs_len=config["obs"],
         pred_len=config["preds"],
+        obs_stride=config.get("obs_stride", 1),
+        pred_stride=config.get("pred_stride", 1),
         max_agents=config["max_agents"],
         model_artifact=model_artifact,
         n_proto=config["n_proto"],
@@ -150,7 +181,7 @@ def main():
 
     model = build_model(config, checkpoint).to(device)
     model.load_state_dict(checkpoint["model"])
-    metrics = evaluate(model, loader, device, limit_eval_batches=args.limit_eval_batches)
+    metrics = evaluate(model, loader, device, config, use_amp=use_amp, limit_eval_batches=args.limit_eval_batches)
 
     if args.measure_latency:
         for bs in [int(token) for token in args.latency_batch_sizes.split(",") if token.strip()]:

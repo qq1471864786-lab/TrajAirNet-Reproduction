@@ -1,8 +1,8 @@
-# ProtoBasis-Flight
+# ProtoBasis-Net
 
 Current active project:
 
-- `ProtoBasis-Flight (Prototype-Conditioned Residual Basis Query Network for Terminal Airspace Forecasting)`
+- `ProtoBasis-Net (Prototype-Conditioned Residual Basis Query Network for Terminal Airspace Forecasting)`
 
 Current default protocol:
 
@@ -20,13 +20,19 @@ Current default protocol:
 Current default training command:
 
 ```bash
-python train.py --dataset_variant social --dataset_name 111_days
+python train.py 111_days --device cuda:0
+```
+
+Continue training the same run:
+
+```bash
+python train.py 111_days --device cuda:0 --resume --extra_epochs 5
 ```
 
 Current default evaluation command:
 
 ```bash
-python test.py --checkpoint save_model/111_days/seed3407/last.pt --dataset_variant social --dataset_name 111_days
+python test.py save_model/111_days/seed3407/last.pt --device cuda:0
 ```
 
 Primary reported metrics:
@@ -55,7 +61,7 @@ Protocol scaffolding:
 Project note:
 
 - old ACT / HAINet / kinematic query decoder lines are no longer the active workflow
-- this repository is now reserved for ProtoBasis-Flight only
+- this repository is now reserved for ProtoBasis-Net only
 - roadmap is recorded in `notes/PROTOBASIS_EXECUTION_ROADMAP.md`
 
 Remote workflow:

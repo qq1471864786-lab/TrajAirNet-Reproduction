@@ -99,17 +99,32 @@ def _pairwise_last_obs_distance(track_a, track_b):
     return float(np.linalg.norm(delta))
 
 
-def _cache_path(data_dir, obs_len, pred_len, max_agents):
+def _cache_path(data_dir, obs_len, pred_len, max_agents, obs_stride=1, pred_stride=1):
     file_names = sorted(name for name in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, name)))
-    key = f"protobasis_v1|{data_dir}|{file_names}|{obs_len}|{pred_len}|{max_agents}"
+    key = f"protobasis_v2|{data_dir}|{file_names}|{obs_len}|{pred_len}|{max_agents}|{obs_stride}|{pred_stride}"
     digest = hashlib.md5(key.encode()).hexdigest()[:12]
     cache_dir = os.path.join(data_dir, ".cache")
     return os.path.join(cache_dir, f"protobasis_dataset_{digest}.pt")
 
 
-def _artifact_path(data_dir, n_proto, basis_dim):
+def _artifact_path(
+    data_dir,
+    n_proto,
+    basis_dim,
+    obs_len,
+    pred_len,
+    obs_stride=1,
+    pred_stride=1,
+    rare_threshold=0.02,
+):
     cache_dir = os.path.join(data_dir, ".cache")
-    return os.path.join(cache_dir, f"protobasis_artifact_p{n_proto}_b{basis_dim}.pt")
+    return os.path.join(
+        cache_dir,
+        (
+            f"protobasis_artifact_o{obs_len}_p{pred_len}_os{obs_stride}_ps{pred_stride}_"
+            f"n{n_proto}_b{basis_dim}_r{rare_threshold:.4f}.pt"
+        ),
+    )
 
 
 def _run_kmeans(data, n_clusters, random_state=3407, iters=50):
@@ -169,6 +184,10 @@ class ProtoBasisArtifact:
     n_proto: int
     basis_dim: int
     rare_threshold: float
+    obs_len: int
+    pred_len: int
+    obs_stride: int
+    pred_stride: int
 
     def to_dict(self):
         return {
@@ -179,11 +198,15 @@ class ProtoBasisArtifact:
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
             "rare_threshold": self.rare_threshold,
+            "obs_len": self.obs_len,
+            "pred_len": self.pred_len,
+            "obs_stride": self.obs_stride,
+            "pred_stride": self.pred_stride,
         }
 
 
 class ProtoBasisSceneDataset(Dataset):
-    CACHE_VERSION = 3
+    CACHE_VERSION = 4
 
     def __init__(
         self,
@@ -191,6 +214,8 @@ class ProtoBasisSceneDataset(Dataset):
         split_name,
         obs_len=40,
         pred_len=120,
+        obs_stride=1,
+        pred_stride=1,
         max_agents=7,
         delim=" ",
         model_artifact: Optional[Dict] = None,
@@ -203,9 +228,11 @@ class ProtoBasisSceneDataset(Dataset):
         self.split_name = split_name
         self.obs_len = obs_len
         self.pred_len = pred_len
+        self.obs_stride = obs_stride
+        self.pred_stride = pred_stride
         self.max_agents = max_agents
         self.delim = delim
-        self.sequence_len = obs_len + pred_len
+        self.sequence_span = (obs_len - 1) * obs_stride + pred_len * pred_stride + 1
         self.n_proto = n_proto
         self.basis_dim = basis_dim
         self.rare_threshold = rare_threshold
@@ -213,7 +240,7 @@ class ProtoBasisSceneDataset(Dataset):
         self.file_records: List[Dict] = []
         self.sample_index: List[Dict] = []
 
-        cache_path = _cache_path(data_dir, obs_len, pred_len, max_agents)
+        cache_path = _cache_path(data_dir, obs_len, pred_len, max_agents, obs_stride=obs_stride, pred_stride=pred_stride)
         if os.path.isfile(cache_path):
             try:
                 cached = torch.load(cache_path, weights_only=False)
@@ -221,8 +248,8 @@ class ProtoBasisSceneDataset(Dataset):
                 os.remove(cache_path)
                 self._build_and_cache(cache_path)
             else:
-                if cached.get("cache_version") == self.CACHE_VERSION:
-                    self.file_records = [self._load_file_record(path) for path in cached["source_paths"]]
+                if cached.get("cache_version") == self.CACHE_VERSION and "file_records" in cached:
+                    self.file_records = cached["file_records"]
                     self.sample_index = cached["sample_index"]
                 else:
                     self._build_and_cache(cache_path)
@@ -230,15 +257,27 @@ class ProtoBasisSceneDataset(Dataset):
             self._build_and_cache(cache_path)
 
         if not self.sample_index:
-            raise RuntimeError(f"No valid ProtoBasis-Flight samples built from {data_dir}")
+            raise RuntimeError(f"No valid ProtoBasis-Net samples built from {data_dir}")
 
         if model_artifact is None:
             if split_name != "train":
                 raise ValueError("Model artifact must be provided for non-train splits.")
-            model_artifact = self._fit_model_artifact()
-            artifact_path = _artifact_path(data_dir, n_proto, basis_dim)
-            os.makedirs(os.path.dirname(artifact_path), exist_ok=True)
-            torch.save(model_artifact, artifact_path)
+            artifact_path = _artifact_path(
+                data_dir,
+                n_proto,
+                basis_dim,
+                obs_len=obs_len,
+                pred_len=pred_len,
+                obs_stride=obs_stride,
+                pred_stride=pred_stride,
+                rare_threshold=rare_threshold,
+            )
+            if os.path.isfile(artifact_path):
+                model_artifact = torch.load(artifact_path, weights_only=False)
+            else:
+                model_artifact = self._fit_model_artifact()
+                os.makedirs(os.path.dirname(artifact_path), exist_ok=True)
+                torch.save(model_artifact, artifact_path)
 
         self.model_artifact = model_artifact
         self.prototype_summary_5d = np.asarray(model_artifact["summary_5d"], dtype=np.float32)
@@ -267,7 +306,7 @@ class ProtoBasisSceneDataset(Dataset):
             torch.save(
                 {
                     "cache_version": self.CACHE_VERSION,
-                    "source_paths": [record["source_path"] for record in self.file_records],
+                    "file_records": self.file_records,
                     "sample_index": self.sample_index,
                 },
                 cache_path,
@@ -279,18 +318,11 @@ class ProtoBasisSceneDataset(Dataset):
                 except OSError:
                     pass
 
-    def _load_file_record(self, source_path):
-        data = read_txt_file(source_path, self.delim)
-        file_record = self._build_file_record(data, source_path)
-        if file_record is None:
-            raise RuntimeError(f"Cached source path no longer yields a valid file record: {source_path}")
-        return file_record
-
     def _build_file_record(self, data, source_path):
         if data.size == 0:
             return None
         frames = np.unique(data[:, 0]).tolist()
-        if len(frames) < self.sequence_len:
+        if len(frames) < self.sequence_span:
             return None
         return {
             "data": data,
@@ -299,24 +331,39 @@ class ProtoBasisSceneDataset(Dataset):
             "source_path": source_path,
         }
 
+    def _extract_track(self, frame_map, frame_ids, agent_id):
+        points = []
+        for frame_id in frame_ids:
+            frame_rows = frame_map[frame_id]
+            agent_rows = frame_rows[frame_rows[:, 1] == agent_id]
+            if agent_rows.shape[0] != 1:
+                return None
+            points.append(agent_rows[0, 2:5].astype(np.float32))
+        return np.stack(points, axis=0)
+
     def _build_target_windows(self, file_record, file_index):
         frames = file_record["frames"]
         frame_map = file_record["frame_map"]
         windows = []
-        max_start = len(frames) - self.sequence_len + 1
+        max_start = len(frames) - self.sequence_span + 1
 
         for start_idx in range(max_start):
-            window_frames = frames[start_idx : start_idx + self.sequence_len]
-            window_segments = [frame_map[frame] for frame in window_frames]
+            obs_index_ids = [start_idx + step * self.obs_stride for step in range(self.obs_len)]
+            pred_base = obs_index_ids[-1]
+            pred_index_ids = [pred_base + (step + 1) * self.pred_stride for step in range(self.pred_len)]
+            selected_index_ids = obs_index_ids + pred_index_ids
+            selected_frames = [frames[idx] for idx in selected_index_ids]
+            obs_frame_ids = selected_frames[: self.obs_len]
+            pred_frame_ids = selected_frames[self.obs_len :]
+            window_segments = [frame_map[frame] for frame in selected_frames]
             window_data = np.concatenate(window_segments, axis=0)
             agent_ids = np.unique(window_data[:, 1]).tolist()
 
             complete_tracks = {}
             for agent_id in agent_ids:
-                agent_rows = window_data[window_data[:, 1] == agent_id]
-                if agent_rows.shape[0] != self.sequence_len:
+                track_xyz = self._extract_track(frame_map, selected_frames, agent_id)
+                if track_xyz is None:
                     continue
-                track_xyz = agent_rows[:, 2:5].astype(np.float32)
                 complete_tracks[int(agent_id)] = track_xyz
 
             valid_ids = sorted(complete_tracks.keys())
@@ -344,6 +391,8 @@ class ProtoBasisSceneDataset(Dataset):
                         "target_id": target_id,
                         "agent_ids": selected_ids,
                         "agent_count": len(selected_ids),
+                        "obs_frame_ids": obs_frame_ids,
+                        "pred_frame_ids": pred_frame_ids,
                         "proto_summary_5d": proto_summary_5d,
                         "future_local": future_local,
                     }
@@ -369,6 +418,10 @@ class ProtoBasisSceneDataset(Dataset):
             n_proto=self.n_proto,
             basis_dim=self.basis_dim,
             rare_threshold=self.rare_threshold,
+            obs_len=self.obs_len,
+            pred_len=self.pred_len,
+            obs_stride=self.obs_stride,
+            pred_stride=self.pred_stride,
         ).to_dict()
 
     def _assign_prototypes(self):
@@ -392,6 +445,10 @@ class ProtoBasisSceneDataset(Dataset):
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
             "rare_threshold": self.rare_threshold,
+            "obs_len": self.obs_len,
+            "pred_len": self.pred_len,
+            "obs_stride": self.obs_stride,
+            "pred_stride": self.pred_stride,
         }
 
     def __len__(self):
@@ -400,22 +457,25 @@ class ProtoBasisSceneDataset(Dataset):
     def __getitem__(self, index):
         sample_meta = self.sample_index[index]
         file_record = self.file_records[sample_meta["file_index"]]
-        frames = file_record["frames"]
         frame_map = file_record["frame_map"]
         start_idx = sample_meta["start_idx"]
-        window_frames = frames[start_idx : start_idx + self.sequence_len]
-        window_segments = [frame_map[frame] for frame in window_frames]
-        window_data = np.concatenate(window_segments, axis=0)
+        obs_frame_ids = sample_meta["obs_frame_ids"]
+        pred_frame_ids = sample_meta["pred_frame_ids"]
 
         obs_agents = []
         for agent_id in sample_meta["agent_ids"]:
-            agent_rows = window_data[window_data[:, 1] == agent_id]
-            track_xyz = agent_rows[:, 2:5].astype(np.float32)
-            obs_agents.append(track_xyz[: self.obs_len])
+            obs_track = self._extract_track(frame_map, obs_frame_ids, agent_id)
+            if obs_track is None:
+                raise RuntimeError(
+                    f"Missing observed frames for agent={agent_id} in {file_record['source_path']} sample={sample_meta}"
+                )
+            obs_agents.append(obs_track)
 
-        target_rows = window_data[window_data[:, 1] == sample_meta["target_id"]]
-        target_xyz = target_rows[:, 2:5].astype(np.float32)
-        fut_target = target_xyz[self.obs_len :]
+        fut_target = self._extract_track(frame_map, pred_frame_ids, sample_meta["target_id"])
+        if fut_target is None:
+            raise RuntimeError(
+                f"Missing future frames for target={sample_meta['target_id']} in {file_record['source_path']} sample={sample_meta}"
+            )
 
         return {
             "obs_xyz": torch.tensor(np.stack(obs_agents, axis=0), dtype=torch.float32),

@@ -307,7 +307,7 @@ def build_anchor(endpoint_local, pred_len):
     return alpha[None, None, :, None] * endpoint_local[:, :, None, :]
 
 
-class ProtoBasisFlight(nn.Module):
+class ProtoBasisNet(nn.Module):
     def __init__(
         self,
         obs_len=40,
@@ -331,9 +331,9 @@ class ProtoBasisFlight(nn.Module):
     ):
         super().__init__()
         if proto_summary_5d is None:
-            raise ValueError("proto_summary_5d is required for ProtoBasis-Flight.")
+            raise ValueError("proto_summary_5d is required for ProtoBasis-Net.")
         if basis_bank is None:
-            raise ValueError("basis_bank is required for ProtoBasis-Flight.")
+            raise ValueError("basis_bank is required for ProtoBasis-Net.")
         if proto_frequency is None:
             proto_frequency = torch.ones(proto_summary_5d.size(0), dtype=torch.float32)
 
@@ -438,3 +438,6 @@ class ProtoBasisFlight(nn.Module):
                 "used_refiner": use_refiner,
             },
         }
+
+
+ProtoBasisFlight = ProtoBasisNet

@@ -6,7 +6,6 @@ import numpy as np
 import torch
 
 
-
 def _json_default(value):
     if isinstance(value, datetime):
         return value.isoformat()
@@ -19,11 +18,9 @@ def _json_default(value):
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-
 def _write_json(path, payload):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False, default=_json_default)
-
 
 
 def _append_jsonl(path, payload):
@@ -31,13 +28,31 @@ def _append_jsonl(path, payload):
         handle.write(json.dumps(payload, ensure_ascii=False, default=_json_default) + "\n")
 
 
+def _read_json(path, default=None):
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _read_jsonl(path):
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
 class RunRecorder:
-    def __init__(self, run_dir, config, extra_metadata=None):
+    def __init__(self, run_dir, config, extra_metadata=None, resume_state=None):
         self.run_dir = run_dir
         self.config = dict(config)
         self.extra_metadata = extra_metadata or {}
-        self.started_at = datetime.now()
-        self.history = []
+        self.resume_state = resume_state or {}
 
         os.makedirs(run_dir, exist_ok=True)
         self.run_config_path = os.path.join(run_dir, "run_config.json")
@@ -45,25 +60,44 @@ class RunRecorder:
         self.summary_path = os.path.join(run_dir, "run_summary.json")
         self.live_status_path = os.path.join(run_dir, "live_status.json")
 
-        for path in (self.run_config_path, self.epoch_metrics_path, self.summary_path, self.live_status_path):
-            if os.path.exists(path):
-                os.remove(path)
-
-        _write_json(
-            self.run_config_path,
-            {
+        if self.resume_state.get("enabled"):
+            previous_config = _read_json(self.run_config_path, default={}) or {}
+            started_at_raw = previous_config.get("started_at")
+            self.started_at = (
+                datetime.fromisoformat(started_at_raw) if isinstance(started_at_raw, str) else datetime.now()
+            )
+            self.history = _read_jsonl(self.epoch_metrics_path)
+            payload = {
                 "started_at": self.started_at,
+                "resumed_at": datetime.now(),
+                "resume_from_epoch": self.resume_state.get("last_epoch", 0),
                 "config": self.config,
                 "extra_metadata": self.extra_metadata,
-            },
-        )
+            }
+            _write_json(self.run_config_path, payload)
+        else:
+            self.started_at = datetime.now()
+            self.history = []
+            for path in (self.run_config_path, self.epoch_metrics_path, self.summary_path, self.live_status_path):
+                if os.path.exists(path):
+                    os.remove(path)
+            _write_json(
+                self.run_config_path,
+                {
+                    "started_at": self.started_at,
+                    "config": self.config,
+                    "extra_metadata": self.extra_metadata,
+                },
+            )
+
         _write_json(
             self.live_status_path,
             {
                 "status": "running",
                 "started_at": self.started_at,
-                "current_epoch": 0,
-                "best": {},
+                "updated_at": datetime.now(),
+                "current_epoch": self.resume_state.get("last_epoch", 0),
+                "best": self.resume_state.get("best", {}),
                 "extra_metadata": self.extra_metadata,
             },
         )

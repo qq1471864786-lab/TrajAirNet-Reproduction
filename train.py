@@ -4,6 +4,7 @@ import os
 import random
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+from contextlib import nullcontext
 from functools import partial
 
 import numpy as np
@@ -12,13 +13,14 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from model import (
-    ProtoBasisFlight,
     ProtoBasisLoss,
+    ProtoBasisNet,
     ProtoBasisSceneDataset,
     average_metric_sums,
     basis_hash,
     git_commit,
     init_metric_sums,
+    metric_names_for_protocol,
     model_artifact_hash,
     proto_basis_collate,
     protocol_hash,
@@ -30,14 +32,16 @@ from model import (
 from model.run_logging import RunRecorder
 
 
-
 def build_parser():
-    parser = argparse.ArgumentParser(description="Train ProtoBasis-Flight")
+    parser = argparse.ArgumentParser(description="Train ProtoBasis-Net")
+    parser.add_argument("dataset", nargs="?", default="", help="Dataset name, e.g. 111_days or 7days1.")
     parser.add_argument("--dataset_variant", type=str, default="social", choices=["social"])
-    parser.add_argument("--dataset_name", type=str, default="111_days")
+    parser.add_argument("--dataset_name", type=str, default="")
     parser.add_argument("--protocol_name", type=str, default="trajair_40to120_best20")
-    parser.add_argument("--obs", type=int, default=40)
-    parser.add_argument("--preds", type=int, default=120)
+    parser.add_argument("--obs", type=int, default=0)
+    parser.add_argument("--preds", type=int, default=0)
+    parser.add_argument("--obs_stride", type=int, default=1)
+    parser.add_argument("--pred_stride", type=int, default=1)
     parser.add_argument("--max_agents", type=int, default=7)
     parser.add_argument("--n_proto", type=int, default=64)
     parser.add_argument("--basis_dim", type=int, default=16)
@@ -50,12 +54,12 @@ def build_parser():
     parser.add_argument("--social_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.10)
 
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--grad_accum", type=int, default=2)
-    parser.add_argument("--epochs", type=int, default=65)
+    parser.add_argument("--batch_size", type=int, default=0)
+    parser.add_argument("--grad_accum", type=int, default=0)
     parser.add_argument("--phase_a_epochs", type=int, default=10)
     parser.add_argument("--phase_b_epochs", type=int, default=35)
     parser.add_argument("--phase_c_epochs", type=int, default=20)
+    parser.add_argument("--extra_epochs", type=int, default=0, help="Extra refiner-stage epochs when resuming.")
     parser.add_argument("--stage_a_lr", type=float, default=3e-4)
     parser.add_argument("--stage_b_lr", type=float, default=2e-4)
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
@@ -70,6 +74,9 @@ def build_parser():
     parser.add_argument("--prefetch_factor", type=int, default=2)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--rare_threshold", type=float, default=0.02)
+    parser.add_argument("--resume", action="store_true", help="Resume from save_dir/dataset_name/seed*/last.pt.")
+    parser.add_argument("--no_amp", action="store_true", help="Disable AMP. Default is enabled on CUDA.")
+    parser.add_argument("--allow_cpu", action="store_true", help="Allow CPU fallback when CUDA is unavailable.")
 
     parser.add_argument("--lambda_xyz", type=float, default=1.0)
     parser.add_argument("--lambda_fde", type=float, default=0.8)
@@ -92,7 +99,6 @@ def build_parser():
     return parser
 
 
-
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -100,20 +106,59 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-
-def select_device(device_arg):
+def select_device(device_arg, allow_cpu=False):
     if device_arg:
         return torch.device(device_arg)
-    return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda:0")
+    if allow_cpu:
+        return torch.device("cpu")
+    raise RuntimeError("CUDA is not available. Use --allow_cpu only if you really want to run on CPU.")
 
+
+def resolve_dataset_name(args):
+    if args.dataset_name:
+        return args.dataset_name
+    if args.dataset:
+        return args.dataset
+    return "111_days"
 
 
 def apply_protocol(args):
     spec = resolve_protocol(args.protocol_name)
-    args.obs = spec.obs
-    args.preds = spec.preds
+    args.obs = spec.obs_steps
+    args.preds = spec.pred_steps
+    args.obs_stride = spec.obs_stride
+    args.pred_stride = spec.pred_stride
+    args.obs_horizon_sec = spec.obs_horizon_sec
+    args.pred_horizon_sec = spec.pred_horizon_sec
+    args.eval_topk_primary = spec.eval_topk_primary
+    args.eval_topk_secondary = spec.eval_topk_secondary
+    args.glev_topn_primary = spec.glev_topn_primary
+    args.glev_topn_secondary = spec.glev_topn_secondary
     return spec
 
+
+def apply_training_defaults(args):
+    args.dataset_name = resolve_dataset_name(args)
+    is_unified = args.protocol_name == "trajair_40to120_best20"
+    is_main_dataset = args.dataset_name == "111_days"
+
+    if args.batch_size <= 0:
+        if is_unified and is_main_dataset:
+            args.batch_size = 16
+        elif is_unified:
+            args.batch_size = 24
+        else:
+            args.batch_size = 32
+
+    if args.grad_accum <= 0:
+        if is_unified and is_main_dataset:
+            args.grad_accum = 2
+        else:
+            args.grad_accum = 1
+
+    args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
 
 def stage_config(epoch, args):
@@ -145,26 +190,24 @@ def stage_config(epoch, args):
     }
 
 
-
 def set_epoch_lr(optimizer, epoch, args):
     if epoch <= args.phase_a_epochs:
         lr = args.stage_a_lr
     elif epoch <= args.phase_a_epochs + args.phase_b_epochs:
         phase_epoch = epoch - args.phase_a_epochs - 1
         denom = max(args.phase_b_epochs - 1, 1)
-        progress = phase_epoch / denom
+        progress = min(phase_epoch / denom, 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         lr = args.stage_c_lr + (args.stage_b_lr - args.stage_c_lr) * cosine
     else:
         phase_epoch = epoch - args.phase_a_epochs - args.phase_b_epochs - 1
         denom = max(args.phase_c_epochs - 1, 1)
-        progress = phase_epoch / denom
+        progress = min(phase_epoch / denom, 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         lr = args.min_lr + (args.stage_c_lr - args.min_lr) * cosine
     for group in optimizer.param_groups:
         group["lr"] = lr
     return lr
-
 
 
 def build_train_loader(dataset, args, rare_weight):
@@ -189,7 +232,6 @@ def build_train_loader(dataset, args, rare_weight):
     )
 
 
-
 def build_eval_loader(dataset, args):
     return DataLoader(
         dataset,
@@ -203,9 +245,8 @@ def build_eval_loader(dataset, args):
     )
 
 
-
 def build_model(args, model_artifact):
-    return ProtoBasisFlight(
+    return ProtoBasisNet(
         obs_len=args.obs,
         pred_len=args.preds,
         d_model=args.d_model,
@@ -227,7 +268,6 @@ def build_model(args, model_artifact):
     )
 
 
-
 def move_batch_to_device(batch, device):
     moved = {}
     for key, value in batch.items():
@@ -238,15 +278,35 @@ def move_batch_to_device(batch, device):
     return moved
 
 
-
-def init_best_records(run_dir):
+def tracked_best_specs(args, run_dir):
+    primary_k = args.eval_topk_primary
+    secondary_k = args.eval_topk_secondary
+    rare_k = secondary_k if secondary_k != primary_k else primary_k
     return {
-        "fde20": {"value": float("inf"), "epoch": 0, "path": os.path.join(run_dir, "best_fde20.pt")},
-        "ade5": {"value": float("inf"), "epoch": 0, "path": os.path.join(run_dir, "best_ade5.pt")},
-        "glev_report20": {"value": float("inf"), "epoch": 0, "path": os.path.join(run_dir, "best_glev_report20.pt")},
-        "rare_fde20": {"value": float("inf"), "epoch": 0, "path": os.path.join(run_dir, "best_rare_fde20.pt")},
+        f"fde{secondary_k}": {
+            "metric_key": f"FDE@{secondary_k}",
+            "path": os.path.join(run_dir, f"best_fde{secondary_k}.pt"),
+        },
+        f"ade{primary_k}": {
+            "metric_key": f"ADE@{primary_k}",
+            "path": os.path.join(run_dir, f"best_ade{primary_k}.pt"),
+        },
+        f"glev_report{secondary_k}": {
+            "metric_key": f"GLeV_report@{secondary_k}",
+            "path": os.path.join(run_dir, f"best_glev_report{secondary_k}.pt"),
+        },
+        f"rare_fde{rare_k}": {
+            "metric_key": f"rare_FDE@{rare_k}",
+            "path": os.path.join(run_dir, f"best_rare_fde{rare_k}.pt"),
+        },
     }
 
+
+def init_best_records(args, run_dir):
+    return {
+        name: {"value": float("inf"), "epoch": 0, "path": spec["path"]}
+        for name, spec in tracked_best_specs(args, run_dir).items()
+    }
 
 
 def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model_artifact, config, meta):
@@ -255,12 +315,7 @@ def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model
         "optimizer": optimizer.state_dict(),
         "epoch": epoch,
         "global_step": global_step,
-        "best": {
-            "fde20": best_records["fde20"]["value"],
-            "ade5": best_records["ade5"]["value"],
-            "glev_report20": best_records["glev_report20"]["value"],
-            "rare_fde20": best_records["rare_fde20"]["value"],
-        },
+        "best": best_records,
         "rng": {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
@@ -275,15 +330,26 @@ def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model
     }
 
 
-
 def save_checkpoint(path, payload):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(payload, path)
 
 
+def autocast_context(device, use_amp):
+    if device.type == "cuda" and use_amp:
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
 
-def evaluate(model, loader, device, enable_refiner, limit_eval_batches=0):
-    metric_sums = init_metric_sums()
+
+def build_grad_scaler(use_amp):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=use_amp)
+    return torch.cuda.amp.GradScaler(enabled=use_amp)
+
+
+def evaluate(model, loader, device, args, enable_refiner, use_amp=False, limit_eval_batches=0):
+    metric_names = metric_names_for_protocol(args.eval_topk_primary, args.eval_topk_secondary)
+    metric_sums = init_metric_sums(metric_names)
     total_count = 0
     rare_count = 0
     model.eval()
@@ -292,13 +358,20 @@ def evaluate(model, loader, device, enable_refiner, limit_eval_batches=0):
             if limit_eval_batches and batch_index >= limit_eval_batches:
                 break
             batch = move_batch_to_device(raw_batch, device)
-            outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
-            metrics, count, rare = summarize_batch_metrics(outputs, batch)
+            with autocast_context(device, use_amp):
+                outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
+            metrics, count, rare = summarize_batch_metrics(
+                outputs,
+                batch,
+                primary_k=args.eval_topk_primary,
+                secondary_k=args.eval_topk_secondary,
+                glev_topn_primary=args.glev_topn_primary,
+                glev_topn_secondary=args.glev_topn_secondary,
+            )
             update_metric_sums(metric_sums, metrics, count)
             total_count += count
             rare_count += rare
     return average_metric_sums(metric_sums, total_count, rare_count), total_count, rare_count
-
 
 
 def peak_memory_mb(device):
@@ -307,14 +380,62 @@ def peak_memory_mb(device):
     return float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
 
 
+def load_resume_checkpoint(args, run_dir, model, optimizer, device):
+    last_path = os.path.join(run_dir, "last.pt")
+    best_records = init_best_records(args, run_dir)
+    if not args.resume or not os.path.exists(last_path):
+        return 1, 0, best_records
+
+    checkpoint = torch.load(last_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+
+    saved_best = checkpoint.get("best", {})
+    for key, record in best_records.items():
+        if key not in saved_best:
+            continue
+        saved_record = saved_best[key]
+        if isinstance(saved_record, dict):
+            record["value"] = float(saved_record.get("value", record["value"]))
+            record["epoch"] = int(saved_record.get("epoch", record["epoch"]))
+        else:
+            record["value"] = float(saved_record)
+        record["path"] = record["path"]
+
+    start_epoch = int(checkpoint.get("epoch", 0)) + 1
+    global_step = int(checkpoint.get("global_step", 0))
+    return start_epoch, global_step, best_records
+
+
+def format_epoch_summary(args, metrics):
+    primary_k = args.eval_topk_primary
+    secondary_k = args.eval_topk_secondary
+    parts = [
+        f"ADE@{primary_k}={metrics[f'ADE@{primary_k}']:.4f}",
+        f"FDE@{primary_k}={metrics[f'FDE@{primary_k}']:.4f}",
+    ]
+    if secondary_k != primary_k:
+        parts.extend(
+            [
+                f"ADE@{secondary_k}={metrics[f'ADE@{secondary_k}']:.4f}",
+                f"FDE@{secondary_k}={metrics[f'FDE@{secondary_k}']:.4f}",
+                f"GLeV_report@{secondary_k}={metrics[f'GLeV_report@{secondary_k}']:.4f}",
+            ]
+        )
+    else:
+        parts.append(f"GLeV_report@{primary_k}={metrics[f'GLeV_report@{primary_k}']:.4f}")
+    return " ".join(parts)
+
 
 def main():
     args = build_parser().parse_args()
     apply_protocol(args)
-    args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs
+    apply_training_defaults(args)
     set_seed(args.seed)
-    device = select_device(args.device)
+    device = select_device(args.device, allow_cpu=args.allow_cpu)
     project_root = os.getcwd()
+    use_amp = device.type == "cuda" and not args.no_amp
+    scaler = build_grad_scaler(use_amp)
 
     train_dir = resolve_split_dir(project_root, args.dataset_variant, args.dataset_name, "train")
     test_dir = resolve_split_dir(project_root, args.dataset_variant, args.dataset_name, "test")
@@ -324,6 +445,8 @@ def main():
         split_name="train",
         obs_len=args.obs,
         pred_len=args.preds,
+        obs_stride=args.obs_stride,
+        pred_stride=args.pred_stride,
         max_agents=args.max_agents,
         n_proto=args.n_proto,
         basis_dim=args.basis_dim,
@@ -335,6 +458,8 @@ def main():
         split_name="test",
         obs_len=args.obs,
         pred_len=args.preds,
+        obs_stride=args.obs_stride,
+        pred_stride=args.pred_stride,
         max_agents=args.max_agents,
         model_artifact=model_artifact,
         n_proto=args.n_proto,
@@ -365,23 +490,44 @@ def main():
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
     os.makedirs(run_dir, exist_ok=True)
 
+    start_epoch, global_step, best_records = load_resume_checkpoint(args, run_dir, model, optimizer, device)
+
     meta = {
+        "project_name": "ProtoBasis-Net",
         "protocol_name": args.protocol_name,
         "protocol_hash": protocol_hash(vars(args)),
         "artifact_hash": model_artifact_hash(model_artifact),
         "basis_hash": basis_hash(model_artifact),
         "git_commit": git_commit(project_root),
+        "seed": args.seed,
         "rare_count": int(len(model_artifact["rare_ids"])),
         "n_proto": args.n_proto,
         "basis_dim": args.basis_dim,
+        "amp_enabled": use_amp,
     }
-    recorder = RunRecorder(run_dir, vars(args), extra_metadata=meta)
-    best_records = init_best_records(run_dir)
+    recorder = RunRecorder(
+        run_dir,
+        vars(args),
+        extra_metadata=meta,
+        resume_state={
+            "enabled": args.resume and start_epoch > 1,
+            "last_epoch": start_epoch - 1,
+            "best": best_records,
+        },
+    )
+
+    if start_epoch > args.epochs:
+        print(
+            f"[Skip] run already reached epoch {start_epoch - 1}. "
+            f"Use --extra_epochs N with --resume to continue."
+        )
+        return
+
     last_path = os.path.join(run_dir, "last.pt")
-    global_step = 0
+    best_specs = tracked_best_specs(args, run_dir)
 
     try:
-        for epoch in range(1, args.epochs + 1):
+        for epoch in range(start_epoch, args.epochs + 1):
             cfg = stage_config(epoch, args)
             current_lr = set_epoch_lr(optimizer, epoch, args)
             train_loader = build_train_loader(train_dataset, args, rare_weight=cfg["rare_weight"])
@@ -397,20 +543,31 @@ def main():
                 if args.limit_train_batches and batch_index >= args.limit_train_batches:
                     break
                 batch = move_batch_to_device(raw_batch, device)
-                outputs = model(
-                    batch["obs_xyz"],
-                    batch["obs_mask"],
-                    gt_proto_id=batch["gt_proto_id"],
-                    force_gt_proto=cfg["force_gt_proto"],
-                    enable_refiner=cfg["enable_refiner"],
-                )
-                loss, loss_stats = loss_fn(outputs, batch, cfg)
+                with autocast_context(device, use_amp):
+                    outputs = model(
+                        batch["obs_xyz"],
+                        batch["obs_mask"],
+                        gt_proto_id=batch["gt_proto_id"],
+                        force_gt_proto=cfg["force_gt_proto"],
+                        enable_refiner=cfg["enable_refiner"],
+                    )
+                    loss, loss_stats = loss_fn(outputs, batch, cfg)
+
                 loss = loss / max(args.grad_accum, 1)
-                loss.backward()
+                if use_amp:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
                 if (batch_index + 1) % args.grad_accum == 0:
+                    if use_amp:
+                        scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-                    optimizer.step()
+                    if use_amp:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
 
@@ -422,8 +579,14 @@ def main():
                 )
 
             if seen_batches and seen_batches % args.grad_accum != 0:
+                if use_amp:
+                    scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-                optimizer.step()
+                if use_amp:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
 
@@ -431,7 +594,9 @@ def main():
                 model,
                 eval_loader,
                 device=device,
+                args=args,
                 enable_refiner=cfg["enable_refiner"],
+                use_amp=use_amp,
                 limit_eval_batches=args.limit_eval_batches,
             )
             memory_mb = peak_memory_mb(device)
@@ -449,32 +614,21 @@ def main():
             )
             save_checkpoint(last_path, ckpt)
 
-            tracked = {
-                "fde20": ("FDE@20", best_records["fde20"]["path"]),
-                "ade5": ("ADE@5", best_records["ade5"]["path"]),
-                "glev_report20": ("GLeV_report@20", best_records["glev_report20"]["path"]),
-                "rare_fde20": ("rare_FDE@20", best_records["rare_fde20"]["path"]),
-            }
-            for best_key, (metric_key, ckpt_path) in tracked.items():
-                value = metrics[metric_key]
+            for best_key, spec in best_specs.items():
+                value = metrics[spec["metric_key"]]
                 if math.isnan(value):
                     continue
                 if value < best_records[best_key]["value"]:
                     best_records[best_key]["value"] = value
                     best_records[best_key]["epoch"] = epoch
-                    save_checkpoint(ckpt_path, ckpt)
+                    save_checkpoint(spec["path"], ckpt)
 
             recorder.log_epoch(epoch, cfg["name"], train_loss, metrics, current_lr, memory_mb)
             recorder.update_live_status(epoch, best_records)
-            print(
-                f"[Epoch {epoch:03d}/{args.epochs:03d}] phase={cfg['name']} "
-                f"loss={train_loss:.4f} ADE@5={metrics['ADE@5']:.4f} FDE@5={metrics['FDE@5']:.4f} "
-                f"ADE@20={metrics['ADE@20']:.4f} FDE@20={metrics['FDE@20']:.4f} "
-                f"GLeV_report@20={metrics['GLeV_report@20']:.4f}"
-            )
+            print(f"[Epoch {epoch:03d}/{args.epochs:03d}] phase={cfg['name']} loss={train_loss:.4f} {format_epoch_summary(args, metrics)}")
 
         recorder.finalize(best_records)
-        print("[Done] ProtoBasis-Flight training finished.")
+        print("[Done] ProtoBasis-Net training finished.")
 
     except KeyboardInterrupt:
         recorder.finalize_incomplete("interrupted", "Training interrupted by user.")
