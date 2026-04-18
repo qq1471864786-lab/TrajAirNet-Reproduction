@@ -1,8 +1,11 @@
 import argparse
 import json
+import os
 import shlex
+import socket
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -375,6 +378,48 @@ def run_ssh(user: str, host: str, command: str) -> str:
     return result.stdout
 
 
+def run_local(command: str) -> str:
+    result = subprocess.run(
+        ["bash", "-lc", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def local_addresses() -> set[str]:
+    addresses = {"127.0.0.1", "::1", "localhost"}
+    for name in {socket.gethostname(), socket.getfqdn()}:
+        if name:
+            addresses.add(name.lower())
+        try:
+            for _, _, _, _, sockaddr in socket.getaddrinfo(name, None):
+                if sockaddr and sockaddr[0]:
+                    addresses.add(sockaddr[0].lower())
+        except OSError:
+            continue
+    return addresses
+
+
+def should_run_locally(host: str, project_root: str) -> bool:
+    if not Path(project_root).exists():
+        return False
+
+    host_norm = host.strip().lower()
+    local_addrs = local_addresses()
+    if host_norm in local_addrs:
+        return True
+
+    try:
+        for _, _, _, _, sockaddr in socket.getaddrinfo(host, None):
+            if sockaddr and sockaddr[0].lower() in local_addrs:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def remote_json(
     user: str,
     host: str,
@@ -399,7 +444,10 @@ def remote_json(
         env_parts.append("INCLUDE_RUN_CONFIG=1")
     env_prefix = " ".join(env_parts)
     command = f"{env_prefix} python3 - <<'PY'\n{REMOTE_DISCOVER_SCRIPT}\nPY"
-    stdout = run_ssh(user, host, command)
+    if should_run_locally(host, project_root):
+        stdout = run_local(command)
+    else:
+        stdout = run_ssh(user, host, command)
     return json.loads(stdout)
 
 

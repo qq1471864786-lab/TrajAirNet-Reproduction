@@ -4,8 +4,10 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -119,6 +121,48 @@ def run_ssh(user: str, host: str, command: str) -> str:
     return result.stdout
 
 
+def run_local(command: str) -> str:
+    result = subprocess.run(
+        ["bash", "-lc", command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def local_addresses() -> set[str]:
+    addresses = {"127.0.0.1", "::1", "localhost"}
+    for name in {socket.gethostname(), socket.getfqdn()}:
+        if name:
+            addresses.add(name.lower())
+        try:
+            for _, _, _, _, sockaddr in socket.getaddrinfo(name, None):
+                if sockaddr and sockaddr[0]:
+                    addresses.add(sockaddr[0].lower())
+        except OSError:
+            continue
+    return addresses
+
+
+def should_run_locally(host: str, project_root: str) -> bool:
+    if not Path(project_root).exists():
+        return False
+
+    host_norm = host.strip().lower()
+    local_addrs = local_addresses()
+    if host_norm in local_addrs:
+        return True
+
+    try:
+        for _, _, _, _, sockaddr in socket.getaddrinfo(host, None):
+            if sockaddr and sockaddr[0].lower() in local_addrs:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def main() -> int:
     args = parse_args()
     train_args = list(args.train_args)
@@ -148,7 +192,10 @@ def main() -> int:
     command = f"{env_prefix} python3 - <<'PY'\n{REMOTE_LAUNCH_SCRIPT}\nPY"
 
     try:
-        stdout = run_ssh(args.user, args.host, command)
+        if should_run_locally(args.host, args.project_root):
+            stdout = run_local(command)
+        else:
+            stdout = run_ssh(args.user, args.host, command)
     except subprocess.CalledProcessError as exc:
         print("远端训练启动失败。", file=sys.stderr)
         if exc.stdout:
