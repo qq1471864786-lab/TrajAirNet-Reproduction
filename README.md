@@ -78,14 +78,30 @@ python scripts/sync_remote.py
 python scripts/launch_remote_train.py -- --dataset_variant social --dataset_name 111_days
 ```
 
-- Inspect the latest remote run, including run status, process info, logs, and optional system snapshot:
+- Inspect the latest remote run with the compact "eyes" view:
 
 ```bash
-python scripts/server_status.py --show-logs --show-epochs --show-system
+python scripts/server_status.py
+```
+
+- Compact JSON for automation / low-token parsing:
+
+```bash
+python scripts/server_status.py --json
+```
+
+- Expand only when needed:
+
+```bash
+python scripts/server_status.py --show-system
+python scripts/server_status.py --show-epochs
+python scripts/server_status.py --show-logs
+python scripts/server_status.py --json --full
 ```
 
 Automation note:
 
 - `scripts/sync_remote.py` performs incremental source sync and records the last sync timestamp locally.
 - `scripts/launch_remote_train.py` starts remote training under `.remote_runs/<timestamp_name>/` and preserves command/stdout/stderr.
-- `scripts/server_status.py` can now be used as the main remote "eyes" script: it reports project-related processes, latest run artifacts, best metrics, recent logs, GPU/memory/disk snapshot, and remote git state.
+- `scripts/server_status.py` defaults to a compact status summary so remote checks stay token-efficient.
+- Use `--json` for compact machine-readable snapshots and `--json --full` only for deep inspection.
