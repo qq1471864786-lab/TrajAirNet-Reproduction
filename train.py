@@ -77,6 +77,7 @@ def build_parser():
     parser.add_argument("--dropout", type=float, default=0.10)
 
     parser.add_argument("--batch_size", type=int, default=0)
+    parser.add_argument("--eval_batch_size", type=int, default=0)
     parser.add_argument("--grad_accum", type=int, default=0)
     parser.add_argument("--phase_a_epochs", type=int, default=10)
     parser.add_argument("--phase_b_epochs", type=int, default=35)
@@ -168,19 +169,34 @@ def apply_training_defaults(args):
 
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
-            args.batch_size = 16
+            args.batch_size = 64
         elif is_unified:
-            args.batch_size = 24
+            args.batch_size = 48
         else:
-            args.batch_size = 32
+            args.batch_size = 48
+
+    if args.eval_batch_size <= 0:
+        args.eval_batch_size = max(args.batch_size * 2, args.batch_size)
 
     if args.grad_accum <= 0:
-        if is_unified and is_main_dataset:
-            args.grad_accum = 2
-        else:
-            args.grad_accum = 1
+        args.grad_accum = 1
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
+
+
+def apply_runtime_defaults(args, device):
+    if args.num_workers <= 0:
+        if os.name == "nt":
+            args.num_workers = 0
+        else:
+            cpu_count = os.cpu_count() or 4
+            args.num_workers = min(8, max(2, cpu_count // 2))
+
+    if device.type == "cuda":
+        args.pin_memory = True
+
+    if args.num_workers > 0:
+        args.persistent_workers = True
 
 
 def stage_config(epoch, args):
@@ -257,7 +273,7 @@ def build_train_loader(dataset, args, rare_weight):
 def build_eval_loader(dataset, args):
     return DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=args.eval_batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=partial(proto_basis_collate, max_agents=args.max_agents),
@@ -566,6 +582,7 @@ def main():
     apply_training_defaults(args)
     set_seed(args.seed)
     device = select_device(args.device, allow_cpu=args.allow_cpu)
+    apply_runtime_defaults(args, device)
     project_root = os.getcwd()
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = build_grad_scaler(use_amp)
