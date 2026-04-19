@@ -315,3 +315,72 @@ Expected limitation:
 
 - `ADE@5` and `Top1` may not improve much from extra epochs alone
 - those likely still require a later method-side change around prototype/end-anchor or ranking behavior
+
+## Follow-Up Rejected Experiment C: Micro Endpoint Residual
+
+Hypothesis:
+
+- current `20` modes are effectively `5` endpoint hypotheses times `4` shape variants
+- letting each micro mode learn its own endpoint residual might improve `FDE@5` and `Top1_FDE`
+
+Implementation tested:
+
+- add a bounded per-mode endpoint delta in the query decoder
+- replace the shared proto endpoint anchor with `proto endpoint + micro endpoint delta`
+- keep the rest of ProtoBasis unchanged
+
+Controlled command (before and after used the same command):
+
+```bash
+conda run -n trajair python train.py 111_days --device cuda:0 --save_dir tmp_compare_endpoint_before --phase_a_epochs 10 --phase_b_epochs 12 --phase_c_epochs 4 --extra_epochs 0 --batch_size 512 --eval_batch_size 1024 --limit_train_batches 120 --limit_eval_batches 20
+```
+
+Baseline result (`epoch 26`, before micro endpoint residual):
+
+- `ADE@5 = 0.4807`
+- `FDE@5 = 0.7548`
+- `ADE@20 = 0.4068`
+- `FDE@20 = 0.5305`
+- `rare_FDE@20 = 1.4299`
+- `Top1_ADE = 0.7537`
+- `Top1_FDE = 1.4496`
+- `GLeV_report@20 = 0.1801`
+- `score_entropy = 2.7279`
+- `endpoint_var = 2.1957`
+
+Micro-endpoint result (`epoch 26`, after the structural change):
+
+- `ADE@5 = 0.4988`
+- `FDE@5 = 0.7511`
+- `ADE@20 = 0.4346`
+- `FDE@20 = 0.5405`
+- `rare_FDE@20 = 1.3953`
+- `Top1_ADE = 0.7627`
+- `Top1_FDE = 1.4141`
+- `GLeV_report@20 = 0.2052`
+- `score_entropy = 2.5577`
+- `endpoint_var = 2.3391`
+
+Decision:
+
+- small gains were observed on:
+  - `FDE@5`
+  - `rare_FDE@20`
+  - `Top1_FDE`
+- but the more important overall picture regressed:
+  - `ADE@5`
+  - `ADE@20`
+  - `FDE@20`
+  - `Top1_ADE`
+  - `GLeV_report@20`
+
+Interpretation:
+
+- the direction touches a real bottleneck
+- but this naive version makes endpoint hypotheses more flexible without making the prototype structure itself more informative
+- it improves some endpoint-facing metrics slightly, but weakens the stronger global geometry line
+
+Conclusion:
+
+- do not keep this version as the new default
+- if endpoint/prototype is the next method-side target, it needs a more principled design than simply adding free micro endpoint offsets
