@@ -169,14 +169,17 @@ def apply_training_defaults(args):
 
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
-            args.batch_size = 64
+            args.batch_size = 512
         elif is_unified:
             args.batch_size = 48
         else:
             args.batch_size = 48
 
     if args.eval_batch_size <= 0:
-        args.eval_batch_size = max(args.batch_size * 2, args.batch_size)
+        if is_unified and is_main_dataset:
+            args.eval_batch_size = 1024
+        else:
+            args.eval_batch_size = max(args.batch_size * 2, args.batch_size)
 
     if args.grad_accum <= 0:
         args.grad_accum = 1
