@@ -106,6 +106,7 @@ class TemporalEncoder(nn.Module):
         self.local_proj = nn.Linear(8, 48)
         self.global_proj = nn.Linear(7, 48)
         self.time_emb = nn.Embedding(obs_len, d_model)
+        self.register_buffer("time_ids", torch.arange(obs_len, dtype=torch.long), persistent=False)
         block = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -123,8 +124,7 @@ class TemporalEncoder(nn.Module):
         local_h = self.local_proj(feats_local)
         global_h = self.global_proj(feats_global)
         hidden = torch.cat([local_h, global_h], dim=-1)
-        time_ids = torch.arange(obs_len, device=hidden.device)
-        hidden = hidden + self.time_emb(time_ids)[None, None, :, :]
+        hidden = hidden + self.time_emb(self.time_ids[:obs_len])[None, None, :, :]
         hidden = hidden.view(batch_size * num_agents, obs_len, -1)
         hidden = self.encoder(hidden)
         pooled = hidden.max(dim=1).values
@@ -302,8 +302,7 @@ class TemporalResidualRefiner(nn.Module):
         return coarse_local_xyz + gate[:, :, None, None] * update
 
 
-def build_anchor(endpoint_local, pred_len):
-    alpha = torch.linspace(0.0, 1.0, steps=pred_len, device=endpoint_local.device, dtype=endpoint_local.dtype)
+def build_anchor(endpoint_local, alpha):
     return alpha[None, None, :, None] * endpoint_local[:, :, None, :]
 
 
@@ -347,6 +346,7 @@ class ProtoBasisNet(nn.Module):
         self.disable_refiner = disable_refiner
 
         self.pose_normalizer = PoseNormalizer()
+        self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
             d_model=d_model,
             nhead=nhead,
@@ -380,7 +380,7 @@ class ProtoBasisNet(nn.Module):
         self.register_buffer("proto_frequency", proto_frequency.float())
 
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
-        local_xyz, yaw, pitch, origin, rotation = self.pose_normalizer(obs_xyz)
+        local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
         feats_local = build_local_features(local_xyz)
         feats_global = build_global_features(obs_xyz)
 
@@ -408,13 +408,12 @@ class ProtoBasisNet(nn.Module):
             obs_mask,
         )
         endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
-        anchor_local = build_anchor(endpoint_mode_local, pred_len=self.pred_len)
+        anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
         coarse_local = self.basis_bank(anchor_local, coeff)
         use_refiner = enable_refiner and (not self.disable_refiner)
         refined_local = self.refiner(coarse_local, query_feat, difficulty_gate) if use_refiner else coarse_local
 
         pred_xyz = self.pose_normalizer.inverse(refined_local, origin, rotation)
-        coarse_xyz = self.pose_normalizer.inverse(coarse_local, origin, rotation)
 
         return {
             "pred_xyz": pred_xyz,
@@ -422,20 +421,8 @@ class ProtoBasisNet(nn.Module):
             "proto_logits": proto_logits,
             "top_proto_idx": top_proto_idx,
             "aux": {
-                "query_feat": query_feat,
                 "coeff": coeff,
-                "difficulty_gate": difficulty_gate,
                 "endpoint_residual": endpoint_residual,
-                "endpoint_local": endpoint_local,
-                "endpoint_mode_local": endpoint_mode_local,
-                "anchor_local": anchor_local,
-                "coarse_local_xyz": coarse_local,
-                "coarse_xyz": coarse_xyz,
-                "refined_local_xyz": refined_local,
-                "target_yaw": yaw,
-                "target_pitch": pitch,
-                "origin": origin,
-                "used_refiner": use_refiner,
             },
         }
 
