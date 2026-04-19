@@ -191,3 +191,80 @@ Practical conclusion:
 - keep the schedule refinement direction
 - keep quality-aware score supervision as the new base direction
 - do one more score-head refinement before calling this the final default for the paper
+
+## Follow-Up Rejected Experiments
+
+Two deeper score-side follow-up experiments were tested after the validated proxy above.
+They are recorded here for traceability, but neither is kept as the new default.
+
+### Rejected Experiment A: Post-Refiner Rerank Head
+
+Idea:
+
+- keep ProtoBasis generation unchanged
+- add a small rerank head after the refiner so the final score sees the final trajectory instead of only the pre-refiner hidden state
+
+Proxy command:
+
+```bash
+conda run -n trajair python train.py 111_days --device cuda:0 --save_dir tmp_compare_rerank --phase_a_epochs 10 --phase_b_epochs 12 --phase_c_epochs 4 --batch_size 512 --eval_batch_size 1024 --limit_train_batches 120 --limit_eval_batches 20
+```
+
+Result (`epoch 26`):
+
+- `ADE@5 = 0.5024`
+- `FDE@5 = 0.7802`
+- `ADE@20 = 0.4080`
+- `FDE@20 = 0.5025`
+- `rare_FDE@20 = 1.3157`
+- `Top1_ADE = 0.8118`
+- `Top1_FDE = 1.5151`
+- `GLeV_report@20 = 0.2140`
+
+Decision:
+
+- `ADE@20/FDE@20/rare_FDE@20` improved slightly
+- but `ADE@5/FDE@5/Top1/GLeV` regressed too much
+- this direction is rejected as a new default
+
+### Rejected Experiment B: Sharpened Soft Score Targets
+
+Idea:
+
+- keep the validated schedule refinement
+- sharpen the quality-aware score supervision by increasing hard-score mixing and restricting the soft target to top-quality candidates
+
+Proxy command:
+
+```bash
+conda run -n trajair python train.py 111_days --device cuda:0 --save_dir tmp_compare_sharp --phase_a_epochs 10 --phase_b_epochs 12 --phase_c_epochs 4 --batch_size 512 --eval_batch_size 1024 --limit_train_batches 120 --limit_eval_batches 20
+```
+
+Result (`epoch 26`):
+
+- `ADE@5 = 0.4889`
+- `FDE@5 = 0.7637`
+- `ADE@20 = 0.4163`
+- `FDE@20 = 0.5417`
+- `rare_FDE@20 = 1.5024`
+- `Top1_ADE = 0.7457`
+- `Top1_FDE = 1.4054`
+- `GLeV_report@20 = 0.1643`
+
+Decision:
+
+- `Top1_FDE` and `GLeV_report@20` improved slightly
+- but `ADE@5/ADE@20/FDE@20/rare_FDE@20` all regressed relative to the validated base
+- this direction is also rejected as a new default
+
+## Current Confirmed Position
+
+The current best validated default for the next main training run remains:
+
+- shorter `joint_no_refiner`
+- earlier `joint_refiner`
+- `Stage B` rank/div turned off
+- quality-aware soft score supervision from the validated proxy setting
+
+The next justified method-level direction is not another aggressive score-head rewrite.
+The artifact diagnostic still indicates that the deeper long-horizon bottleneck remains in the prototype/end-anchor layer rather than in global shape reconstruction.
