@@ -1,12 +1,14 @@
 import hashlib
 import math
 import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 
 def resolve_split_dir(project_root, dataset_variant, dataset_name, split):
@@ -94,14 +96,9 @@ def _future_local_summary(obs_xyz, fut_xyz):
     return future_local, summary
 
 
-def _pairwise_last_obs_distance(track_a, track_b):
-    delta = track_a[-1] - track_b[-1]
-    return float(np.linalg.norm(delta))
-
-
 def _cache_path(data_dir, obs_len, pred_len, max_agents, obs_stride=1, pred_stride=1):
     file_names = sorted(name for name in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, name)))
-    key = f"protobasis_v2|{data_dir}|{file_names}|{obs_len}|{pred_len}|{max_agents}|{obs_stride}|{pred_stride}"
+    key = f"protobasis_v3|{data_dir}|{file_names}|{obs_len}|{pred_len}|{max_agents}|{obs_stride}|{pred_stride}"
     digest = hashlib.md5(key.encode()).hexdigest()[:12]
     cache_dir = os.path.join(data_dir, ".cache")
     return os.path.join(cache_dir, f"protobasis_dataset_{digest}.pt")
@@ -156,11 +153,18 @@ def _run_kmeans(data, n_clusters, random_state=3407, iters=50):
 
 
 def _fit_basis_bank(future_local_bank, pred_len, basis_dim, max_samples=60000, random_state=3407):
-    if len(future_local_bank) > max_samples:
-        rng = np.random.default_rng(random_state)
-        sample_ids = rng.choice(len(future_local_bank), size=max_samples, replace=False)
-        future_local_bank = [future_local_bank[idx] for idx in sample_ids.tolist()]
-    futures = np.stack(future_local_bank, axis=0).astype(np.float32)
+    if isinstance(future_local_bank, np.ndarray):
+        futures = future_local_bank.astype(np.float32, copy=False)
+        if futures.shape[0] > max_samples:
+            rng = np.random.default_rng(random_state)
+            sample_ids = rng.choice(futures.shape[0], size=max_samples, replace=False)
+            futures = futures[sample_ids]
+    else:
+        if len(future_local_bank) > max_samples:
+            rng = np.random.default_rng(random_state)
+            sample_ids = rng.choice(len(future_local_bank), size=max_samples, replace=False)
+            future_local_bank = [future_local_bank[idx] for idx in sample_ids.tolist()]
+        futures = np.stack(future_local_bank, axis=0).astype(np.float32)
     alpha = np.linspace(0.0, 1.0, num=pred_len, dtype=np.float32)[None, :, None]
     endpoints = futures[:, -1:, :]
     anchors = alpha * endpoints
@@ -173,6 +177,48 @@ def _fit_basis_bank(future_local_bank, pred_len, basis_dim, max_samples=60000, r
         pad = np.zeros((basis_dim - rank, flat_residual.shape[1]), dtype=np.float32)
         basis_flat = np.concatenate([basis_flat, pad], axis=0)
     return basis_flat.reshape(basis_dim, pred_len, 3).astype(np.float32)
+
+
+def _empty_sample_store(max_agents, pred_len):
+    return {
+        "file_index": np.zeros((0,), dtype=np.int32),
+        "start_idx": np.zeros((0,), dtype=np.int32),
+        "target_agent_idx": np.zeros((0,), dtype=np.int32),
+        "agent_indices": np.full((0, max_agents), -1, dtype=np.int32),
+        "agent_count": np.zeros((0,), dtype=np.int16),
+        "proto_summary_5d": np.zeros((0, 5), dtype=np.float32),
+        "future_local": np.zeros((0, pred_len, 3), dtype=np.float32),
+        "gt_proto_id": np.zeros((0,), dtype=np.int64),
+        "gt_proto_residual": np.zeros((0, 3), dtype=np.float32),
+        "is_rare": np.zeros((0,), dtype=np.bool_),
+    }
+
+
+def _pack_sample_rows(sample_rows, max_agents, pred_len):
+    if not sample_rows:
+        return _empty_sample_store(max_agents, pred_len)
+
+    sample_count = len(sample_rows)
+    store = {
+        "file_index": np.zeros((sample_count,), dtype=np.int32),
+        "start_idx": np.zeros((sample_count,), dtype=np.int32),
+        "target_agent_idx": np.zeros((sample_count,), dtype=np.int32),
+        "agent_indices": np.full((sample_count, max_agents), -1, dtype=np.int32),
+        "agent_count": np.zeros((sample_count,), dtype=np.int16),
+        "proto_summary_5d": np.zeros((sample_count, 5), dtype=np.float32),
+        "future_local": np.zeros((sample_count, pred_len, 3), dtype=np.float32),
+    }
+
+    for index, row in enumerate(sample_rows):
+        store["file_index"][index] = row["file_index"]
+        store["start_idx"][index] = row["start_idx"]
+        store["target_agent_idx"][index] = row["target_agent_idx"]
+        store["agent_count"][index] = row["agent_count"]
+        store["agent_indices"][index, : row["agent_count"]] = row["agent_indices"]
+        store["proto_summary_5d"][index] = row["proto_summary_5d"]
+        store["future_local"][index] = row["future_local"]
+
+    return store
 
 
 @dataclass
@@ -206,7 +252,7 @@ class ProtoBasisArtifact:
 
 
 class ProtoBasisSceneDataset(Dataset):
-    CACHE_VERSION = 4
+    CACHE_VERSION = 5
 
     def __init__(
         self,
@@ -236,28 +282,38 @@ class ProtoBasisSceneDataset(Dataset):
         self.n_proto = n_proto
         self.basis_dim = basis_dim
         self.rare_threshold = rare_threshold
+        self.obs_index_offsets = np.arange(obs_len, dtype=np.int32) * obs_stride
+        self.pred_index_offsets = (
+            (obs_len - 1) * obs_stride + (np.arange(pred_len, dtype=np.int32) + 1) * pred_stride
+        )
+        self.window_index_offsets = np.concatenate([self.obs_index_offsets, self.pred_index_offsets], axis=0)
 
         self.file_records: List[Dict] = []
-        self.sample_index: List[Dict] = []
+        self.samples = _empty_sample_store(max_agents, pred_len)
 
         cache_path = _cache_path(data_dir, obs_len, pred_len, max_agents, obs_stride=obs_stride, pred_stride=pred_stride)
         if os.path.isfile(cache_path):
+            print(f"[Cache] loading {split_name} split: {cache_path}", flush=True)
             try:
                 cached = torch.load(cache_path, weights_only=False)
             except Exception:
                 os.remove(cache_path)
                 self._build_and_cache(cache_path)
             else:
-                if cached.get("cache_version") == self.CACHE_VERSION and "file_records" in cached:
+                if cached.get("cache_version") == self.CACHE_VERSION and "file_records" in cached and "samples" in cached:
                     self.file_records = cached["file_records"]
-                    self.sample_index = cached["sample_index"]
+                    self.samples = cached["samples"]
                 else:
                     self._build_and_cache(cache_path)
         else:
             self._build_and_cache(cache_path)
 
-        if not self.sample_index:
+        if len(self) == 0:
             raise RuntimeError(f"No valid ProtoBasis-Net samples built from {data_dir}")
+        print(
+            f"[Cache] ready {split_name}: files={len(self.file_records)} samples={len(self)}",
+            flush=True,
+        )
 
         if model_artifact is None:
             if split_name != "train":
@@ -273,33 +329,52 @@ class ProtoBasisSceneDataset(Dataset):
                 rare_threshold=rare_threshold,
             )
             if os.path.isfile(artifact_path):
+                print(f"[Cache] loading train artifact: {artifact_path}", flush=True)
                 model_artifact = torch.load(artifact_path, weights_only=False)
             else:
+                print(f"[Cache] fitting train artifact from {len(self)} cached samples...", flush=True)
                 model_artifact = self._fit_model_artifact()
                 os.makedirs(os.path.dirname(artifact_path), exist_ok=True)
                 torch.save(model_artifact, artifact_path)
+                print(f"[Cache] saved train artifact: {artifact_path}", flush=True)
 
         self.model_artifact = model_artifact
         self.prototype_summary_5d = np.asarray(model_artifact["summary_5d"], dtype=np.float32)
         self.prototype_frequency = np.asarray(model_artifact["frequency"], dtype=np.float32)
         self.rare_proto_ids = np.asarray(model_artifact["rare_ids"], dtype=np.int64)
         self.basis_bank = np.asarray(model_artifact["basis_bank"], dtype=np.float32)
-        self.rare_proto_set = set(int(idx) for idx in self.rare_proto_ids.tolist())
         self._assign_prototypes()
 
     def _build_and_cache(self, cache_path):
         file_names = sorted(
             name for name in os.listdir(self.data_dir) if os.path.isfile(os.path.join(self.data_dir, name))
         )
-        for file_name in file_names:
+        print(
+            f"[Cache] building {self.split_name} split cache for {os.path.basename(self.data_dir)}...",
+            flush=True,
+        )
+        sample_rows = []
+        progress = tqdm(
+            file_names,
+            desc=f"cache:{self.split_name}",
+            dynamic_ncols=True,
+            leave=False,
+            file=sys.stdout,
+        )
+        for file_name in progress:
             path = os.path.join(self.data_dir, file_name)
             data = read_txt_file(path, self.delim)
             file_record = self._build_file_record(data, path)
             if file_record is None:
                 continue
             file_index = len(self.file_records)
+            sample_rows.extend(self._build_target_windows(file_record, file_index))
+            file_record.pop("present", None)
+            file_record.pop("frame_ids", None)
             self.file_records.append(file_record)
-            self.sample_index.extend(self._build_target_windows(file_record, file_index))
+            progress.set_postfix(files=len(self.file_records), samples=len(sample_rows), refresh=False)
+        progress.close()
+        self.samples = _pack_sample_rows(sample_rows, self.max_agents, self.pred_len)
 
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         try:
@@ -307,10 +382,11 @@ class ProtoBasisSceneDataset(Dataset):
                 {
                     "cache_version": self.CACHE_VERSION,
                     "file_records": self.file_records,
-                    "sample_index": self.sample_index,
+                    "samples": self.samples,
                 },
                 cache_path,
             )
+            print(f"[Cache] saved {self.split_name} split cache: {cache_path}", flush=True)
         except MemoryError:
             if os.path.exists(cache_path):
                 try:
@@ -321,78 +397,57 @@ class ProtoBasisSceneDataset(Dataset):
     def _build_file_record(self, data, source_path):
         if data.size == 0:
             return None
-        frames = np.unique(data[:, 0]).tolist()
+        frames = np.unique(data[:, 0]).astype(np.float32)
         if len(frames) < self.sequence_span:
             return None
+        agent_ids = np.unique(data[:, 1]).astype(np.int64)
+        frame_indices = np.searchsorted(frames, data[:, 0])
+        agent_indices = np.searchsorted(agent_ids, data[:, 1])
+        positions = np.zeros((len(agent_ids), len(frames), 3), dtype=np.float32)
+        present = np.zeros((len(agent_ids), len(frames)), dtype=np.bool_)
+        positions[agent_indices, frame_indices] = data[:, 2:5].astype(np.float32)
+        present[agent_indices, frame_indices] = True
         return {
-            "data": data,
-            "frames": frames,
-            "frame_map": {frame: data[data[:, 0] == frame] for frame in frames},
+            "positions": positions,
+            "present": present,
+            "frame_ids": frames,
+            "agent_ids": agent_ids,
             "source_path": source_path,
         }
 
-    def _extract_track(self, frame_map, frame_ids, agent_id):
-        points = []
-        for frame_id in frame_ids:
-            frame_rows = frame_map[frame_id]
-            agent_rows = frame_rows[frame_rows[:, 1] == agent_id]
-            if agent_rows.shape[0] != 1:
-                return None
-            points.append(agent_rows[0, 2:5].astype(np.float32))
-        return np.stack(points, axis=0)
-
     def _build_target_windows(self, file_record, file_index):
-        frames = file_record["frames"]
-        frame_map = file_record["frame_map"]
+        frame_ids = file_record["frame_ids"]
+        positions = file_record["positions"]
+        present = file_record["present"]
         windows = []
-        max_start = len(frames) - self.sequence_span + 1
+        if positions.shape[0] == 0:
+            return windows
+        max_start = len(frame_ids) - self.sequence_span + 1
+        if max_start <= 0:
+            return windows
 
         for start_idx in range(max_start):
-            obs_index_ids = [start_idx + step * self.obs_stride for step in range(self.obs_len)]
-            pred_base = obs_index_ids[-1]
-            pred_index_ids = [pred_base + (step + 1) * self.pred_stride for step in range(self.pred_len)]
-            selected_index_ids = obs_index_ids + pred_index_ids
-            selected_frames = [frames[idx] for idx in selected_index_ids]
-            obs_frame_ids = selected_frames[: self.obs_len]
-            pred_frame_ids = selected_frames[self.obs_len :]
-            window_segments = [frame_map[frame] for frame in selected_frames]
-            window_data = np.concatenate(window_segments, axis=0)
-            agent_ids = np.unique(window_data[:, 1]).tolist()
-
-            complete_tracks = {}
-            for agent_id in agent_ids:
-                track_xyz = self._extract_track(frame_map, selected_frames, agent_id)
-                if track_xyz is None:
-                    continue
-                complete_tracks[int(agent_id)] = track_xyz
-
-            valid_ids = sorted(complete_tracks.keys())
-            if not valid_ids:
+            selected_index_ids = start_idx + self.window_index_offsets
+            valid_agent_indices = np.flatnonzero(present[:, selected_index_ids].all(axis=1))
+            if valid_agent_indices.size == 0:
                 continue
-
-            for target_id in valid_ids:
-                target_track = complete_tracks[target_id]
+            window_tracks = positions[valid_agent_indices][:, selected_index_ids]
+            last_obs = window_tracks[:, self.obs_len - 1]
+            for valid_offset, target_agent_idx in enumerate(valid_agent_indices.tolist()):
+                target_track = window_tracks[valid_offset]
                 obs_xyz = target_track[: self.obs_len]
                 fut_xyz = target_track[self.obs_len :]
                 future_local, proto_summary_5d = _future_local_summary(obs_xyz, fut_xyz)
-
-                neighbor_ids = [agent_id for agent_id in valid_ids if agent_id != target_id]
-                neighbor_ids.sort(
-                    key=lambda agent_id: _pairwise_last_obs_distance(
-                        complete_tracks[target_id][: self.obs_len],
-                        complete_tracks[agent_id][: self.obs_len],
-                    )
-                )
-                selected_ids = [target_id] + neighbor_ids[: self.max_agents - 1]
+                distances = np.linalg.norm(last_obs - last_obs[valid_offset][None, :], axis=1)
+                nearest_order = np.argsort(distances, kind="stable")[: self.max_agents]
+                selected_indices = valid_agent_indices[nearest_order]
                 windows.append(
                     {
                         "file_index": file_index,
                         "start_idx": start_idx,
-                        "target_id": target_id,
-                        "agent_ids": selected_ids,
-                        "agent_count": len(selected_ids),
-                        "obs_frame_ids": obs_frame_ids,
-                        "pred_frame_ids": pred_frame_ids,
+                        "target_agent_idx": target_agent_idx,
+                        "agent_indices": selected_indices.astype(np.int32),
+                        "agent_count": int(selected_indices.shape[0]),
                         "proto_summary_5d": proto_summary_5d,
                         "future_local": future_local,
                     }
@@ -400,13 +455,13 @@ class ProtoBasisSceneDataset(Dataset):
         return windows
 
     def _fit_model_artifact(self):
-        summaries = np.stack([sample["proto_summary_5d"] for sample in self.sample_index], axis=0)
+        summaries = self.samples["proto_summary_5d"]
         centers, labels = _run_kmeans(summaries, n_clusters=self.n_proto, random_state=3407)
         frequency = np.bincount(labels, minlength=self.n_proto).astype(np.float32)
         frequency = frequency / max(float(frequency.sum()), 1.0)
         rare_ids = np.nonzero(frequency < self.rare_threshold)[0].astype(np.int64)
         basis_bank = _fit_basis_bank(
-            [sample["future_local"] for sample in self.sample_index],
+            self.samples["future_local"],
             pred_len=self.pred_len,
             basis_dim=self.basis_dim,
         )
@@ -427,14 +482,20 @@ class ProtoBasisSceneDataset(Dataset):
     def _assign_prototypes(self):
         proto_summary = self.prototype_summary_5d
         proto_endpoints = proto_summary[:, :3]
-        for sample in self.sample_index:
-            summary = sample["proto_summary_5d"]
-            distances = ((proto_summary - summary[None, :]) ** 2).sum(axis=1)
-            proto_id = int(np.argmin(distances))
-            endpoint_residual = summary[:3] - proto_endpoints[proto_id]
-            sample["gt_proto_id"] = proto_id
-            sample["gt_proto_residual"] = endpoint_residual.astype(np.float32)
-            sample["is_rare"] = proto_id in self.rare_proto_set
+        sample_count = len(self)
+        gt_proto_id = np.zeros((sample_count,), dtype=np.int64)
+        gt_proto_residual = np.zeros((sample_count, 3), dtype=np.float32)
+        chunk_size = 8192
+        for start in range(0, sample_count, chunk_size):
+            end = min(start + chunk_size, sample_count)
+            summary = self.samples["proto_summary_5d"][start:end]
+            distances = ((summary[:, None, :] - proto_summary[None, :, :]) ** 2).sum(axis=2)
+            chunk_ids = np.argmin(distances, axis=1).astype(np.int64)
+            gt_proto_id[start:end] = chunk_ids
+            gt_proto_residual[start:end] = summary[:, :3] - proto_endpoints[chunk_ids]
+        self.samples["gt_proto_id"] = gt_proto_id
+        self.samples["gt_proto_residual"] = gt_proto_residual
+        self.samples["is_rare"] = np.isin(gt_proto_id, self.rare_proto_ids)
 
     def export_model_artifact(self):
         return {
@@ -451,42 +512,37 @@ class ProtoBasisSceneDataset(Dataset):
             "pred_stride": self.pred_stride,
         }
 
+    def sample_weights(self, rare_weight):
+        is_rare = self.samples["is_rare"].astype(np.float64, copy=False)
+        return np.where(is_rare > 0.0, float(rare_weight), 1.0).astype(np.float64)
+
     def __len__(self):
-        return len(self.sample_index)
+        return int(self.samples["file_index"].shape[0])
 
     def __getitem__(self, index):
-        sample_meta = self.sample_index[index]
-        file_record = self.file_records[sample_meta["file_index"]]
-        frame_map = file_record["frame_map"]
-        start_idx = sample_meta["start_idx"]
-        obs_frame_ids = sample_meta["obs_frame_ids"]
-        pred_frame_ids = sample_meta["pred_frame_ids"]
-
-        obs_agents = []
-        for agent_id in sample_meta["agent_ids"]:
-            obs_track = self._extract_track(frame_map, obs_frame_ids, agent_id)
-            if obs_track is None:
-                raise RuntimeError(
-                    f"Missing observed frames for agent={agent_id} in {file_record['source_path']} sample={sample_meta}"
-                )
-            obs_agents.append(obs_track)
-
-        fut_target = self._extract_track(frame_map, pred_frame_ids, sample_meta["target_id"])
-        if fut_target is None:
-            raise RuntimeError(
-                f"Missing future frames for target={sample_meta['target_id']} in {file_record['source_path']} sample={sample_meta}"
-            )
+        file_index = int(self.samples["file_index"][index])
+        file_record = self.file_records[file_index]
+        start_idx = int(self.samples["start_idx"][index])
+        agent_count = int(self.samples["agent_count"][index])
+        target_agent_idx = int(self.samples["target_agent_idx"][index])
+        obs_index_ids = start_idx + self.obs_index_offsets
+        pred_index_ids = start_idx + self.pred_index_offsets
+        agent_indices = self.samples["agent_indices"][index, :agent_count]
+        positions = file_record["positions"]
+        obs_agents = positions[agent_indices][:, obs_index_ids]
+        fut_target = positions[target_agent_idx, pred_index_ids]
+        target_agent_id = int(file_record["agent_ids"][target_agent_idx])
 
         return {
-            "obs_xyz": torch.tensor(np.stack(obs_agents, axis=0), dtype=torch.float32),
+            "obs_xyz": torch.tensor(obs_agents, dtype=torch.float32),
             "fut_xyz": torch.tensor(fut_target, dtype=torch.float32),
-            "fut_local": torch.tensor(sample_meta["future_local"], dtype=torch.float32),
-            "obs_mask": torch.ones(len(sample_meta["agent_ids"]), dtype=torch.bool),
-            "gt_proto_id": torch.tensor(sample_meta["gt_proto_id"], dtype=torch.long),
-            "gt_proto_residual": torch.tensor(sample_meta["gt_proto_residual"], dtype=torch.float32),
-            "is_rare": torch.tensor(sample_meta["is_rare"], dtype=torch.bool),
+            "fut_local": torch.tensor(self.samples["future_local"][index], dtype=torch.float32),
+            "obs_mask": torch.ones(agent_count, dtype=torch.bool),
+            "gt_proto_id": torch.tensor(int(self.samples["gt_proto_id"][index]), dtype=torch.long),
+            "gt_proto_residual": torch.tensor(self.samples["gt_proto_residual"][index], dtype=torch.float32),
+            "is_rare": torch.tensor(bool(self.samples["is_rare"][index]), dtype=torch.bool),
             "source_path": file_record["source_path"],
-            "scene_id": f"{os.path.basename(file_record['source_path'])}:{start_idx}:{sample_meta['target_id']}",
+            "scene_id": f"{os.path.basename(file_record['source_path'])}:{start_idx}:{target_agent_id}",
             "split_name": self.split_name,
         }
 

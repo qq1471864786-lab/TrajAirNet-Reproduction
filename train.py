@@ -249,12 +249,12 @@ def set_epoch_lr(optimizer, epoch, args):
 
 
 def build_train_loader(dataset, args, rare_weight):
-    weights = [rare_weight if sample["is_rare"] else 1.0 for sample in dataset.sample_index]
+    weights = dataset.sample_weights(rare_weight)
     generator = torch.Generator()
     generator.manual_seed(args.seed)
     sampler = WeightedRandomSampler(
         weights=torch.tensor(weights, dtype=torch.double),
-        num_samples=len(weights),
+        num_samples=int(len(weights)),
         replacement=True,
         generator=generator,
     )
@@ -391,14 +391,35 @@ def build_grad_scaler(use_amp):
     return torch.cuda.amp.GradScaler(enabled=use_amp)
 
 
-def evaluate(model, loader, device, args, enable_refiner, use_amp=False, limit_eval_batches=0):
+def evaluate(
+    model,
+    loader,
+    device,
+    args,
+    enable_refiner,
+    use_amp=False,
+    limit_eval_batches=0,
+    progress_desc="eval",
+):
     metric_names = metric_names_for_protocol(args.eval_topk_primary, args.eval_topk_secondary)
     metric_sums = init_metric_sums(metric_names)
     total_count = 0
     rare_count = 0
     model.eval()
+    total_batches = len(loader)
+    if limit_eval_batches:
+        total_batches = min(total_batches, limit_eval_batches)
+    progress = tqdm(
+        loader,
+        leave=False,
+        dynamic_ncols=True,
+        total=total_batches,
+        desc=progress_desc,
+        file=sys.stdout,
+        bar_format="{l_bar}{bar:24}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+    )
     with torch.no_grad():
-        for batch_index, raw_batch in enumerate(loader):
+        for batch_index, raw_batch in enumerate(progress):
             if limit_eval_batches and batch_index >= limit_eval_batches:
                 break
             batch = move_batch_to_device(raw_batch, device)
@@ -415,6 +436,15 @@ def evaluate(model, loader, device, args, enable_refiner, use_amp=False, limit_e
             update_metric_sums(metric_sums, metrics, count)
             total_count += count
             rare_count += rare
+            postfix = {
+                f"ADE@{args.eval_topk_primary}": format_scalar(metrics.get(f"ADE@{args.eval_topk_primary}"))
+            }
+            if args.eval_topk_secondary != args.eval_topk_primary:
+                postfix[f"ADE@{args.eval_topk_secondary}"] = format_scalar(
+                    metrics.get(f"ADE@{args.eval_topk_secondary}")
+                )
+            progress.set_postfix(postfix, refresh=False)
+    progress.close()
     return average_metric_sums(metric_sums, total_count, rare_count), total_count, rare_count
 
 
@@ -755,6 +785,7 @@ def main():
                 enable_refiner=cfg["enable_refiner"],
                 use_amp=use_amp,
                 limit_eval_batches=args.limit_eval_batches,
+                progress_desc=f"V{epoch:03d}/{args.epochs:03d} eval",
             )
             memory_mb = peak_memory_mb(device)
             train_loss = train_loss_sum / max(seen_batches, 1)

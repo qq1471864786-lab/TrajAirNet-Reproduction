@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import warnings
 from contextlib import nullcontext
 from functools import partial
@@ -12,6 +13,7 @@ warnings.filterwarnings(
 
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from model import (
     ProtoBasisNet,
@@ -76,17 +78,28 @@ def build_model(config, checkpoint):
     )
 
 
-def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0):
-    metric_names = metric_names_for_protocol(
-        config.get("eval_topk_primary", 5),
-        config.get("eval_topk_secondary", 20),
-    )
+def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0, progress_desc="test eval"):
+    primary_k = config.get("eval_topk_primary", 5)
+    secondary_k = config.get("eval_topk_secondary", 20)
+    metric_names = metric_names_for_protocol(primary_k, secondary_k)
     metric_sums = init_metric_sums(metric_names)
     total_count = 0
     rare_count = 0
     model.eval()
+    total_batches = len(loader)
+    if limit_eval_batches:
+        total_batches = min(total_batches, limit_eval_batches)
+    progress = tqdm(
+        loader,
+        leave=False,
+        dynamic_ncols=True,
+        total=total_batches,
+        desc=progress_desc,
+        file=sys.stdout,
+        bar_format="{l_bar}{bar:24}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+    )
     with torch.no_grad():
-        for batch_index, raw_batch in enumerate(loader):
+        for batch_index, raw_batch in enumerate(progress):
             if limit_eval_batches and batch_index >= limit_eval_batches:
                 break
             batch = {
@@ -106,6 +119,11 @@ def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0)
             update_metric_sums(metric_sums, metrics, batch_count)
             total_count += batch_count
             rare_count += int(batch["is_rare"].sum().item())
+            postfix = {f"ADE@{primary_k}": f"{metrics[f'ADE@{primary_k}']:.4f}"}
+            if secondary_k != primary_k:
+                postfix[f"ADE@{secondary_k}"] = f"{metrics[f'ADE@{secondary_k}']:.4f}"
+            progress.set_postfix(postfix, refresh=False)
+    progress.close()
     return average_metric_sums(metric_sums, total_count, rare_count)
 
 
