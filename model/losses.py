@@ -46,6 +46,17 @@ def _trajectory_smoothness(xyz):
     return second_diff.abs().mean()
 
 
+def _soft_label_cross_entropy(logits, targets):
+    return -(targets * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+
+
+def _score_quality_targets(ade, fde, fde_weight=0.75, temperature=0.35):
+    ade_scale = ade.detach().mean(dim=1, keepdim=True).clamp_min(1e-6)
+    fde_scale = fde.detach().mean(dim=1, keepdim=True).clamp_min(1e-6)
+    cost = ade.detach() / ade_scale + fde_weight * (fde.detach() / fde_scale)
+    return torch.softmax(-cost / max(temperature, 1e-3), dim=1)
+
+
 class ProtoBasisLoss(nn.Module):
     def __init__(
         self,
@@ -58,6 +69,9 @@ class ProtoBasisLoss(nn.Module):
         lambda_div=0.05,
         lambda_coeff=0.02,
         lambda_smooth=0.10,
+        score_hard_mix=0.25,
+        score_fde_weight=0.75,
+        score_soft_temperature=0.35,
     ):
         super().__init__()
         self.lambda_xyz = lambda_xyz
@@ -69,6 +83,9 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_div = lambda_div
         self.lambda_coeff = lambda_coeff
         self.lambda_smooth = lambda_smooth
+        self.score_hard_mix = min(max(score_hard_mix, 0.0), 1.0)
+        self.score_fde_weight = score_fde_weight
+        self.score_soft_temperature = score_soft_temperature
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -80,7 +97,7 @@ class ProtoBasisLoss(nn.Module):
         gt_proto_id = batch["gt_proto_id"]
         gt_proto_residual = batch["gt_proto_residual"]
 
-        best_idx, ade, _ = _winner_indices(pred_xyz, gt_xyz)
+        best_idx, ade, fde = _winner_indices(pred_xyz, gt_xyz)
         winner_xyz = _gather_candidates(pred_xyz, best_idx)
         winner_coeff = _gather_candidates(aux["coeff"], best_idx)
 
@@ -93,7 +110,15 @@ class ProtoBasisLoss(nn.Module):
         pred_residual = aux["endpoint_residual"][torch.arange(gt_slot.size(0), device=gt_slot.device), gt_slot]
         res_loss = F.smooth_l1_loss(pred_residual, gt_proto_residual)
 
-        score_loss = F.cross_entropy(pred_score, best_idx)
+        hard_score_loss = F.cross_entropy(pred_score, best_idx)
+        soft_score_targets = _score_quality_targets(
+            ade,
+            fde,
+            fde_weight=self.score_fde_weight,
+            temperature=self.score_soft_temperature,
+        )
+        soft_score_loss = _soft_label_cross_entropy(pred_score, soft_score_targets)
+        score_loss = self.score_hard_mix * hard_score_loss + (1.0 - self.score_hard_mix) * soft_score_loss
         rank_loss = _pairwise_margin(pred_score, best_idx)
         div_loss = _diversity_repulsion(pred_xyz)
         coeff_loss = winner_coeff.pow(2).mean()

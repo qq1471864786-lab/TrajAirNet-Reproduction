@@ -80,13 +80,17 @@ def build_parser():
     parser.add_argument("--eval_batch_size", type=int, default=0)
     parser.add_argument("--grad_accum", type=int, default=0)
     parser.add_argument("--phase_a_epochs", type=int, default=10)
-    parser.add_argument("--phase_b_epochs", type=int, default=35)
-    parser.add_argument("--phase_c_epochs", type=int, default=20)
+    parser.add_argument("--phase_b_epochs", type=int, default=12)
+    parser.add_argument("--phase_c_epochs", type=int, default=43)
     parser.add_argument("--extra_epochs", type=int, default=0, help="Extra refiner-stage epochs when resuming.")
     parser.add_argument("--stage_a_lr", type=float, default=3e-4)
     parser.add_argument("--stage_b_lr", type=float, default=2e-4)
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
     parser.add_argument("--min_lr", type=float, default=1e-5)
+    parser.add_argument("--stage_b_rank_weight", type=float, default=0.0)
+    parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
+    parser.add_argument("--stage_c_rank_weight", type=float, default=1.0)
+    parser.add_argument("--stage_c_div_weight", type=float, default=1.0)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
@@ -102,14 +106,17 @@ def build_parser():
     parser.add_argument("--allow_cpu", action="store_true", help="Allow CPU fallback when CUDA is unavailable.")
 
     parser.add_argument("--lambda_xyz", type=float, default=1.0)
-    parser.add_argument("--lambda_fde", type=float, default=0.8)
-    parser.add_argument("--lambda_proto", type=float, default=0.4)
+    parser.add_argument("--lambda_fde", type=float, default=1.0)
+    parser.add_argument("--lambda_proto", type=float, default=0.35)
     parser.add_argument("--lambda_res", type=float, default=0.2)
-    parser.add_argument("--lambda_score", type=float, default=0.5)
+    parser.add_argument("--lambda_score", type=float, default=0.3)
     parser.add_argument("--lambda_rank", type=float, default=0.1)
     parser.add_argument("--lambda_div", type=float, default=0.05)
     parser.add_argument("--lambda_coeff", type=float, default=0.02)
     parser.add_argument("--lambda_smooth", type=float, default=0.10)
+    parser.add_argument("--score_hard_mix", type=float, default=0.25)
+    parser.add_argument("--score_fde_weight", type=float, default=0.75)
+    parser.add_argument("--score_soft_temperature", type=float, default=0.35)
 
     parser.add_argument("--disable_social", action="store_true")
     parser.add_argument("--disable_router", action="store_true")
@@ -217,16 +224,16 @@ def stage_config(epoch, args):
             "name": "joint_no_refiner",
             "enable_refiner": False,
             "force_gt_proto": False,
-            "rank_weight": 1.0,
-            "div_weight": 0.5,
+            "rank_weight": args.stage_b_rank_weight,
+            "div_weight": args.stage_b_div_weight,
             "rare_weight": 1.0,
         }
     return {
         "name": "joint_refiner",
         "enable_refiner": True,
         "force_gt_proto": False,
-        "rank_weight": 1.0,
-        "div_weight": 1.0,
+        "rank_weight": args.stage_c_rank_weight,
+        "div_weight": args.stage_c_div_weight,
         "rare_weight": 1.5,
     }
 
@@ -668,6 +675,9 @@ def main():
         lambda_div=args.lambda_div,
         lambda_coeff=args.lambda_coeff,
         lambda_smooth=args.lambda_smooth,
+        score_hard_mix=args.score_hard_mix,
+        score_fde_weight=args.score_fde_weight,
+        score_soft_temperature=args.score_soft_temperature,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")

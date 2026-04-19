@@ -11,7 +11,7 @@
 - primary metrics: `ADE@5`, `FDE@5`, `ADE@20`, `FDE@20`
 - secondary metrics: `GLeV_report@5/@20`, `GLeV_raw@5/@20`, `rare_FDE@20`, `Top1_ADE/FDE`, `latency_bs1/bs16`
 
-## Locked Training Schedule
+## Current Code Defaults Under Validation
 
 - Stage A: `10 epochs`
   - `force_gt_proto=True`
@@ -19,18 +19,35 @@
   - `rank_weight=0.0`
   - `div_weight=0.0`
   - `lr=3e-4`
-- Stage B: `35 epochs`
+- Stage B: `12 epochs`
   - `force_gt_proto=False`
   - `enable_refiner=False`
-  - `rank_weight=1.0`
-  - `div_weight=0.5`
+  - `rank_weight=0.0`
+  - `div_weight=0.0`
   - `lr starts at 2e-4`
-- Stage C: `20 epochs`
+- Stage C: `43 epochs`
   - `force_gt_proto=False`
   - `enable_refiner=True`
   - `rank_weight=1.0`
   - `div_weight=1.0`
   - `lr starts at 8e-5`
+  - `rare_weight=1.5`
+
+## Current Score Supervision Under Validation
+
+- `score_loss`
+  - no longer pure winner-only hard classification
+  - now mixes:
+    - quality-aware soft target supervision
+    - a retained hard winner component
+- default mix:
+  - `score_hard_mix=0.25`
+  - `score_fde_weight=0.75`
+  - `score_soft_temperature=0.35`
+- supporting default loss changes:
+  - `lambda_fde=1.0`
+  - `lambda_proto=0.35`
+  - `lambda_score=0.30`
 
 ## Required Main Experiments
 
