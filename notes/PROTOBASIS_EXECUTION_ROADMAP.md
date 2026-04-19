@@ -32,6 +32,13 @@
   - `div_weight=1.0`
   - `lr starts at 8e-5`
   - `rare_weight=1.5`
+- Extra refiner tail: `35 epochs`
+  - continues `joint_refiner`
+  - keeps the validated 65-epoch main schedule intact
+  - extends total default training length to `100 epochs`
+  - runs at the low-lr tail for slow metric squeezing
+- low-lr floor:
+  - `min_lr=1.5e-5`
 
 ## Current Score Supervision Under Validation
 

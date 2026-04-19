@@ -268,3 +268,50 @@ The current best validated default for the next main training run remains:
 
 The next justified method-level direction is not another aggressive score-head rewrite.
 The artifact diagnostic still indicates that the deeper long-horizon bottleneck remains in the prototype/end-anchor layer rather than in global shape reconstruction.
+
+## 2026-04-20 Mid-Run Review And Training-Length Decision
+
+Current full-run status snapshot (`111_days`, unified `40/120`, main run still in progress):
+
+- by `epoch 56`, the run already surpassed the previous best completed run on:
+  - `ADE@20`
+  - `FDE@20`
+  - `rare_FDE@20`
+  - `GLeV_report@20`
+- latest bests observed during the current run:
+  - `ADE@20 = 0.2471 @ e56`
+  - `FDE@20 = 0.3395 @ e54`
+  - `rare_FDE@20 = 0.7896 @ e54`
+  - `GLeV_report@20 = 0.0694 @ e54`
+  - `ADE@5 = 0.3981 @ e46`
+
+Deep read of the late-stage behavior:
+
+- `joint_refiner` remains the phase that actually produces the paper-facing gains
+- `epoch 54-56` still produced new best updates, so the run had not fully saturated by `65 epochs`
+- `ADE@20/FDE@20/rare_FDE@20/GLeV_report@20` are still the dimensions with the most meaningful late-stage movement
+- `ADE@5` and especially `Top1_ADE/FDE` remain the relatively weaker side
+- `score_entropy` collapses again late in training, so simply extending training is not expected to fully solve `Top1`
+
+Decision:
+
+- keep the validated `10 / 12 / 43` main schedule unchanged
+- increase the default total training length from `65` to `100`
+- implement this conservatively by appending `35` extra refiner-stage epochs
+- slightly raise the low-lr floor from `1e-5` to `1.5e-5`
+
+Why this is the preferred change:
+
+- it preserves the already validated 65-epoch behavior
+- it extends only the stage that is still producing gains
+- it avoids re-opening the earlier schedule design question
+- it gives the strong `@20 / rare / GLeV` line more room to improve without disturbing the backbone
+
+Expected benefit:
+
+- most likely further small gains in `ADE@20`, `FDE@20`, `rare_FDE@20`, and `GLeV_report@20`
+
+Expected limitation:
+
+- `ADE@5` and `Top1` may not improve much from extra epochs alone
+- those likely still require a later method-side change around prototype/end-anchor or ranking behavior
