@@ -455,3 +455,22 @@ Default update chosen after this validation:
 - keep the total main schedule at `65` epochs
 - change the main schedule from `10 / 12 / 43` to `10 / 4 / 51`
 - keep the `35` extra refiner-tail epochs for the `100`-epoch default
+
+## 2026-04-20 Tail-LR Adjustment For Extra Refiner Epochs
+
+Reasoning:
+
+- the final `35` extra epochs were previously pinned at `min_lr=1.5e-5`
+- that keeps the validated main `65`-epoch schedule intact, but it may underuse the extra tail budget
+- raising `min_lr` directly would also alter the validated late behavior of the main `65` epochs
+
+Chosen change:
+
+- keep `min_lr=1.5e-5` for the main `65`-epoch schedule
+- add a dedicated `extra_lr=4e-5` used only for epochs beyond `phase_a + phase_b + phase_c`
+
+Why this version is safer:
+
+- it does not disturb the already validated main schedule
+- it lets the extra `35` epochs continue refining at a more active learning rate
+- it remains lower than the start of `Stage C` (`8e-5`), so the extra tail is still conservative

@@ -87,6 +87,7 @@ def build_parser():
     parser.add_argument("--stage_b_lr", type=float, default=2e-4)
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
     parser.add_argument("--min_lr", type=float, default=1.5e-5)
+    parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra refiner epochs.")
     parser.add_argument("--stage_b_rank_weight", type=float, default=0.0)
     parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
     parser.add_argument("--stage_c_rank_weight", type=float, default=1.0)
@@ -228,8 +229,11 @@ def stage_config(epoch, args):
             "div_weight": args.stage_b_div_weight,
             "rare_weight": 1.0,
         }
+    stage_name = "joint_refiner"
+    if epoch > args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs:
+        stage_name = "joint_refiner_extra"
     return {
-        "name": "joint_refiner",
+        "name": stage_name,
         "enable_refiner": True,
         "force_gt_proto": False,
         "rank_weight": args.stage_c_rank_weight,
@@ -247,12 +251,14 @@ def set_epoch_lr(optimizer, epoch, args):
         progress = min(phase_epoch / denom, 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         lr = args.stage_c_lr + (args.stage_b_lr - args.stage_c_lr) * cosine
-    else:
+    elif epoch <= args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs:
         phase_epoch = epoch - args.phase_a_epochs - args.phase_b_epochs - 1
         denom = max(args.phase_c_epochs - 1, 1)
         progress = min(phase_epoch / denom, 1.0)
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         lr = args.min_lr + (args.stage_c_lr - args.min_lr) * cosine
+    else:
+        lr = args.extra_lr
     for group in optimizer.param_groups:
         group["lr"] = lr
     return lr

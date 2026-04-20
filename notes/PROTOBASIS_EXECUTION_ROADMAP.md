@@ -36,9 +36,10 @@
   - continues `joint_refiner`
   - keeps the validated `65`-epoch total while shifting more budget into `joint_refiner`
   - extends total default training length to `100 epochs`
-  - runs at the low-lr tail for slow metric squeezing
+  - runs with a dedicated constant tail lr: `4e-5`
 - low-lr floor:
   - `min_lr=1.5e-5`
+  - `extra_lr=4e-5`
 
 ## Current Score Supervision Under Validation
 
