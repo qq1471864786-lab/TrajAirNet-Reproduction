@@ -19,13 +19,13 @@
   - `rank_weight=0.0`
   - `div_weight=0.0`
   - `lr=3e-4`
-- Stage B: `12 epochs`
+- Stage B: `4 epochs`
   - `force_gt_proto=False`
   - `enable_refiner=False`
   - `rank_weight=0.0`
   - `div_weight=0.0`
   - `lr starts at 2e-4`
-- Stage C: `43 epochs`
+- Stage C: `51 epochs`
   - `force_gt_proto=False`
   - `enable_refiner=True`
   - `rank_weight=1.0`
@@ -34,7 +34,7 @@
   - `rare_weight=1.5`
 - Extra refiner tail: `35 epochs`
   - continues `joint_refiner`
-  - keeps the validated 65-epoch main schedule intact
+  - keeps the validated `65`-epoch total while shifting more budget into `joint_refiner`
   - extends total default training length to `100 epochs`
   - runs at the low-lr tail for slow metric squeezing
 - low-lr floor:

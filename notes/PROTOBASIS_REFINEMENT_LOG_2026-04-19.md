@@ -384,3 +384,74 @@ Conclusion:
 
 - do not keep this version as the new default
 - if endpoint/prototype is the next method-side target, it needs a more principled design than simply adding free micro endpoint offsets
+
+## 2026-04-20 Controlled Validation: Shorter Stage B For Best@20
+
+Hypothesis:
+
+- `joint_no_refiner` remains a necessary transition stage
+- but the full `12` epochs are over-allocated
+- moving part of that budget into earlier `joint_refiner` should improve `best@20` more than simply adding late extra epochs
+
+Controlled setup:
+
+- same dataset: `111_days`
+- same seed
+- same batch sizes: `512 / 1024`
+- same limited proxy budget:
+  - `limit_train_batches=120`
+  - `limit_eval_batches=20`
+- same total epochs: `26`
+
+Compared schedules:
+
+- baseline: `10 / 12 / 4`
+- shortened Stage B: `10 / 4 / 12`
+
+Shared command pattern:
+
+```bash
+conda run -n trajair python train.py 111_days --device cuda:0 --save_dir <run_dir> --phase_a_epochs 10 --phase_b_epochs <12 or 4> --phase_c_epochs <4 or 12> --extra_epochs 0 --batch_size 512 --eval_batch_size 1024 --limit_train_batches 120 --limit_eval_batches 20
+```
+
+Baseline best values (`10 / 12 / 4`):
+
+- `ADE@5 = 0.4816`
+- `FDE@5 = 0.7559`
+- `ADE@20 = 0.4059`
+- `FDE@20 = 0.5287`
+- `rare_FDE@20 = 1.4347`
+- `Top1_ADE = 0.7079`
+- `Top1_FDE = 1.3414`
+
+Shorter Stage B best values (`10 / 4 / 12`):
+
+- `ADE@5 = 0.4945`
+- `FDE@5 = 0.7755`
+- `ADE@20 = 0.3721`
+- `FDE@20 = 0.4587`
+- `rare_FDE@20 = 1.2101`
+- `Top1_ADE = 0.7177`
+- `Top1_FDE = 1.3811`
+
+Decision:
+
+- for the paper-facing `best@20` line, shortening Stage B is clearly beneficial:
+  - `ADE@20: 0.4059 -> 0.3721`
+  - `FDE@20: 0.5287 -> 0.4587`
+  - `rare_FDE@20: 1.4347 -> 1.2101`
+- this change is not a free lunch:
+  - `ADE@5`, `FDE@5`, and `Top1` all regress in the same proxy run
+
+Interpretation:
+
+- this confirms the earlier full-run diagnosis:
+  - Stage B should exist as a transition stage
+  - but it should be short
+  - the highest-return budget for `best@20` is still early `joint_refiner`
+
+Default update chosen after this validation:
+
+- keep the total main schedule at `65` epochs
+- change the main schedule from `10 / 12 / 43` to `10 / 4 / 51`
+- keep the `35` extra refiner-tail epochs for the `100`-epoch default
