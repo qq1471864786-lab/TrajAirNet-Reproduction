@@ -90,8 +90,11 @@ def build_parser():
     parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra refiner epochs.")
     parser.add_argument("--stage_b_rank_weight", type=float, default=0.0)
     parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
+    parser.add_argument("--stage_c_score_weight", type=float, default=1.0)
     parser.add_argument("--stage_c_rank_weight", type=float, default=1.0)
     parser.add_argument("--stage_c_div_weight", type=float, default=1.0)
+    parser.add_argument("--stage_c_cover_weight", type=float, default=1.0)
+    parser.add_argument("--stage_c_traj_cover_weight", type=float, default=1.0)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
@@ -115,6 +118,13 @@ def build_parser():
     parser.add_argument("--lambda_div", type=float, default=0.05)
     parser.add_argument("--lambda_coeff", type=float, default=0.02)
     parser.add_argument("--lambda_smooth", type=float, default=0.10)
+    parser.add_argument("--lambda_cover", type=float, default=0.0)
+    parser.add_argument("--lambda_traj_cover", type=float, default=0.0)
+    parser.add_argument("--geometry_soft_temperature", type=float, default=0.0)
+    parser.add_argument("--geometry_fde_weight", type=float, default=1.0)
+    parser.add_argument("--cover_temperature", type=float, default=0.35)
+    parser.add_argument("--traj_cover_temperature", type=float, default=0.35)
+    parser.add_argument("--traj_cover_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
@@ -216,6 +226,7 @@ def stage_config(epoch, args):
             "name": "basis_warmup",
             "enable_refiner": False,
             "force_gt_proto": True,
+            "score_weight": 1.0,
             "rank_weight": 0.0,
             "div_weight": 0.0,
             "rare_weight": 1.0,
@@ -225,6 +236,7 @@ def stage_config(epoch, args):
             "name": "joint_no_refiner",
             "enable_refiner": False,
             "force_gt_proto": False,
+            "score_weight": 1.0,
             "rank_weight": args.stage_b_rank_weight,
             "div_weight": args.stage_b_div_weight,
             "rare_weight": 1.0,
@@ -236,8 +248,11 @@ def stage_config(epoch, args):
         "name": stage_name,
         "enable_refiner": True,
         "force_gt_proto": False,
+        "score_weight": args.stage_c_score_weight,
         "rank_weight": args.stage_c_rank_weight,
         "div_weight": args.stage_c_div_weight,
+        "cover_weight": args.stage_c_cover_weight,
+        "traj_cover_weight": args.stage_c_traj_cover_weight,
         "rare_weight": 1.5,
     }
 
@@ -681,6 +696,13 @@ def main():
         lambda_div=args.lambda_div,
         lambda_coeff=args.lambda_coeff,
         lambda_smooth=args.lambda_smooth,
+        lambda_cover=args.lambda_cover,
+        lambda_traj_cover=args.lambda_traj_cover,
+        geometry_soft_temperature=args.geometry_soft_temperature,
+        geometry_fde_weight=args.geometry_fde_weight,
+        cover_temperature=args.cover_temperature,
+        traj_cover_temperature=args.traj_cover_temperature,
+        traj_cover_fde_weight=args.traj_cover_fde_weight,
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,
