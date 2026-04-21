@@ -78,7 +78,21 @@ def build_model(config, checkpoint):
     )
 
 
-def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0, progress_desc="test eval"):
+def resolve_eval_enable_refiner(checkpoint):
+    meta = checkpoint.get("meta", {})
+    return bool(meta.get("eval_enable_refiner", True))
+
+
+def evaluate(
+    model,
+    loader,
+    device,
+    config,
+    enable_refiner=True,
+    use_amp=False,
+    limit_eval_batches=0,
+    progress_desc="test eval",
+):
     primary_k = config.get("eval_topk_primary", 5)
     secondary_k = config.get("eval_topk_secondary", 20)
     metric_names = metric_names_for_protocol(primary_k, secondary_k)
@@ -107,7 +121,7 @@ def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0,
                 for key, value in raw_batch.items()
             }
             with autocast_context(device, use_amp):
-                outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=True)
+                outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
             metrics, batch_count, _ = summarize_batch_metrics(
                 outputs,
                 batch,
@@ -128,20 +142,20 @@ def evaluate(model, loader, device, config, use_amp=False, limit_eval_batches=0,
 
 
 @torch.no_grad()
-def measure_latency_ms(model, batch, warmup=30, iters=100):
+def measure_latency_ms(model, batch, enable_refiner=True, warmup=30, iters=100):
     if next(model.parameters()).device.type != "cuda":
         return None
     model.eval()
     starter = torch.cuda.Event(enable_timing=True)
     ender = torch.cuda.Event(enable_timing=True)
     for _ in range(warmup):
-        _ = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=True)
+        _ = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
     torch.cuda.synchronize()
 
     timings = []
     for _ in range(iters):
         starter.record()
-        _ = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=True)
+        _ = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
         ender.record()
         torch.cuda.synchronize()
         timings.append(starter.elapsed_time(ender))
@@ -194,6 +208,7 @@ def main():
     use_amp = device.type == "cuda" and not args.no_amp
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
+    eval_enable_refiner = resolve_eval_enable_refiner(checkpoint)
     dataset_variant = args.dataset_variant or config["dataset_variant"]
     dataset_name = args.dataset_name or config["dataset_name"]
 
@@ -229,14 +244,22 @@ def main():
 
     model = build_model(config, checkpoint).to(device)
     model.load_state_dict(checkpoint["model"])
-    metrics = evaluate(model, loader, device, config, use_amp=use_amp, limit_eval_batches=args.limit_eval_batches)
+    metrics = evaluate(
+        model,
+        loader,
+        device,
+        config,
+        enable_refiner=eval_enable_refiner,
+        use_amp=use_amp,
+        limit_eval_batches=args.limit_eval_batches,
+    )
 
     if args.measure_latency:
         for bs in [int(token) for token in args.latency_batch_sizes.split(",") if token.strip()]:
             latency_loader = build_loader(dataset, bs, args, config["max_agents"])
             batch = next(iter(latency_loader))
             batch = {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
-            latency = measure_latency_ms(model, batch)
+            latency = measure_latency_ms(model, batch, enable_refiner=eval_enable_refiner)
             if latency is not None:
                 metrics[f"latency_bs{bs}_mean_ms"] = latency["latency_mean_ms"]
                 metrics[f"latency_bs{bs}_p50_ms"] = latency["latency_p50_ms"]

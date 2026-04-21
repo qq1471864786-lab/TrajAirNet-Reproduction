@@ -840,18 +840,6 @@ def main():
             train_loss = train_loss_sum / max(seen_batches, 1)
             avg_loss_stats = average_loss_sums(epoch_loss_sums, seen_batches)
 
-            ckpt = checkpoint_payload(
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                global_step=global_step,
-                best_records=best_records,
-                model_artifact=model_artifact,
-                config=vars(args),
-                meta=meta,
-            )
-            save_checkpoint(last_path, ckpt)
-
             best_updates = []
             best_key = "best20"
             spec = best_specs[best_key]
@@ -862,7 +850,6 @@ def main():
                 best_records[best_key]["value"] = candidate_sort_key[0]
                 best_records[best_key]["epoch"] = epoch
                 best_records[best_key]["sort_key"] = candidate_sort_key
-                save_checkpoint(spec["path"], ckpt)
                 best_updates.append(
                     {
                         "record_key": best_key,
@@ -872,6 +859,22 @@ def main():
                         "epoch": epoch,
                     }
                 )
+
+            epoch_meta = dict(meta)
+            epoch_meta["eval_enable_refiner"] = cfg["enable_refiner"]
+            ckpt = checkpoint_payload(
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch,
+                global_step=global_step,
+                best_records=best_records,
+                model_artifact=model_artifact,
+                config=vars(args),
+                meta=epoch_meta,
+            )
+            save_checkpoint(last_path, ckpt)
+            if best_updates:
+                save_checkpoint(spec["path"], ckpt)
 
             progress.close()
             recorder.log_epoch(
