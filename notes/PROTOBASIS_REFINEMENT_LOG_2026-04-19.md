@@ -474,3 +474,95 @@ Why this version is safer:
 - it does not disturb the already validated main schedule
 - it lets the extra `35` epochs continue refining at a more active learning rate
 - it remains lower than the start of `Stage C` (`8e-5`), so the extra tail is still conservative
+
+## 2026-04-21 Best20 And GLeV Hyperparameter Search On Full 111Days
+
+Goal:
+
+- continue pushing the paper-facing `best@20` line
+- improve `GLeV@20` without changing the model backbone
+- avoid keeping any exploratory code if a pure training-recipe change is sufficient
+
+Method:
+
+- keep the current strong baseline code unchanged
+- use the same controlled short-run protocol on the real `111_days` dataset:
+  - `phase_a/b/c = 10 / 4 / 12`
+  - `extra_epochs = 0`
+  - `batch_size / eval_batch_size = 512 / 1024`
+  - `limit_train_batches = 120`
+  - `limit_eval_batches = 20`
+  - `device = cuda:1`
+- search only `Stage C` loss balance:
+  - `lambda_score`
+  - `stage_c_rank_weight`
+  - `stage_c_div_weight`
+
+Baseline on full `111_days`:
+
+- `ADE@20 = 0.38199`
+- `FDE@20 = 0.47547`
+- `GLeV@20 = 0.17431`
+- `rare_FDE@20 = 1.22973`
+
+Main findings:
+
+1. simply reducing `score` pressure in the refiner stage is consistently beneficial for `best@20`
+2. pushing `div` upward improves `GLeV@20`, but too much diversity starts to trade away `ADE/FDE`
+3. adding a separate `stage_c_score_weight` code path was explored and then discarded
+   because the strongest results came from plain hyperparameter changes using the existing code
+
+Best precision-oriented candidate found:
+
+- config:
+  - `--lambda_score 0.0`
+  - `--stage_c_rank_weight 0.0`
+  - `--stage_c_div_weight 2.0`
+- result:
+  - `ADE@20 = 0.36312`
+  - `FDE@20 = 0.43658`
+  - `GLeV@20 = 0.16568`
+  - `rare_FDE@20 = 1.16031`
+
+Best balance candidate found:
+
+- config:
+  - `--lambda_score 0.03`
+  - `--stage_c_rank_weight 0.0`
+  - `--stage_c_div_weight 2.0`
+- result:
+  - `ADE@20 = 0.36332`
+  - `FDE@20 = 0.43857`
+  - `GLeV@20 = 0.13871`
+  - `rare_FDE@20 = 1.14851`
+
+Comparison to the current short-run baseline:
+
+- `ADE@20: 0.38199 -> 0.36332`
+- `FDE@20: 0.47547 -> 0.43857`
+- `GLeV@20: 0.17431 -> 0.13871`
+- `rare_FDE@20: 1.22973 -> 1.14851`
+
+Interpretation:
+
+- this is the first clean search result that improves all four paper-facing main metrics
+  on the real `111_days` short-run proxy
+- `lambda_score = 0.03` looks safer than `0.0`
+  because it keeps almost the same `ADE/FDE` gains while preserving a better balance
+  between precision and diversity
+- the search frontier suggests the current path can likely move the full 100-epoch run
+  into roughly:
+  - `ADE@20 ~= 0.226`
+  - `FDE@20 ~= 0.301`
+  - `GLeV@20 ~= 0.056`
+  - `rare_FDE@20 ~= 0.710`
+
+Decision:
+
+- do not modify the architecture
+- do not keep any extra stage-specific score-weight code
+- next formal run should use:
+
+```bash
+python train.py 111_days --device cuda:1 --lambda_score 0.03 --stage_c_rank_weight 0.0 --stage_c_div_weight 2.0
+```
