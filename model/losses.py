@@ -46,13 +46,6 @@ def _trajectory_smoothness(xyz):
     return second_diff.abs().mean()
 
 
-def _trajectory_smoothness_per_mode(xyz):
-    if xyz.size(2) < 3:
-        return xyz.new_zeros((xyz.size(0), xyz.size(1)))
-    second_diff = xyz[:, :, 2:] - 2.0 * xyz[:, :, 1:-1] + xyz[:, :, :-2]
-    return second_diff.abs().mean(dim=(-1, -2))
-
-
 def _soft_label_cross_entropy(logits, targets):
     return -(targets * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
 
@@ -62,13 +55,6 @@ def _score_quality_targets(ade, fde, fde_weight=0.75, temperature=0.35):
     fde_scale = fde.detach().mean(dim=1, keepdim=True).clamp_min(1e-6)
     cost = ade.detach() / ade_scale + fde_weight * (fde.detach() / fde_scale)
     return torch.softmax(-cost / max(temperature, 1e-3), dim=1)
-
-
-def _endpoint_cover_loss(fde, temperature=0.35):
-    fde_scale = fde.detach().mean(dim=1, keepdim=True).clamp_min(1e-6)
-    normalized_fde = fde / fde_scale
-    weights = torch.softmax(-normalized_fde.detach() / max(temperature, 1e-3), dim=1)
-    return (weights * normalized_fde).sum(dim=1).mean()
 
 
 class ProtoBasisLoss(nn.Module):
@@ -83,13 +69,6 @@ class ProtoBasisLoss(nn.Module):
         lambda_div=0.05,
         lambda_coeff=0.02,
         lambda_smooth=0.10,
-        lambda_cover=0.0,
-        lambda_traj_cover=0.0,
-        geometry_soft_temperature=0.0,
-        geometry_fde_weight=1.0,
-        cover_temperature=0.35,
-        traj_cover_temperature=0.35,
-        traj_cover_fde_weight=0.75,
         score_hard_mix=0.25,
         score_fde_weight=0.75,
         score_soft_temperature=0.35,
@@ -104,13 +83,6 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_div = lambda_div
         self.lambda_coeff = lambda_coeff
         self.lambda_smooth = lambda_smooth
-        self.lambda_cover = lambda_cover
-        self.lambda_traj_cover = lambda_traj_cover
-        self.geometry_soft_temperature = geometry_soft_temperature
-        self.geometry_fde_weight = geometry_fde_weight
-        self.cover_temperature = cover_temperature
-        self.traj_cover_temperature = traj_cover_temperature
-        self.traj_cover_fde_weight = traj_cover_fde_weight
         self.score_hard_mix = min(max(score_hard_mix, 0.0), 1.0)
         self.score_fde_weight = score_fde_weight
         self.score_soft_temperature = score_soft_temperature
@@ -129,29 +101,8 @@ class ProtoBasisLoss(nn.Module):
         winner_xyz = _gather_candidates(pred_xyz, best_idx)
         winner_coeff = _gather_candidates(aux["coeff"], best_idx)
 
-        if self.geometry_soft_temperature > 0:
-            geom_weights = _score_quality_targets(
-                ade,
-                fde,
-                fde_weight=self.geometry_fde_weight,
-                temperature=self.geometry_soft_temperature,
-            )
-            gt_xyz_expand = gt_xyz[:, None].expand_as(pred_xyz)
-            xyz_per_mode = F.smooth_l1_loss(pred_xyz, gt_xyz_expand, reduction="none").mean(dim=(-1, -2))
-            xyz_loss = (geom_weights * xyz_per_mode).sum(dim=1).mean()
-
-            gt_endpoint = gt_xyz[:, -1][:, None, :].expand_as(pred_xyz[:, :, -1])
-            fde_per_mode = F.smooth_l1_loss(pred_xyz[:, :, -1], gt_endpoint, reduction="none").mean(dim=-1)
-            fde_loss = (geom_weights * fde_per_mode).sum(dim=1).mean()
-            coeff_per_mode = aux["coeff"].pow(2).mean(dim=-1)
-            coeff_loss = (geom_weights * coeff_per_mode).sum(dim=1).mean()
-            smooth_per_mode = _trajectory_smoothness_per_mode(pred_xyz)
-            smooth_loss = (geom_weights * smooth_per_mode).sum(dim=1).mean()
-        else:
-            xyz_loss = F.smooth_l1_loss(winner_xyz, gt_xyz)
-            fde_loss = F.smooth_l1_loss(winner_xyz[:, -1], gt_xyz[:, -1])
-            coeff_loss = winner_coeff.pow(2).mean()
-            smooth_loss = _trajectory_smoothness(winner_xyz)
+        xyz_loss = F.smooth_l1_loss(winner_xyz, gt_xyz)
+        fde_loss = F.smooth_l1_loss(winner_xyz[:, -1], gt_xyz[:, -1])
         proto_loss = F.cross_entropy(proto_logits, gt_proto_id)
 
         match_mask = top_proto_idx.eq(gt_proto_id.unsqueeze(1))
@@ -170,27 +121,16 @@ class ProtoBasisLoss(nn.Module):
         score_loss = self.score_hard_mix * hard_score_loss + (1.0 - self.score_hard_mix) * soft_score_loss
         rank_loss = _pairwise_margin(pred_score, best_idx)
         div_loss = _diversity_repulsion(pred_xyz)
-        cover_loss = _endpoint_cover_loss(fde, temperature=self.cover_temperature)
-        traj_cover_targets = _score_quality_targets(
-            ade,
-            fde,
-            fde_weight=self.traj_cover_fde_weight,
-            temperature=self.traj_cover_temperature,
-        )
-        ade_scale = ade.detach().mean(dim=1, keepdim=True).clamp_min(1e-6)
-        fde_scale = fde.detach().mean(dim=1, keepdim=True).clamp_min(1e-6)
-        traj_cover_cost = ade / ade_scale + self.traj_cover_fde_weight * (fde / fde_scale)
-        traj_cover_loss = (traj_cover_targets * traj_cover_cost).sum(dim=1).mean()
+        coeff_loss = winner_coeff.pow(2).mean()
+        smooth_loss = _trajectory_smoothness(winner_xyz)
 
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
         total = total + self.lambda_proto * proto_loss
         total = total + self.lambda_res * res_loss
-        total = total + stage_cfg.get("score_weight", 1.0) * self.lambda_score * score_loss
+        total = total + self.lambda_score * score_loss
         total = total + stage_cfg["rank_weight"] * self.lambda_rank * rank_loss
         total = total + stage_cfg["div_weight"] * self.lambda_div * div_loss
-        total = total + stage_cfg.get("cover_weight", 1.0) * self.lambda_cover * cover_loss
-        total = total + stage_cfg.get("traj_cover_weight", 1.0) * self.lambda_traj_cover * traj_cover_loss
         total = total + self.lambda_coeff * coeff_loss
         total = total + self.lambda_smooth * smooth_loss
 
@@ -202,8 +142,6 @@ class ProtoBasisLoss(nn.Module):
             "score": float(score_loss.detach().item()),
             "rank": float(rank_loss.detach().item()),
             "div": float(div_loss.detach().item()),
-            "cover": float(cover_loss.detach().item()),
-            "traj_cover": float(traj_cover_loss.detach().item()),
             "coeff": float(coeff_loss.detach().item()),
             "smooth": float(smooth_loss.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
