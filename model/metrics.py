@@ -60,7 +60,8 @@ def _glev_raw(pred_xyz, gt_xyz, pred_score, k, topn):
     near = torch.gather(endpoints, 1, near_idx[..., None].expand(-1, -1, 3))
     global_var = endpoints.var(dim=1, unbiased=False).sum(dim=-1) + 1e-6
     local_var = near.var(dim=1, unbiased=False).sum(dim=-1) + 1e-6
-    return global_var / local_var
+    # Keep a single GooDFlight-style lower-is-better GLeV value in the public API.
+    return local_var / global_var
 def rare_subset_fde(pred_xyz, gt_xyz, pred_score, is_rare, k):
     if is_rare.sum() == 0:
         return pred_xyz.new_full((pred_xyz.size(0),), float("nan"))
