@@ -370,7 +370,7 @@ def unified_best20_sort_key(metrics, args):
     return (
         float(metrics[f"ADE@{secondary_k}"]),
         float(metrics[f"FDE@{secondary_k}"]),
-        -float(metrics[f"GLeV@{secondary_k}"]),
+        float(metrics[f"GLeV@{secondary_k}"]),
         float(metrics[f"rare_FDE@{rare_k}"]),
     )
 
