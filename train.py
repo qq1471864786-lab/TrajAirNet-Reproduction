@@ -539,11 +539,20 @@ def supports_color():
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
-def has_main_line_best_update(best_updates):
-    return any(
-        item.get("metric_key", "").startswith("ADE@")
-        for item in best_updates
-    )
+def main_metric_keys(args):
+    secondary_k = args.eval_topk_secondary
+    rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
+    return {
+        f"ADE@{secondary_k}",
+        f"FDE@{secondary_k}",
+        f"GLeV_report@{secondary_k}",
+        f"rare_FDE@{rare_k}",
+    }
+
+
+def has_main_line_best_update(args, best_updates):
+    keys = main_metric_keys(args)
+    return any(item.get("metric_key", "") in keys for item in best_updates)
 
 
 def maybe_green(text, enabled):
@@ -567,37 +576,39 @@ def _metric_lines(args, metrics):
     secondary_k = args.eval_topk_secondary
     rare_k = secondary_k if secondary_k != primary_k else primary_k
 
-    eval_main = [
-        f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
-        f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
-    ]
-    eval_aux = [
-        f"GLeV_report@{primary_k}={format_scalar(metrics[f'GLeV_report@{primary_k}'])}",
-        f"GLeV_raw@{primary_k}={format_scalar(metrics[f'GLeV_raw@{primary_k}'])}",
-    ]
+    eval_main = []
     if secondary_k != primary_k:
         eval_main.extend(
             [
                 f"ADE@{secondary_k}={format_scalar(metrics[f'ADE@{secondary_k}'])}",
                 f"FDE@{secondary_k}={format_scalar(metrics[f'FDE@{secondary_k}'])}",
+                f"GLeV_report@{secondary_k}={format_scalar(metrics[f'GLeV_report@{secondary_k}'])}",
+                f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
             ]
         )
-        eval_aux.extend(
+    else:
+        eval_main.extend(
             [
-                f"GLeV_report@{secondary_k}={format_scalar(metrics[f'GLeV_report@{secondary_k}'])}",
-                f"GLeV_raw@{secondary_k}={format_scalar(metrics[f'GLeV_raw@{secondary_k}'])}",
+                f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
+                f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
+                f"GLeV_report@{primary_k}={format_scalar(metrics[f'GLeV_report@{primary_k}'])}",
+                f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
             ]
         )
 
-    eval_main.extend(
-        [
-            f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
-            f"Top1_ADE={format_scalar(metrics['Top1_ADE'])}",
-            f"Top1_FDE={format_scalar(metrics['Top1_FDE'])}",
-        ]
-    )
+    eval_aux = [
+        f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
+        f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
+        f"GLeV_report@{primary_k}={format_scalar(metrics[f'GLeV_report@{primary_k}'])}",
+        f"GLeV_raw@{primary_k}={format_scalar(metrics[f'GLeV_raw@{primary_k}'])}",
+    ]
+    if secondary_k != primary_k:
+        eval_aux.append(f"GLeV_raw@{secondary_k}={format_scalar(metrics[f'GLeV_raw@{secondary_k}'])}")
+
     eval_aux.extend(
         [
+            f"Top1_ADE={format_scalar(metrics['Top1_ADE'])}",
+            f"Top1_FDE={format_scalar(metrics['Top1_FDE'])}",
             f"proto_top1_acc={format_scalar(metrics['proto_top1_acc'])}",
             f"proto_rare_recall={format_scalar(metrics['proto_rare_recall'])}",
             f"score_entropy={format_scalar(metrics['score_entropy'])}",
@@ -631,7 +642,7 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         [
             header,
             f"  train_loss: {' '.join(train_parts)}",
-            maybe_green(f"  eval_main : {' '.join(eval_main)}", has_main_line_best_update(best_updates)),
+            maybe_green(f"  eval_main : {' '.join(eval_main)}", has_main_line_best_update(args, best_updates)),
             f"  eval_aux  : {' '.join(eval_aux)}",
         ]
     )
