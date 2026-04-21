@@ -9,7 +9,7 @@
 - preds: `120`
 - modes: `topk_proto=5`, `micro_per_proto=4`, total `20`
 - primary metrics: `ADE@5`, `FDE@5`, `ADE@20`, `FDE@20`
-- secondary metrics: `GLeV_report@5/@20`, `GLeV_raw@5/@20`, `rare_FDE@20`, `Top1_ADE/FDE`, `latency_bs1/bs16`
+- secondary metrics: `GLeV@5/@20`, `rare_FDE@20`, `Top1_ADE/FDE`, `latency_bs1/bs16`
 
 ## Current Code Defaults Under Validation
 

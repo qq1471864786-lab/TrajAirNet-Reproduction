@@ -348,40 +348,31 @@ def move_batch_to_device(batch, device):
 
 
 def tracked_best_specs(args, run_dir):
-    primary_k = args.eval_topk_primary
     secondary_k = args.eval_topk_secondary
-    rare_k = secondary_k if secondary_k != primary_k else primary_k
-    specs = {
-        f"fde{secondary_k}": {
-            "metric_key": f"FDE@{secondary_k}",
-            "path": os.path.join(run_dir, f"best_fde{secondary_k}.pt"),
-        },
-        f"ade{primary_k}": {
-            "metric_key": f"ADE@{primary_k}",
-            "path": os.path.join(run_dir, f"best_ade{primary_k}.pt"),
-        },
-        f"glev_report{secondary_k}": {
-            "metric_key": f"GLeV_report@{secondary_k}",
-            "path": os.path.join(run_dir, f"best_glev_report{secondary_k}.pt"),
-        },
-        f"rare_fde{rare_k}": {
-            "metric_key": f"rare_FDE@{rare_k}",
-            "path": os.path.join(run_dir, f"best_rare_fde{rare_k}.pt"),
-        },
-    }
-    if secondary_k != primary_k:
-        specs[f"ade{secondary_k}"] = {
-            "metric_key": f"ADE@{secondary_k}",
-            "path": os.path.join(run_dir, f"best_ade{secondary_k}.pt"),
+    return {
+        "best20": {
+            "metric_key": "best20",
+            "path": os.path.join(run_dir, f"best_best{secondary_k}.pt"),
         }
-    return specs
+    }
 
 
 def init_best_records(args, run_dir):
     return {
-        name: {"value": float("inf"), "epoch": 0, "path": spec["path"]}
+        name: {"value": float("inf"), "epoch": 0, "path": spec["path"], "sort_key": None}
         for name, spec in tracked_best_specs(args, run_dir).items()
     }
+
+
+def unified_best20_sort_key(metrics, args):
+    secondary_k = args.eval_topk_secondary
+    rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
+    return (
+        float(metrics[f"ADE@{secondary_k}"]),
+        float(metrics[f"FDE@{secondary_k}"]),
+        float(metrics[f"GLeV@{secondary_k}"]),
+        float(metrics[f"rare_FDE@{rare_k}"]),
+    )
 
 
 def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model_artifact, config, meta):
@@ -408,6 +399,19 @@ def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model
 def save_checkpoint(path, payload):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(payload, path)
+
+
+def remove_legacy_best_checkpoints(run_dir, keep_name):
+    if not os.path.isdir(run_dir):
+        return
+    for file_name in os.listdir(run_dir):
+        if not file_name.startswith("best_") or not file_name.endswith(".pt"):
+            continue
+        if file_name == keep_name:
+            continue
+        path = os.path.join(run_dir, file_name)
+        if os.path.isfile(path):
+            os.remove(path)
 
 
 def autocast_context(device, use_amp):
@@ -503,6 +507,8 @@ def load_resume_checkpoint(args, run_dir, model, optimizer, device):
         if isinstance(saved_record, dict):
             record["value"] = float(saved_record.get("value", record["value"]))
             record["epoch"] = int(saved_record.get("epoch", record["epoch"]))
+            if saved_record.get("sort_key") is not None:
+                record["sort_key"] = tuple(float(value) for value in saved_record["sort_key"])
         else:
             record["value"] = float(saved_record)
         record["path"] = record["path"]
@@ -540,14 +546,7 @@ def supports_color():
 
 
 def main_metric_keys(args):
-    secondary_k = args.eval_topk_secondary
-    rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
-    return {
-        f"ADE@{secondary_k}",
-        f"FDE@{secondary_k}",
-        f"GLeV_report@{secondary_k}",
-        f"rare_FDE@{rare_k}",
-    }
+    return {"best20"}
 
 
 def has_main_line_best_update(args, best_updates):
@@ -582,7 +581,7 @@ def _metric_lines(args, metrics):
             [
                 f"ADE@{secondary_k}={format_scalar(metrics[f'ADE@{secondary_k}'])}",
                 f"FDE@{secondary_k}={format_scalar(metrics[f'FDE@{secondary_k}'])}",
-                f"GLeV_report@{secondary_k}={format_scalar(metrics[f'GLeV_report@{secondary_k}'])}",
+                f"GLeV@{secondary_k}={format_scalar(metrics[f'GLeV@{secondary_k}'])}",
                 f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
             ]
         )
@@ -591,7 +590,7 @@ def _metric_lines(args, metrics):
             [
                 f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
                 f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
-                f"GLeV_report@{primary_k}={format_scalar(metrics[f'GLeV_report@{primary_k}'])}",
+                f"GLeV@{primary_k}={format_scalar(metrics[f'GLeV@{primary_k}'])}",
                 f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
             ]
         )
@@ -599,11 +598,8 @@ def _metric_lines(args, metrics):
     eval_aux = [
         f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
         f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
-        f"GLeV_report@{primary_k}={format_scalar(metrics[f'GLeV_report@{primary_k}'])}",
-        f"GLeV_raw@{primary_k}={format_scalar(metrics[f'GLeV_raw@{primary_k}'])}",
+        f"GLeV@{primary_k}={format_scalar(metrics[f'GLeV@{primary_k}'])}",
     ]
-    if secondary_k != primary_k:
-        eval_aux.append(f"GLeV_raw@{secondary_k}={format_scalar(metrics[f'GLeV_raw@{secondary_k}'])}")
 
     eval_aux.extend(
         [
@@ -721,6 +717,7 @@ def main():
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
     os.makedirs(run_dir, exist_ok=True)
+    remove_legacy_best_checkpoints(run_dir, keep_name=f"best_best{args.eval_topk_secondary}.pt")
 
     start_epoch, global_step, best_records = load_resume_checkpoint(args, run_dir, model, optimizer, device)
 
@@ -856,23 +853,25 @@ def main():
             save_checkpoint(last_path, ckpt)
 
             best_updates = []
-            for best_key, spec in best_specs.items():
-                value = metrics[spec["metric_key"]]
-                if math.isnan(value):
-                    continue
-                if value < best_records[best_key]["value"]:
-                    previous_value = best_records[best_key]["value"]
-                    best_records[best_key]["value"] = value
-                    best_records[best_key]["epoch"] = epoch
-                    save_checkpoint(spec["path"], ckpt)
-                    best_updates.append(
-                        {
-                            "metric_key": spec["metric_key"],
-                            "previous_value": None if math.isinf(previous_value) else previous_value,
-                            "value": value,
-                            "epoch": epoch,
-                        }
-                    )
+            best_key = "best20"
+            spec = best_specs[best_key]
+            candidate_sort_key = unified_best20_sort_key(metrics, args)
+            previous_sort_key = best_records[best_key].get("sort_key")
+            if previous_sort_key is None or candidate_sort_key < tuple(previous_sort_key):
+                previous_value = best_records[best_key]["value"]
+                best_records[best_key]["value"] = candidate_sort_key[0]
+                best_records[best_key]["epoch"] = epoch
+                best_records[best_key]["sort_key"] = candidate_sort_key
+                save_checkpoint(spec["path"], ckpt)
+                best_updates.append(
+                    {
+                        "record_key": best_key,
+                        "metric_key": spec["metric_key"],
+                        "previous_value": None if math.isinf(previous_value) else previous_value,
+                        "value": candidate_sort_key[0],
+                        "epoch": epoch,
+                    }
+                )
 
             progress.close()
             recorder.log_epoch(

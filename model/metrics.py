@@ -7,16 +7,14 @@ def metric_names_for_protocol(primary_k=5, secondary_k=20):
     names = [
         f"ADE@{primary_k}",
         f"FDE@{primary_k}",
-        f"GLeV_report@{primary_k}",
-        f"GLeV_raw@{primary_k}",
+        f"GLeV@{primary_k}",
     ]
     if secondary_k != primary_k:
         names.extend(
             [
                 f"ADE@{secondary_k}",
                 f"FDE@{secondary_k}",
-                f"GLeV_report@{secondary_k}",
-                f"GLeV_raw@{secondary_k}",
+                f"GLeV@{secondary_k}",
             ]
         )
     rare_k = secondary_k if secondary_k != primary_k else primary_k
@@ -63,13 +61,6 @@ def _glev_raw(pred_xyz, gt_xyz, pred_score, k, topn):
     global_var = endpoints.var(dim=1, unbiased=False).sum(dim=-1) + 1e-6
     local_var = near.var(dim=1, unbiased=False).sum(dim=-1) + 1e-6
     return global_var / local_var
-
-
-def _glev_report(pred_xyz, gt_xyz, pred_score, k, topn):
-    raw = _glev_raw(pred_xyz, gt_xyz, pred_score, k, topn)
-    return 1.0 / raw
-
-
 def rare_subset_fde(pred_xyz, gt_xyz, pred_score, is_rare, k):
     if is_rare.sum() == 0:
         return pred_xyz.new_full((pred_xyz.size(0),), float("nan"))
@@ -117,27 +108,18 @@ def summarize_batch_metrics(
     gt_xyz = batch["fut_xyz"]
 
     ade_primary, fde_primary = minade_minfde(pred_xyz, gt_xyz, pred_score, k=primary_k)
-    glev_report_primary = _glev_report(pred_xyz, gt_xyz, pred_score, k=primary_k, topn=glev_topn_primary)
-    glev_raw_primary = _glev_raw(pred_xyz, gt_xyz, pred_score, k=primary_k, topn=glev_topn_primary)
+    glev_primary = _glev_raw(pred_xyz, gt_xyz, pred_score, k=primary_k, topn=glev_topn_primary)
 
     metrics = {
         f"ADE@{primary_k}": float(ade_primary.mean().item()),
         f"FDE@{primary_k}": float(fde_primary.mean().item()),
-        f"GLeV_report@{primary_k}": float(glev_report_primary.mean().item()),
-        f"GLeV_raw@{primary_k}": float(glev_raw_primary.mean().item()),
+        f"GLeV@{primary_k}": float(glev_primary.mean().item()),
     }
 
     rare_k = secondary_k if secondary_k != primary_k else primary_k
     if secondary_k != primary_k:
         ade_secondary, fde_secondary = minade_minfde(pred_xyz, gt_xyz, pred_score, k=secondary_k)
-        glev_report_secondary = _glev_report(
-            pred_xyz,
-            gt_xyz,
-            pred_score,
-            k=secondary_k,
-            topn=glev_topn_secondary,
-        )
-        glev_raw_secondary = _glev_raw(
+        glev_secondary = _glev_raw(
             pred_xyz,
             gt_xyz,
             pred_score,
@@ -148,8 +130,7 @@ def summarize_batch_metrics(
             {
                 f"ADE@{secondary_k}": float(ade_secondary.mean().item()),
                 f"FDE@{secondary_k}": float(fde_secondary.mean().item()),
-                f"GLeV_report@{secondary_k}": float(glev_report_secondary.mean().item()),
-                f"GLeV_raw@{secondary_k}": float(glev_raw_secondary.mean().item()),
+                f"GLeV@{secondary_k}": float(glev_secondary.mean().item()),
             }
         )
 
