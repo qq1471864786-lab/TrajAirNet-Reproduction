@@ -566,3 +566,75 @@ Decision:
 ```bash
 python train.py 111_days --device cuda:1 --lambda_score 0.03 --stage_c_rank_weight 0.0 --stage_c_div_weight 2.0
 ```
+
+## 2026-04-22: 7days1 small-dataset default search
+
+Goal:
+
+- stop reusing the `111_days` long schedule for `7days1`
+- search a separate small-dataset recipe using only server-side runs on `cuda:1`
+
+Key findings:
+
+- keeping the current weight recipe is more stable than changing it:
+  - `--lambda_score 0.03`
+  - `--stage_c_rank_weight 0.0`
+  - `--stage_c_div_weight 2.0`
+- `7days1` does not benefit from copying `111_days` batch sizes:
+  - `batch_size=512 / eval_batch_size=1024` looked good only in a batch-limited shortcut
+  - after equalizing approximate sample count, it became much worse than `48 / 96`
+- the useful change is the training length:
+  - keep `phase_a / phase_b = 10 / 4`
+  - shorten `phase_c` to `20`
+  - remove `extra_epochs`
+
+Quick proxy comparisons:
+
+- `10 / 4 / 12`, `48 / 96`:
+  - `ADE@20 = 0.4427`
+  - `FDE@20 = 0.6800`
+  - `GLeV@20 = 0.1856`
+  - `rare_FDE@20 = 1.0074`
+- `10 / 4 / 20`, `48 / 96`:
+  - `ADE@20 = 0.4084`
+  - `FDE@20 = 0.6307`
+  - `GLeV@20 = 0.1840`
+  - `rare_FDE@20 = 0.9405`
+
+Full-data confirmation:
+
+- config:
+  - `phase_a / phase_b / phase_c / extra = 10 / 4 / 20 / 0`
+  - `batch_size / eval_batch_size = 48 / 96`
+  - `lambda_score = 0.03`
+  - `stage_c_rank_weight = 0.0`
+  - `stage_c_div_weight = 2.0`
+- result:
+  - `ADE@20 = 0.3247`
+  - `FDE@20 = 0.5206`
+  - `GLeV@20 = 0.0533`
+  - `rare_FDE@20 = 1.0105`
+
+Comparison to the earlier long `7days1` formal run:
+
+- earlier long run best:
+  - `ADE@20 = 0.3264`
+  - `FDE@20 = 0.5091`
+  - `GLeV@20 = 0.0580`
+  - `rare_FDE@20 = 1.0023`
+- shorter run:
+  - improves `ADE@20` and `GLeV@20`
+  - is slightly worse on `FDE@20` and `rare_FDE@20`
+  - saves substantial training time
+
+Decision:
+
+- keep the existing `111_days` defaults
+- give `7days*` their own training-length defaults:
+  - `phase_a = 10`
+  - `phase_b = 4`
+  - `phase_c = 20`
+  - `extra_epochs = 0`
+- keep small-dataset batch sizes:
+  - `batch_size = 48`
+  - `eval_batch_size = 96`

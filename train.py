@@ -79,10 +79,10 @@ def build_parser():
     parser.add_argument("--batch_size", type=int, default=0)
     parser.add_argument("--eval_batch_size", type=int, default=0)
     parser.add_argument("--grad_accum", type=int, default=0)
-    parser.add_argument("--phase_a_epochs", type=int, default=10)
-    parser.add_argument("--phase_b_epochs", type=int, default=4)
-    parser.add_argument("--phase_c_epochs", type=int, default=51)
-    parser.add_argument("--extra_epochs", type=int, default=35, help="Extra refiner-stage epochs appended after phase C.")
+    parser.add_argument("--phase_a_epochs", type=int, default=None)
+    parser.add_argument("--phase_b_epochs", type=int, default=None)
+    parser.add_argument("--phase_c_epochs", type=int, default=None)
+    parser.add_argument("--extra_epochs", type=int, default=None, help="Extra refiner-stage epochs appended after phase C.")
     parser.add_argument("--stage_a_lr", type=float, default=3e-4)
     parser.add_argument("--stage_b_lr", type=float, default=2e-4)
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
@@ -90,8 +90,8 @@ def build_parser():
     parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra refiner epochs.")
     parser.add_argument("--stage_b_rank_weight", type=float, default=0.0)
     parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
-    parser.add_argument("--stage_c_rank_weight", type=float, default=1.0)
-    parser.add_argument("--stage_c_div_weight", type=float, default=1.0)
+    parser.add_argument("--stage_c_rank_weight", type=float, default=0.0)
+    parser.add_argument("--stage_c_div_weight", type=float, default=2.0)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
@@ -110,7 +110,7 @@ def build_parser():
     parser.add_argument("--lambda_fde", type=float, default=1.0)
     parser.add_argument("--lambda_proto", type=float, default=0.35)
     parser.add_argument("--lambda_res", type=float, default=0.2)
-    parser.add_argument("--lambda_score", type=float, default=0.3)
+    parser.add_argument("--lambda_score", type=float, default=0.03)
     parser.add_argument("--lambda_rank", type=float, default=0.1)
     parser.add_argument("--lambda_div", type=float, default=0.05)
     parser.add_argument("--lambda_coeff", type=float, default=0.02)
@@ -174,6 +174,7 @@ def apply_training_defaults(args):
     args.dataset_name = resolve_dataset_name(args)
     is_unified = args.protocol_name == "trajair_40to120_best20"
     is_main_dataset = args.dataset_name == "111_days"
+    is_small_dataset = args.dataset_name.lower().startswith("7days")
 
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
@@ -191,6 +192,21 @@ def apply_training_defaults(args):
 
     if args.grad_accum <= 0:
         args.grad_accum = 1
+
+    if args.phase_a_epochs is None:
+        args.phase_a_epochs = 10
+    if args.phase_b_epochs is None:
+        args.phase_b_epochs = 4
+    if args.phase_c_epochs is None:
+        if is_unified and is_small_dataset:
+            args.phase_c_epochs = 20
+        else:
+            args.phase_c_epochs = 51
+    if args.extra_epochs is None:
+        if is_unified and is_small_dataset:
+            args.extra_epochs = 0
+        else:
+            args.extra_epochs = 35
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
