@@ -103,8 +103,10 @@ def build_global_features(obs_xyz):
 class TemporalEncoder(nn.Module):
     def __init__(self, d_model=96, nhead=4, ff_dim=192, layers=3, obs_len=40, dropout=0.1):
         super().__init__()
-        self.local_proj = nn.Linear(8, 48)
-        self.global_proj = nn.Linear(7, 48)
+        local_dim = d_model // 2
+        global_dim = d_model - local_dim
+        self.local_proj = nn.Linear(8, local_dim)
+        self.global_proj = nn.Linear(7, global_dim)
         self.time_emb = nn.Embedding(obs_len, d_model)
         self.register_buffer("time_ids", torch.arange(obs_len, dtype=torch.long), persistent=False)
         block = nn.TransformerEncoderLayer(

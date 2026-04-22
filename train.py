@@ -69,10 +69,10 @@ def build_parser():
     parser.add_argument("--basis_dim", type=int, default=16)
     parser.add_argument("--topk_proto", type=int, default=5)
     parser.add_argument("--micro_per_proto", type=int, default=4)
-    parser.add_argument("--d_model", type=int, default=96)
+    parser.add_argument("--d_model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=4)
-    parser.add_argument("--ff_dim", type=int, default=192)
-    parser.add_argument("--encoder_layers", type=int, default=3)
+    parser.add_argument("--ff_dim", type=int, default=None)
+    parser.add_argument("--encoder_layers", type=int, default=None)
     parser.add_argument("--social_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.10)
 
@@ -176,6 +176,13 @@ def apply_training_defaults(args):
     is_main_dataset = args.dataset_name == "111_days"
     is_small_dataset = args.dataset_name.lower().startswith("7days")
 
+    if args.d_model is None:
+        args.d_model = 128 if is_unified and is_main_dataset else 96
+    if args.ff_dim is None:
+        args.ff_dim = 256 if is_unified and is_main_dataset else 192
+    if args.encoder_layers is None:
+        args.encoder_layers = 4 if is_unified and is_main_dataset else 3
+
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
             args.batch_size = 512
@@ -224,7 +231,6 @@ def apply_runtime_defaults(args, device):
 
     if args.num_workers > 0:
         args.persistent_workers = True
-
 
 def stage_config(epoch, args):
     if epoch <= args.phase_a_epochs:
