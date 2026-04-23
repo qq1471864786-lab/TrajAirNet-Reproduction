@@ -206,7 +206,7 @@ class PrototypeRouter(nn.Module):
 
 
 class PrototypeConditionedQueryDecoder(nn.Module):
-    def __init__(self, d_model=96, n_micro=4, basis_dim=16, dropout=0.1):
+    def __init__(self, d_model=96, n_micro=4, basis_dim=16, ff_dim=192, dropout=0.1):
         super().__init__()
         self.n_micro = n_micro
         self.endpoint_proj = nn.Linear(3, d_model)
@@ -221,10 +221,10 @@ class PrototypeConditionedQueryDecoder(nn.Module):
         self.ffn = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Linear(d_model, 192),
+                    nn.Linear(d_model, ff_dim),
                     nn.GELU(),
                     nn.Dropout(dropout),
-                    nn.Linear(192, d_model),
+                    nn.Linear(ff_dim, d_model),
                 )
                 for _ in range(2)
             ]
@@ -245,7 +245,6 @@ class PrototypeConditionedQueryDecoder(nn.Module):
             + target_ctx[:, None, None, :]
         )
         hidden = hidden.view(batch_size, proto_token.size(1) * self.n_micro, -1)
-
         norm_index = 0
         for layer_index in range(2):
             self_attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
@@ -322,10 +321,13 @@ class ProtoBasisNet(nn.Module):
         n_micro=4,
         n_proto=64,
         basis_dim=16,
+        local_basis_dim=0,
         dropout=0.1,
         proto_summary_5d: Optional[torch.Tensor] = None,
         proto_frequency: Optional[torch.Tensor] = None,
         basis_bank: Optional[torch.Tensor] = None,
+        prototype_mean_path: Optional[torch.Tensor] = None,
+        local_basis_bank: Optional[torch.Tensor] = None,
         disable_social=False,
         disable_router=False,
         disable_refiner=False,
@@ -346,7 +348,6 @@ class ProtoBasisNet(nn.Module):
         self.disable_social = disable_social
         self.disable_router = disable_router
         self.disable_refiner = disable_refiner
-
         self.pose_normalizer = PoseNormalizer()
         self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
@@ -373,13 +374,36 @@ class ProtoBasisNet(nn.Module):
             d_model=d_model,
             n_micro=n_micro,
             basis_dim=basis_dim,
+            ff_dim=ff_dim,
             dropout=dropout,
         )
         self.basis_bank = BasisBank(basis_bank)
         self.refiner = TemporalResidualRefiner(d_model=d_model)
+        self.local_basis_dim = int(local_basis_dim)
 
         self.register_buffer("proto_summary_5d", proto_summary_5d.float())
         self.register_buffer("proto_frequency", proto_frequency.float())
+        if prototype_mean_path is None:
+            prototype_mean_path = torch.zeros(n_proto, pred_len, 3, dtype=torch.float32)
+        if local_basis_bank is None:
+            local_basis_bank = torch.zeros(n_proto, self.local_basis_dim, pred_len, 3, dtype=torch.float32)
+        self.register_buffer("prototype_mean_path", prototype_mean_path.float())
+        self.register_buffer("local_basis_bank", local_basis_bank.float())
+        self.has_local_basis = self.local_basis_dim > 0 and self.local_basis_bank.numel() > 0
+        if self.has_local_basis:
+            self.local_coeff_head = nn.Sequential(
+                nn.Linear(d_model, 128),
+                nn.GELU(),
+                nn.Linear(128, self.local_basis_dim),
+            )
+            self.local_mix_gate = nn.Sequential(
+                nn.Linear(d_model, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1),
+            )
+        else:
+            self.local_coeff_head = None
+            self.local_mix_gate = None
 
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
@@ -412,6 +436,19 @@ class ProtoBasisNet(nn.Module):
         endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
         anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
         coarse_local = self.basis_bank(anchor_local, coeff)
+        if self.has_local_basis:
+            proto_mean_path = self.prototype_mean_path[top_proto_idx]
+            proto_mean_path = proto_mean_path.repeat_interleave(self.n_micro, dim=1)
+            proto_mean_endpoint = proto_mean_path[:, :, -1, :]
+            aligned_proto_mean = proto_mean_path + (endpoint_mode_local - proto_mean_endpoint)[:, :, None, :]
+
+            local_basis = self.local_basis_bank[top_proto_idx]
+            local_basis = local_basis.repeat_interleave(self.n_micro, dim=1)
+            local_coeff = self.local_coeff_head(query_feat)
+            local_residual = torch.einsum("bkm,bkmtd->bktd", local_coeff, local_basis)
+            local_path = aligned_proto_mean + local_residual
+            local_gate = torch.sigmoid(self.local_mix_gate(query_feat)).unsqueeze(-1)
+            coarse_local = coarse_local + local_gate * (local_path - anchor_local)
         use_refiner = enable_refiner and (not self.disable_refiner)
         refined_local = self.refiner(coarse_local, query_feat, difficulty_gate) if use_refiner else coarse_local
 

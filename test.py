@@ -68,10 +68,17 @@ def build_model(config, checkpoint):
         n_micro=config["micro_per_proto"],
         n_proto=config["n_proto"],
         basis_dim=config["basis_dim"],
+        local_basis_dim=config.get("local_basis_dim", 0),
         dropout=config["dropout"],
         proto_summary_5d=torch.tensor(checkpoint["proto_summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(checkpoint["proto_freq"], dtype=torch.float32),
         basis_bank=torch.tensor(checkpoint["basis_bank"], dtype=torch.float32),
+        prototype_mean_path=torch.tensor(checkpoint.get("prototype_mean_path"), dtype=torch.float32)
+        if checkpoint.get("prototype_mean_path") is not None
+        else None,
+        local_basis_bank=torch.tensor(checkpoint.get("local_basis_bank"), dtype=torch.float32)
+        if checkpoint.get("local_basis_bank") is not None
+        else None,
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -219,8 +226,11 @@ def main():
         "frequency": checkpoint["proto_freq"],
         "rare_ids": torch.nonzero(torch.tensor(checkpoint["proto_freq"]) < config["rare_threshold"]).view(-1).tolist(),
         "basis_bank": checkpoint["basis_bank"],
+        "prototype_mean_path": checkpoint.get("prototype_mean_path"),
+        "local_basis_bank": checkpoint.get("local_basis_bank"),
         "n_proto": config["n_proto"],
         "basis_dim": config["basis_dim"],
+        "local_basis_dim": config.get("local_basis_dim", 0),
         "rare_threshold": config["rare_threshold"],
         "obs_len": config["obs"],
         "pred_len": config["preds"],
@@ -238,6 +248,7 @@ def main():
         model_artifact=model_artifact,
         n_proto=config["n_proto"],
         basis_dim=config["basis_dim"],
+        local_basis_dim=config.get("local_basis_dim", 0),
         rare_threshold=config["rare_threshold"],
     )
     loader = build_loader(dataset, args.batch_size, args, config["max_agents"])

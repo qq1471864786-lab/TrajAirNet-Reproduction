@@ -108,6 +108,7 @@ def _artifact_path(
     data_dir,
     n_proto,
     basis_dim,
+    local_basis_dim,
     obs_len,
     pred_len,
     obs_stride=1,
@@ -118,8 +119,8 @@ def _artifact_path(
     return os.path.join(
         cache_dir,
         (
-            f"protobasis_artifact_o{obs_len}_p{pred_len}_os{obs_stride}_ps{pred_stride}_"
-            f"n{n_proto}_b{basis_dim}_r{rare_threshold:.4f}.pt"
+            f"protobasis_artifact_v3_o{obs_len}_p{pred_len}_os{obs_stride}_ps{pred_stride}_"
+            f"n{n_proto}_b{basis_dim}_lb{local_basis_dim}_r{rare_threshold:.4f}.pt"
         ),
     )
 
@@ -153,6 +154,8 @@ def _run_kmeans(data, n_clusters, random_state=3407, iters=50):
 
 
 def _fit_basis_bank(future_local_bank, pred_len, basis_dim, max_samples=60000, random_state=3407):
+    if basis_dim <= 0:
+        return np.zeros((0, pred_len, 3), dtype=np.float32)
     if isinstance(future_local_bank, np.ndarray):
         futures = future_local_bank.astype(np.float32, copy=False)
         if futures.shape[0] > max_samples:
@@ -227,8 +230,11 @@ class ProtoBasisArtifact:
     frequency: np.ndarray
     rare_ids: np.ndarray
     basis_bank: np.ndarray
+    prototype_mean_path: np.ndarray
+    local_basis_bank: np.ndarray
     n_proto: int
     basis_dim: int
+    local_basis_dim: int
     rare_threshold: float
     obs_len: int
     pred_len: int
@@ -241,8 +247,11 @@ class ProtoBasisArtifact:
             "frequency": self.frequency,
             "rare_ids": self.rare_ids,
             "basis_bank": self.basis_bank,
+            "prototype_mean_path": self.prototype_mean_path,
+            "local_basis_bank": self.local_basis_bank,
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
+            "local_basis_dim": self.local_basis_dim,
             "rare_threshold": self.rare_threshold,
             "obs_len": self.obs_len,
             "pred_len": self.pred_len,
@@ -267,6 +276,7 @@ class ProtoBasisSceneDataset(Dataset):
         model_artifact: Optional[Dict] = None,
         n_proto=64,
         basis_dim=16,
+        local_basis_dim=0,
         rare_threshold=0.02,
     ):
         super().__init__()
@@ -281,6 +291,7 @@ class ProtoBasisSceneDataset(Dataset):
         self.sequence_span = (obs_len - 1) * obs_stride + pred_len * pred_stride + 1
         self.n_proto = n_proto
         self.basis_dim = basis_dim
+        self.local_basis_dim = local_basis_dim
         self.rare_threshold = rare_threshold
         self.obs_index_offsets = np.arange(obs_len, dtype=np.int32) * obs_stride
         self.pred_index_offsets = (
@@ -322,6 +333,7 @@ class ProtoBasisSceneDataset(Dataset):
                 data_dir,
                 n_proto,
                 basis_dim,
+                local_basis_dim,
                 obs_len=obs_len,
                 pred_len=pred_len,
                 obs_stride=obs_stride,
@@ -343,6 +355,11 @@ class ProtoBasisSceneDataset(Dataset):
         self.prototype_frequency = np.asarray(model_artifact["frequency"], dtype=np.float32)
         self.rare_proto_ids = np.asarray(model_artifact["rare_ids"], dtype=np.int64)
         self.basis_bank = np.asarray(model_artifact["basis_bank"], dtype=np.float32)
+        self.local_basis_dim = int(model_artifact.get("local_basis_dim", self.local_basis_dim))
+        default_mean_path = np.zeros((self.n_proto, self.pred_len, 3), dtype=np.float32)
+        default_local_basis = np.zeros((self.n_proto, self.local_basis_dim, self.pred_len, 3), dtype=np.float32)
+        self.prototype_mean_path = np.asarray(model_artifact.get("prototype_mean_path", default_mean_path), dtype=np.float32)
+        self.local_basis_bank = np.asarray(model_artifact.get("local_basis_bank", default_local_basis), dtype=np.float32)
         self._assign_prototypes()
 
     def _build_and_cache(self, cache_path):
@@ -465,13 +482,35 @@ class ProtoBasisSceneDataset(Dataset):
             pred_len=self.pred_len,
             basis_dim=self.basis_dim,
         )
+        prototype_mean_path = np.zeros((self.n_proto, self.pred_len, 3), dtype=np.float32)
+        local_basis_bank = np.zeros((self.n_proto, self.local_basis_dim, self.pred_len, 3), dtype=np.float32)
+        future_bank = self.samples["future_local"]
+        alpha = np.linspace(0.0, 1.0, num=self.pred_len, dtype=np.float32)[:, None]
+        for proto_id in range(self.n_proto):
+            mask = labels == proto_id
+            proto_samples = future_bank[mask]
+            if proto_samples.shape[0] == 0:
+                prototype_mean_path[proto_id] = alpha * centers[proto_id, :3][None, :]
+                continue
+            prototype_mean_path[proto_id] = proto_samples.mean(axis=0)
+            if self.local_basis_dim > 0:
+                local_basis_bank[proto_id] = _fit_basis_bank(
+                    proto_samples - prototype_mean_path[proto_id][None, :],
+                    pred_len=self.pred_len,
+                    basis_dim=self.local_basis_dim,
+                    max_samples=20000,
+                    random_state=3407 + proto_id,
+                )
         return ProtoBasisArtifact(
             summary_5d=centers,
             frequency=frequency,
             rare_ids=rare_ids,
             basis_bank=basis_bank,
+            prototype_mean_path=prototype_mean_path,
+            local_basis_bank=local_basis_bank,
             n_proto=self.n_proto,
             basis_dim=self.basis_dim,
+            local_basis_dim=self.local_basis_dim,
             rare_threshold=self.rare_threshold,
             obs_len=self.obs_len,
             pred_len=self.pred_len,
@@ -503,8 +542,11 @@ class ProtoBasisSceneDataset(Dataset):
             "frequency": self.prototype_frequency.copy(),
             "rare_ids": self.rare_proto_ids.copy(),
             "basis_bank": self.basis_bank.copy(),
+            "prototype_mean_path": self.prototype_mean_path.copy(),
+            "local_basis_bank": self.local_basis_bank.copy(),
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
+            "local_basis_dim": self.local_basis_dim,
             "rare_threshold": self.rare_threshold,
             "obs_len": self.obs_len,
             "pred_len": self.pred_len,

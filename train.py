@@ -67,6 +67,7 @@ def build_parser():
     parser.add_argument("--max_agents", type=int, default=7)
     parser.add_argument("--n_proto", type=int, default=64)
     parser.add_argument("--basis_dim", type=int, default=16)
+    parser.add_argument("--local_basis_dim", type=int, default=0)
     parser.add_argument("--topk_proto", type=int, default=5)
     parser.add_argument("--micro_per_proto", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=None)
@@ -334,10 +335,13 @@ def build_model(args, model_artifact):
         n_micro=args.micro_per_proto,
         n_proto=args.n_proto,
         basis_dim=args.basis_dim,
+        local_basis_dim=args.local_basis_dim,
         dropout=args.dropout,
         proto_summary_5d=torch.tensor(model_artifact["summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(model_artifact["frequency"], dtype=torch.float32),
         basis_bank=torch.tensor(model_artifact["basis_bank"], dtype=torch.float32),
+        prototype_mean_path=torch.tensor(model_artifact["prototype_mean_path"], dtype=torch.float32),
+        local_basis_bank=torch.tensor(model_artifact["local_basis_bank"], dtype=torch.float32),
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
@@ -374,11 +378,16 @@ def init_best_records(args, run_dir):
 def unified_best20_sort_key(metrics, args):
     secondary_k = args.eval_topk_secondary
     rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
+    ade = float(metrics[f"ADE@{secondary_k}"])
+    fde = float(metrics[f"FDE@{secondary_k}"])
+    glev = float(metrics[f"GLeV@{secondary_k}"])
+    rare_fde = float(metrics[f"rare_FDE@{rare_k}"])
     return (
-        float(metrics[f"ADE@{secondary_k}"]),
-        float(metrics[f"FDE@{secondary_k}"]),
-        float(metrics[f"GLeV@{secondary_k}"]),
-        float(metrics[f"rare_FDE@{rare_k}"]),
+        ade + fde,
+        fde,
+        ade,
+        glev,
+        rare_fde,
     )
 
 
@@ -398,6 +407,8 @@ def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model
         "proto_summary_5d": model_artifact["summary_5d"],
         "proto_freq": model_artifact["frequency"],
         "basis_bank": model_artifact["basis_bank"],
+        "prototype_mean_path": model_artifact["prototype_mean_path"],
+        "local_basis_bank": model_artifact["local_basis_bank"],
         "config": config,
         "meta": meta,
     }
@@ -675,6 +686,7 @@ def main():
         max_agents=args.max_agents,
         n_proto=args.n_proto,
         basis_dim=args.basis_dim,
+        local_basis_dim=args.local_basis_dim,
         rare_threshold=args.rare_threshold,
     )
     model_artifact = train_dataset.export_model_artifact()
@@ -689,6 +701,7 @@ def main():
         model_artifact=model_artifact,
         n_proto=args.n_proto,
         basis_dim=args.basis_dim,
+        local_basis_dim=args.local_basis_dim,
         rare_threshold=args.rare_threshold,
     )
 
@@ -847,15 +860,21 @@ def main():
             previous_sort_key = best_records[best_key].get("sort_key")
             if previous_sort_key is None or candidate_sort_key < tuple(previous_sort_key):
                 previous_value = best_records[best_key]["value"]
-                best_records[best_key]["value"] = candidate_sort_key[0]
+                secondary_k = args.eval_topk_secondary
+                rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
+                best_records[best_key]["value"] = float(metrics[f"ADE@{secondary_k}"])
                 best_records[best_key]["epoch"] = epoch
                 best_records[best_key]["sort_key"] = candidate_sort_key
+                best_records[best_key]["fde_value"] = float(metrics[f"FDE@{secondary_k}"])
+                best_records[best_key]["glev_value"] = float(metrics[f"GLeV@{secondary_k}"])
+                best_records[best_key]["rare_fde_value"] = float(metrics[f"rare_FDE@{rare_k}"])
+                best_records[best_key]["selection_score"] = candidate_sort_key[0]
                 best_updates.append(
                     {
                         "record_key": best_key,
                         "metric_key": spec["metric_key"],
                         "previous_value": None if math.isinf(previous_value) else previous_value,
-                        "value": candidate_sort_key[0],
+                        "value": float(metrics[f"ADE@{secondary_k}"]),
                         "epoch": epoch,
                     }
                 )
