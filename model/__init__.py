@@ -8,6 +8,6 @@ from model.metrics import (
     summarize_batch_metrics,
     update_metric_sums,
 )
-from model.proto_basis_net_model import ProtoBasisNet
+from model.proto_basis_flight_model import ProtoBasisNet
 from model.protocols import PROTOCOLS, resolve_protocol
 from model.provenance import basis_hash, git_commit, model_artifact_hash, protocol_hash
