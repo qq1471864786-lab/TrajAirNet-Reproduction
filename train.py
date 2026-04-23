@@ -186,7 +186,7 @@ def apply_training_defaults(args):
 
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
-            args.batch_size = 512
+            args.batch_size = 64
         elif is_unified:
             args.batch_size = 48
         else:
