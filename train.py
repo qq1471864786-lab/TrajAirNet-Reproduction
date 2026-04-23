@@ -67,8 +67,15 @@ def build_parser():
     parser.add_argument("--max_agents", type=int, default=7)
     parser.add_argument("--n_proto", type=int, default=64)
     parser.add_argument("--basis_dim", type=int, default=16)
-    parser.add_argument("--local_basis_dim", type=int, default=0)
-    parser.add_argument("--support_aware_local_basis", action="store_true")
+    parser.add_argument("--local_basis_dim", type=int, default=None)
+    parser.add_argument("--support_aware_local_basis", dest="support_aware_local_basis", action="store_true")
+    parser.add_argument(
+        "--no_support_aware_local_basis",
+        dest="support_aware_local_basis",
+        action="store_false",
+        help="Disable support-aware shrinking for proto-local basis.",
+    )
+    parser.set_defaults(support_aware_local_basis=None)
     parser.add_argument("--topk_proto", type=int, default=5)
     parser.add_argument("--micro_per_proto", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=None)
@@ -184,6 +191,10 @@ def apply_training_defaults(args):
         args.ff_dim = 256 if is_unified and is_main_dataset else 192
     if args.encoder_layers is None:
         args.encoder_layers = 4 if is_unified and is_main_dataset else 3
+    if args.local_basis_dim is None:
+        args.local_basis_dim = 2 if is_unified and is_main_dataset else 0
+    if args.support_aware_local_basis is None:
+        args.support_aware_local_basis = bool(is_unified and is_main_dataset and args.local_basis_dim > 0)
 
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
