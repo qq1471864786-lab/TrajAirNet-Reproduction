@@ -323,6 +323,10 @@ class ProtoBasisNet(nn.Module):
         basis_dim=16,
         local_basis_dim=0,
         support_aware_local_basis=False,
+        two_stage_decoder=False,
+        two_stage_update_endpoint=True,
+        two_stage_update_coeff=True,
+        two_stage_rescore=True,
         dropout=0.1,
         proto_summary_5d: Optional[torch.Tensor] = None,
         proto_frequency: Optional[torch.Tensor] = None,
@@ -350,6 +354,10 @@ class ProtoBasisNet(nn.Module):
         self.disable_router = disable_router
         self.disable_refiner = disable_refiner
         self.support_aware_local_basis = support_aware_local_basis
+        self.two_stage_decoder = two_stage_decoder
+        self.two_stage_update_endpoint = two_stage_update_endpoint
+        self.two_stage_update_coeff = two_stage_update_coeff
+        self.two_stage_rescore = two_stage_rescore
         self.pose_normalizer = PoseNormalizer()
         self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
@@ -406,6 +414,18 @@ class ProtoBasisNet(nn.Module):
         else:
             self.local_coeff_head = None
             self.local_mix_gate = None
+        if self.two_stage_decoder:
+            self.stage2_proj = nn.Sequential(
+                nn.Linear(d_model + 6, d_model),
+                nn.GELU(),
+                nn.LayerNorm(d_model),
+            )
+            self.stage2_endpoint_head = nn.Linear(d_model, 3)
+            self.stage2_coeff_head = nn.Linear(d_model, basis_dim)
+        else:
+            self.stage2_proj = None
+            self.stage2_endpoint_head = None
+            self.stage2_coeff_head = None
 
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
@@ -438,6 +458,20 @@ class ProtoBasisNet(nn.Module):
         endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
         anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
         coarse_local = self.basis_bank(anchor_local, coeff)
+        active_query = query_feat
+        if self.two_stage_decoder:
+            stage2_input = torch.cat([query_feat, coarse_local[:, :, -1], coarse_local.mean(dim=2)], dim=-1)
+            stage2_query = query_feat + self.stage2_proj(stage2_input)
+            if self.two_stage_update_endpoint:
+                endpoint_mode_local = endpoint_mode_local + self.stage2_endpoint_head(stage2_query)
+            if self.two_stage_update_coeff:
+                coeff = coeff + self.stage2_coeff_head(stage2_query)
+            if self.two_stage_rescore:
+                pred_score = self.query_decoder.score_head(stage2_query).squeeze(-1)
+                difficulty_gate = torch.sigmoid(self.query_decoder.gate_head(stage2_query)).squeeze(-1)
+            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+            coarse_local = self.basis_bank(anchor_local, coeff)
+            active_query = stage2_query
         if self.has_local_basis:
             proto_mean_path = self.prototype_mean_path[top_proto_idx]
             proto_mean_path = proto_mean_path.repeat_interleave(self.n_micro, dim=1)
@@ -446,10 +480,10 @@ class ProtoBasisNet(nn.Module):
 
             local_basis = self.local_basis_bank[top_proto_idx]
             local_basis = local_basis.repeat_interleave(self.n_micro, dim=1)
-            local_coeff = self.local_coeff_head(query_feat)
+            local_coeff = self.local_coeff_head(active_query)
             local_residual = torch.einsum("bkm,bkmtd->bktd", local_coeff, local_basis)
             local_path = aligned_proto_mean + local_residual
-            local_gate = torch.sigmoid(self.local_mix_gate(query_feat)).unsqueeze(-1)
+            local_gate = torch.sigmoid(self.local_mix_gate(active_query)).unsqueeze(-1)
             if self.support_aware_local_basis:
                 proto_support = self.proto_frequency[top_proto_idx]
                 support_scale = (proto_support / self.proto_frequency.max().clamp_min(1e-6)).clamp_min(1e-6).sqrt()
@@ -457,7 +491,7 @@ class ProtoBasisNet(nn.Module):
                 local_gate = local_gate * support_scale
             coarse_local = coarse_local + local_gate * (local_path - anchor_local)
         use_refiner = enable_refiner and (not self.disable_refiner)
-        refined_local = self.refiner(coarse_local, query_feat, difficulty_gate) if use_refiner else coarse_local
+        refined_local = self.refiner(coarse_local, active_query, difficulty_gate) if use_refiner else coarse_local
 
         pred_xyz = self.pose_normalizer.inverse(refined_local, origin, rotation)
 

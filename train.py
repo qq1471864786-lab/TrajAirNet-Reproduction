@@ -76,6 +76,13 @@ def build_parser():
         help="Disable support-aware shrinking for proto-local basis.",
     )
     parser.set_defaults(support_aware_local_basis=None)
+    parser.add_argument("--two_stage_decoder", dest="two_stage_decoder", action="store_true")
+    parser.add_argument("--no_two_stage_decoder", dest="two_stage_decoder", action="store_false")
+    parser.add_argument("--no_two_stage_update_endpoint", action="store_true")
+    parser.add_argument("--no_two_stage_update_coeff", action="store_true")
+    parser.add_argument("--two_stage_rescore", dest="two_stage_rescore", action="store_true")
+    parser.add_argument("--no_two_stage_rescore", dest="two_stage_rescore", action="store_false")
+    parser.set_defaults(two_stage_decoder=None, two_stage_rescore=None)
     parser.add_argument("--topk_proto", type=int, default=5)
     parser.add_argument("--micro_per_proto", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=None)
@@ -195,6 +202,10 @@ def apply_training_defaults(args):
         args.local_basis_dim = 2 if is_unified and is_main_dataset else 0
     if args.support_aware_local_basis is None:
         args.support_aware_local_basis = bool(is_unified and is_main_dataset and args.local_basis_dim > 0)
+    if args.two_stage_decoder is None:
+        args.two_stage_decoder = bool(is_unified and is_main_dataset)
+    if args.two_stage_rescore is None:
+        args.two_stage_rescore = not (is_unified and is_main_dataset)
 
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
@@ -349,6 +360,10 @@ def build_model(args, model_artifact):
         basis_dim=args.basis_dim,
         local_basis_dim=args.local_basis_dim,
         support_aware_local_basis=args.support_aware_local_basis,
+        two_stage_decoder=bool(args.two_stage_decoder),
+        two_stage_update_endpoint=not args.no_two_stage_update_endpoint,
+        two_stage_update_coeff=not args.no_two_stage_update_coeff,
+        two_stage_rescore=bool(args.two_stage_rescore),
         dropout=args.dropout,
         proto_summary_5d=torch.tensor(model_artifact["summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(model_artifact["frequency"], dtype=torch.float32),

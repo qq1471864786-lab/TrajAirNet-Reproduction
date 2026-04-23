@@ -349,12 +349,11 @@ class ProtoBasisSceneDataset(Dataset):
                 os.makedirs(os.path.dirname(artifact_path), exist_ok=True)
                 torch.save(model_artifact, artifact_path)
                 print(f"[Cache] saved train artifact: {artifact_path}", flush=True)
-
         self.model_artifact = model_artifact
+        self.basis_bank = np.asarray(model_artifact["basis_bank"], dtype=np.float32)
         self.prototype_summary_5d = np.asarray(model_artifact["summary_5d"], dtype=np.float32)
         self.prototype_frequency = np.asarray(model_artifact["frequency"], dtype=np.float32)
         self.rare_proto_ids = np.asarray(model_artifact["rare_ids"], dtype=np.int64)
-        self.basis_bank = np.asarray(model_artifact["basis_bank"], dtype=np.float32)
         self.local_basis_dim = int(model_artifact.get("local_basis_dim", self.local_basis_dim))
         default_mean_path = np.zeros((self.n_proto, self.pred_len, 3), dtype=np.float32)
         default_local_basis = np.zeros((self.n_proto, self.local_basis_dim, self.pred_len, 3), dtype=np.float32)
