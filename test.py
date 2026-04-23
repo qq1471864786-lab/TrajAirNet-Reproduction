@@ -69,6 +69,7 @@ def build_model(config, checkpoint):
         n_proto=config["n_proto"],
         basis_dim=config["basis_dim"],
         local_basis_dim=config.get("local_basis_dim", 0),
+        support_aware_local_basis=config.get("support_aware_local_basis", False),
         dropout=config["dropout"],
         proto_summary_5d=torch.tensor(checkpoint["proto_summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(checkpoint["proto_freq"], dtype=torch.float32),

@@ -68,6 +68,7 @@ def build_parser():
     parser.add_argument("--n_proto", type=int, default=64)
     parser.add_argument("--basis_dim", type=int, default=16)
     parser.add_argument("--local_basis_dim", type=int, default=0)
+    parser.add_argument("--support_aware_local_basis", action="store_true")
     parser.add_argument("--topk_proto", type=int, default=5)
     parser.add_argument("--micro_per_proto", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=None)
@@ -336,6 +337,7 @@ def build_model(args, model_artifact):
         n_proto=args.n_proto,
         basis_dim=args.basis_dim,
         local_basis_dim=args.local_basis_dim,
+        support_aware_local_basis=args.support_aware_local_basis,
         dropout=args.dropout,
         proto_summary_5d=torch.tensor(model_artifact["summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(model_artifact["frequency"], dtype=torch.float32),

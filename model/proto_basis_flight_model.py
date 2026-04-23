@@ -322,6 +322,7 @@ class ProtoBasisNet(nn.Module):
         n_proto=64,
         basis_dim=16,
         local_basis_dim=0,
+        support_aware_local_basis=False,
         dropout=0.1,
         proto_summary_5d: Optional[torch.Tensor] = None,
         proto_frequency: Optional[torch.Tensor] = None,
@@ -348,6 +349,7 @@ class ProtoBasisNet(nn.Module):
         self.disable_social = disable_social
         self.disable_router = disable_router
         self.disable_refiner = disable_refiner
+        self.support_aware_local_basis = support_aware_local_basis
         self.pose_normalizer = PoseNormalizer()
         self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
@@ -448,6 +450,11 @@ class ProtoBasisNet(nn.Module):
             local_residual = torch.einsum("bkm,bkmtd->bktd", local_coeff, local_basis)
             local_path = aligned_proto_mean + local_residual
             local_gate = torch.sigmoid(self.local_mix_gate(query_feat)).unsqueeze(-1)
+            if self.support_aware_local_basis:
+                proto_support = self.proto_frequency[top_proto_idx]
+                support_scale = (proto_support / self.proto_frequency.max().clamp_min(1e-6)).clamp_min(1e-6).sqrt()
+                support_scale = support_scale.repeat_interleave(self.n_micro, dim=1).unsqueeze(-1).unsqueeze(-1)
+                local_gate = local_gate * support_scale
             coarse_local = coarse_local + local_gate * (local_path - anchor_local)
         use_refiner = enable_refiner and (not self.disable_refiner)
         refined_local = self.refiner(coarse_local, query_feat, difficulty_gate) if use_refiner else coarse_local
