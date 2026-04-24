@@ -99,6 +99,8 @@ def build_parser():
     parser.add_argument("--phase_b_epochs", type=int, default=None)
     parser.add_argument("--phase_c_epochs", type=int, default=None)
     parser.add_argument("--extra_epochs", type=int, default=None, help="Extra refiner-stage epochs appended after phase C.")
+    parser.add_argument("--early_stop_patience", type=int, default=None, help="Stop after this many epochs without a best20 update. Use 0 to disable.")
+    parser.add_argument("--early_stop_min_epoch", type=int, default=None, help="Earliest epoch where early stopping may trigger.")
     parser.add_argument("--stage_a_lr", type=float, default=3e-4)
     parser.add_argument("--stage_b_lr", type=float, default=2e-4)
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
@@ -236,8 +238,15 @@ def apply_training_defaults(args):
     if args.extra_epochs is None:
         if is_unified and is_small_dataset:
             args.extra_epochs = 0
+        elif is_unified and is_main_dataset:
+            args.extra_epochs = 0
         else:
             args.extra_epochs = 35
+
+    if args.early_stop_patience is None:
+        args.early_stop_patience = 24 if is_unified and is_main_dataset else 0
+    if args.early_stop_min_epoch is None:
+        args.early_stop_min_epoch = 35 if is_unified and is_main_dataset else 0
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -960,6 +969,17 @@ def main():
                 ),
                 flush=True,
             )
+
+            patience = max(int(args.early_stop_patience), 0)
+            min_epoch = max(int(args.early_stop_min_epoch), 0)
+            best_epoch = int(best_records["best20"].get("epoch", 0))
+            if patience > 0 and epoch >= min_epoch and best_epoch > 0 and epoch - best_epoch >= patience:
+                print(
+                    f"[EarlyStop] best20 has not improved for {epoch - best_epoch} epochs "
+                    f"(best epoch {best_epoch}); stopping at epoch {epoch}.",
+                    flush=True,
+                )
+                break
 
         recorder.finalize(best_records)
         print("[Done] ProtoBasis-Net training finished.", flush=True)
