@@ -42,6 +42,7 @@ LOSS_STAT_KEYS = (
     "fde",
     "proto",
     "proto_soft",
+    "proto_topk",
     "res",
     "score",
     "rank",
@@ -133,8 +134,10 @@ def build_parser():
     parser.add_argument("--lambda_fde", type=float, default=1.0)
     parser.add_argument("--lambda_proto", type=float, default=0.35)
     parser.add_argument("--lambda_proto_soft", type=float, default=0.0)
+    parser.add_argument("--lambda_proto_topk", type=float, default=0.0)
     parser.add_argument("--proto_soft_topm", type=int, default=5)
     parser.add_argument("--proto_soft_temperature", type=float, default=1.0)
+    parser.add_argument("--proto_topk_margin", type=float, default=0.1)
     parser.add_argument("--lambda_res", type=float, default=0.2)
     parser.add_argument("--lambda_score", type=float, default=0.03)
     parser.add_argument("--lambda_rank", type=float, default=0.1)
@@ -710,6 +713,7 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"fde={format_scalar(loss_stats['fde'])}",
         f"proto={format_scalar(loss_stats['proto'])}",
         f"proto_soft={format_scalar(loss_stats['proto_soft'])}",
+        f"proto_topk={format_scalar(loss_stats['proto_topk'])}",
         f"res={format_scalar(loss_stats['res'])}",
         f"score={format_scalar(loss_stats['score'])}",
         f"rank={format_scalar(loss_stats['rank'])}",
@@ -793,6 +797,7 @@ def main():
         lambda_fde=args.lambda_fde,
         lambda_proto=args.lambda_proto,
         lambda_proto_soft=args.lambda_proto_soft,
+        lambda_proto_topk=args.lambda_proto_topk,
         lambda_res=args.lambda_res,
         lambda_score=args.lambda_score,
         lambda_rank=args.lambda_rank,
@@ -801,6 +806,7 @@ def main():
         lambda_smooth=args.lambda_smooth,
         proto_soft_topm=args.proto_soft_topm,
         proto_soft_temperature=args.proto_soft_temperature,
+        proto_topk_margin=args.proto_topk_margin,
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,
