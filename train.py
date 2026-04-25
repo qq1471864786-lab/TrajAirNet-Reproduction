@@ -41,6 +41,7 @@ LOSS_STAT_KEYS = (
     "xyz",
     "fde",
     "proto",
+    "proto_soft",
     "res",
     "score",
     "rank",
@@ -131,6 +132,9 @@ def build_parser():
     parser.add_argument("--lambda_xyz", type=float, default=1.0)
     parser.add_argument("--lambda_fde", type=float, default=1.0)
     parser.add_argument("--lambda_proto", type=float, default=0.35)
+    parser.add_argument("--lambda_proto_soft", type=float, default=0.0)
+    parser.add_argument("--proto_soft_topm", type=int, default=5)
+    parser.add_argument("--proto_soft_temperature", type=float, default=1.0)
     parser.add_argument("--lambda_res", type=float, default=0.2)
     parser.add_argument("--lambda_score", type=float, default=0.03)
     parser.add_argument("--lambda_rank", type=float, default=0.1)
@@ -705,6 +709,7 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"xyz={format_scalar(loss_stats['xyz'])}",
         f"fde={format_scalar(loss_stats['fde'])}",
         f"proto={format_scalar(loss_stats['proto'])}",
+        f"proto_soft={format_scalar(loss_stats['proto_soft'])}",
         f"res={format_scalar(loss_stats['res'])}",
         f"score={format_scalar(loss_stats['score'])}",
         f"rank={format_scalar(loss_stats['rank'])}",
@@ -787,12 +792,15 @@ def main():
         lambda_xyz=args.lambda_xyz,
         lambda_fde=args.lambda_fde,
         lambda_proto=args.lambda_proto,
+        lambda_proto_soft=args.lambda_proto_soft,
         lambda_res=args.lambda_res,
         lambda_score=args.lambda_score,
         lambda_rank=args.lambda_rank,
         lambda_div=args.lambda_div,
         lambda_coeff=args.lambda_coeff,
         lambda_smooth=args.lambda_smooth,
+        proto_soft_topm=args.proto_soft_topm,
+        proto_soft_temperature=args.proto_soft_temperature,
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,

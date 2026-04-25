@@ -572,6 +572,7 @@ class ProtoBasisNet(nn.Module):
                 "coeff": coeff,
                 "coeff_delta": coeff_delta,
                 "endpoint_residual": endpoint_residual,
+                "proto_summary_5d": self.proto_summary_5d,
             },
         }
 

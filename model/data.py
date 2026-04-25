@@ -804,6 +804,7 @@ class ProtoBasisSceneDataset(Dataset):
             "obs_xyz": torch.tensor(obs_agents, dtype=torch.float32),
             "fut_xyz": torch.tensor(fut_target, dtype=torch.float32),
             "fut_local": torch.tensor(self.samples["future_local"][index], dtype=torch.float32),
+            "proto_summary_5d": torch.tensor(self.samples["proto_summary_5d"][index], dtype=torch.float32),
             "obs_mask": torch.ones(agent_count, dtype=torch.bool),
             "gt_proto_id": torch.tensor(int(self.samples["gt_proto_id"][index]), dtype=torch.long),
             "gt_proto_residual": torch.tensor(self.samples["gt_proto_residual"][index], dtype=torch.float32),
@@ -823,6 +824,7 @@ def proto_basis_collate(batch, max_agents=7):
     obs_mask = torch.zeros(batch_size, max_agents, dtype=torch.bool)
     fut_xyz = torch.zeros(batch_size, pred_len, 3, dtype=torch.float32)
     fut_local = torch.zeros(batch_size, pred_len, 3, dtype=torch.float32)
+    proto_summary_5d = torch.zeros(batch_size, 5, dtype=torch.float32)
     gt_proto_id = torch.zeros(batch_size, dtype=torch.long)
     gt_proto_residual = torch.zeros(batch_size, 3, dtype=torch.float32)
     is_rare = torch.zeros(batch_size, dtype=torch.bool)
@@ -836,6 +838,7 @@ def proto_basis_collate(batch, max_agents=7):
         obs_mask[batch_index, :agent_count] = item["obs_mask"][:agent_count]
         fut_xyz[batch_index] = item["fut_xyz"]
         fut_local[batch_index] = item["fut_local"]
+        proto_summary_5d[batch_index] = item["proto_summary_5d"]
         gt_proto_id[batch_index] = item["gt_proto_id"]
         gt_proto_residual[batch_index] = item["gt_proto_residual"]
         is_rare[batch_index] = item["is_rare"]
@@ -848,6 +851,7 @@ def proto_basis_collate(batch, max_agents=7):
         "obs_mask": obs_mask,
         "fut_xyz": fut_xyz,
         "fut_local": fut_local,
+        "proto_summary_5d": proto_summary_5d,
         "gt_proto_id": gt_proto_id,
         "gt_proto_residual": gt_proto_residual,
         "is_rare": is_rare,
