@@ -7,6 +7,7 @@ from functools import partial
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -47,6 +48,10 @@ def autocast_context(device, use_amp):
 
 
 def build_model(config, checkpoint):
+    micro_endpoint_anchors = checkpoint.get("micro_endpoint_anchors")
+    micro_endpoint_scale = config.get("micro_endpoint_scale")
+    if micro_endpoint_scale is None:
+        micro_endpoint_scale = 1.0 if micro_endpoint_anchors is not None and config.get("micro_coeff_anchors", False) else 0.0
     return ProtoBasisNet(
         obs_len=config["obs"],
         pred_len=config["preds"],
@@ -78,7 +83,11 @@ def build_model(config, checkpoint):
         micro_coeff_anchors=torch.tensor(checkpoint.get("micro_coeff_anchors"), dtype=torch.float32)
         if checkpoint.get("micro_coeff_anchors") is not None
         else None,
+        micro_endpoint_anchors=torch.tensor(micro_endpoint_anchors, dtype=torch.float32)
+        if micro_endpoint_anchors is not None
+        else None,
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
+        micro_endpoint_scale=float(micro_endpoint_scale),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -130,15 +139,101 @@ def move_batch_to_device(batch, device):
     }
 
 
+def _candidate_l2(pred_xyz, gt_xyz):
+    return torch.linalg.norm(pred_xyz - gt_xyz[:, None], dim=-1)
+
+
+def _batch_rank_correlation(score, quality):
+    score_rank = torch.argsort(torch.argsort(score, dim=1), dim=1).float()
+    quality_rank = torch.argsort(torch.argsort(quality, dim=1), dim=1).float()
+    score_centered = score_rank - score_rank.mean(dim=1, keepdim=True)
+    quality_centered = quality_rank - quality_rank.mean(dim=1, keepdim=True)
+    numerator = (score_centered * quality_centered).sum(dim=1)
+    denominator = torch.sqrt(score_centered.pow(2).sum(dim=1) * quality_centered.pow(2).sum(dim=1)).clamp_min(1e-6)
+    return numerator / denominator
+
+
+def _new_stat_accumulator():
+    return {"sum": 0.0, "count": 0}
+
+
+def _add_stat(accumulator, values):
+    if values.numel() == 0:
+        return
+    accumulator["sum"] += float(values.detach().sum().item())
+    accumulator["count"] += int(values.numel())
+
+
+def _mean_or_none(accumulator):
+    if accumulator["count"] <= 0:
+        return None
+    return accumulator["sum"] / accumulator["count"]
+
+
+def _safe_rate(numerator, denominator):
+    if denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def _metric_accumulators(config):
+    primary_k = config.get("eval_topk_primary", 5)
+    secondary_k = config.get("eval_topk_secondary", 20)
+    metric_names = metric_names_for_protocol(primary_k, secondary_k)
+    return init_metric_sums(metric_names), 0, 0
+
+
+def _update_metric_accumulators(accumulators, metrics, count, rare_count):
+    metric_sums, total_count, total_rare = accumulators
+    update_metric_sums(metric_sums, metrics, count)
+    return metric_sums, total_count + count, total_rare + rare_count
+
+
+def _finalize_metric_accumulators(accumulators):
+    metric_sums, total_count, total_rare = accumulators
+    averaged = average_metric_sums(metric_sums, total_count, total_rare)
+    averaged["count"] = total_count
+    averaged["rare_count"] = total_rare
+    return averaged
+
+
 def evaluate_variant(model, loader, device, config, variant, use_amp, limit_eval_batches):
     primary_k = config.get("eval_topk_primary", 5)
     secondary_k = config.get("eval_topk_secondary", 20)
     metric_names = metric_names_for_protocol(primary_k, secondary_k)
     metric_sums = init_metric_sums(metric_names)
+    score_oracle_accumulators = {
+        "oracle_by_ADE": _metric_accumulators(config),
+        "oracle_by_FDE": _metric_accumulators(config),
+        "oracle_by_ADE_FDE": _metric_accumulators(config),
+    }
     total_count = 0
     rare_count = 0
-    route_hit_count = 0
-    route_top1_count = 0
+    router_topk_hit_count = 0
+    router_top1_count = 0
+    rare_topk_hit_count = 0
+    rare_top1_count = 0
+    nonrare_topk_hit_count = 0
+    nonrare_top1_count = 0
+    nonrare_count = 0
+    residual_stats = {
+        "current_all": _new_stat_accumulator(),
+        "hit_only": _new_stat_accumulator(),
+        "miss_slot0": _new_stat_accumulator(),
+        "rare_all": _new_stat_accumulator(),
+        "rare_hit_only": _new_stat_accumulator(),
+        "rare_miss_slot0": _new_stat_accumulator(),
+        "gt_residual_norm_all": _new_stat_accumulator(),
+        "gt_residual_norm_hit": _new_stat_accumulator(),
+        "gt_residual_norm_miss": _new_stat_accumulator(),
+        "rare_gt_residual_norm_miss": _new_stat_accumulator(),
+        "slot0_to_gt_proto_endpoint_distance_miss": _new_stat_accumulator(),
+        "rare_slot0_to_gt_proto_endpoint_distance_miss": _new_stat_accumulator(),
+    }
+    score_quality_stats = {
+        "rank_corr_ADE_FDE": _new_stat_accumulator(),
+        "score_top1_matches_best_ADE_FDE": _new_stat_accumulator(),
+    }
     model.eval()
     total_batches = min(len(loader), limit_eval_batches) if limit_eval_batches else len(loader)
     progress = tqdm(loader, desc=variant, total=total_batches, leave=False, dynamic_ncols=True, file=sys.stdout)
@@ -168,16 +263,103 @@ def evaluate_variant(model, loader, device, config, variant, use_amp, limit_eval
             update_metric_sums(metric_sums, metrics, count)
             top_proto_idx = outputs["top_proto_idx"]
             gt_proto_id = batch["gt_proto_id"]
-            route_hit_count += int(top_proto_idx.eq(gt_proto_id[:, None]).any(dim=1).sum().item())
-            route_top1_count += int(outputs["proto_logits"].argmax(dim=-1).eq(gt_proto_id).sum().item())
+            rare_mask = batch["is_rare"].bool()
+            nonrare_mask = ~rare_mask
+            match_mask = top_proto_idx.eq(gt_proto_id[:, None])
+            topk_hit = match_mask.any(dim=1)
+            top1_hit = outputs["proto_logits"].argmax(dim=-1).eq(gt_proto_id)
+            router_topk_hit_count += int(topk_hit.sum().item())
+            router_top1_count += int(top1_hit.sum().item())
+            rare_topk_hit_count += int((topk_hit & rare_mask).sum().item())
+            rare_top1_count += int((top1_hit & rare_mask).sum().item())
+            nonrare_topk_hit_count += int((topk_hit & nonrare_mask).sum().item())
+            nonrare_top1_count += int((top1_hit & nonrare_mask).sum().item())
             total_count += count
             rare_count += rare
+            nonrare_count += int(nonrare_mask.sum().item())
+
+            gt_slot = match_mask.float().argmax(dim=1)
+            residual = outputs["aux"]["endpoint_residual"]
+            pred_residual = residual[torch.arange(gt_slot.size(0), device=gt_slot.device), gt_slot]
+            per_sample_res = F.smooth_l1_loss(pred_residual, batch["gt_proto_residual"], reduction="none").mean(dim=1)
+            gt_residual_norm = torch.linalg.norm(batch["gt_proto_residual"], dim=1)
+            gt_proto_endpoint = model.proto_summary_5d[gt_proto_id, :3]
+            slot0_proto_endpoint = model.proto_summary_5d[top_proto_idx[:, 0], :3]
+            slot0_endpoint_distance = torch.linalg.norm(slot0_proto_endpoint - gt_proto_endpoint, dim=1)
+            _add_stat(residual_stats["current_all"], per_sample_res)
+            _add_stat(residual_stats["hit_only"], per_sample_res[topk_hit])
+            _add_stat(residual_stats["miss_slot0"], per_sample_res[~topk_hit])
+            _add_stat(residual_stats["rare_all"], per_sample_res[rare_mask])
+            _add_stat(residual_stats["rare_hit_only"], per_sample_res[topk_hit & rare_mask])
+            _add_stat(residual_stats["rare_miss_slot0"], per_sample_res[(~topk_hit) & rare_mask])
+            _add_stat(residual_stats["gt_residual_norm_all"], gt_residual_norm)
+            _add_stat(residual_stats["gt_residual_norm_hit"], gt_residual_norm[topk_hit])
+            _add_stat(residual_stats["gt_residual_norm_miss"], gt_residual_norm[~topk_hit])
+            _add_stat(residual_stats["rare_gt_residual_norm_miss"], gt_residual_norm[(~topk_hit) & rare_mask])
+            _add_stat(residual_stats["slot0_to_gt_proto_endpoint_distance_miss"], slot0_endpoint_distance[~topk_hit])
+            _add_stat(
+                residual_stats["rare_slot0_to_gt_proto_endpoint_distance_miss"],
+                slot0_endpoint_distance[(~topk_hit) & rare_mask],
+            )
+
+            l2 = _candidate_l2(outputs["pred_xyz"], batch["fut_xyz"])
+            ade = l2.mean(dim=-1)
+            fde = l2[..., -1]
+            ade_scale = ade.mean(dim=1, keepdim=True).clamp_min(1e-6)
+            fde_scale = fde.mean(dim=1, keepdim=True).clamp_min(1e-6)
+            combined_quality = -(ade / ade_scale + 0.75 * fde / fde_scale)
+            _add_stat(score_quality_stats["rank_corr_ADE_FDE"], _batch_rank_correlation(outputs["pred_score"], combined_quality))
+            score_best = outputs["pred_score"].argmax(dim=1)
+            quality_best = combined_quality.argmax(dim=1)
+            _add_stat(score_quality_stats["score_top1_matches_best_ADE_FDE"], score_best.eq(quality_best).float())
+            oracle_scores = {
+                "oracle_by_ADE": -ade,
+                "oracle_by_FDE": -fde,
+                "oracle_by_ADE_FDE": combined_quality,
+            }
+            for oracle_name, oracle_score in oracle_scores.items():
+                oracle_outputs = dict(outputs)
+                oracle_outputs["pred_score"] = oracle_score
+                oracle_metrics, oracle_count, oracle_rare = summarize_batch_metrics(
+                    oracle_outputs,
+                    batch,
+                    primary_k=primary_k,
+                    secondary_k=secondary_k,
+                    glev_topn_primary=config.get("glev_topn_primary", 2),
+                    glev_topn_secondary=config.get("glev_topn_secondary", 5),
+                )
+                score_oracle_accumulators[oracle_name] = _update_metric_accumulators(
+                    score_oracle_accumulators[oracle_name],
+                    oracle_metrics,
+                    oracle_count,
+                    oracle_rare,
+                )
     progress.close()
     averaged = average_metric_sums(metric_sums, total_count, rare_count)
-    averaged["router_topk_hit"] = route_hit_count / max(total_count, 1)
-    averaged["router_top1_acc"] = route_top1_count / max(total_count, 1)
+    averaged["router_topk_hit"] = _safe_rate(router_topk_hit_count, total_count)
+    averaged["router_topk_miss"] = _safe_rate(total_count - router_topk_hit_count, total_count)
+    averaged["router_top1_acc"] = _safe_rate(router_top1_count, total_count)
+    averaged["rare_router_topk_hit"] = _safe_rate(rare_topk_hit_count, rare_count)
+    averaged["rare_router_topk_miss"] = _safe_rate(rare_count - rare_topk_hit_count, rare_count)
+    averaged["rare_router_top1_acc"] = _safe_rate(rare_top1_count, rare_count)
+    averaged["nonrare_router_topk_hit"] = _safe_rate(nonrare_topk_hit_count, nonrare_count)
+    averaged["nonrare_router_topk_miss"] = _safe_rate(nonrare_count - nonrare_topk_hit_count, nonrare_count)
+    averaged["nonrare_router_top1_acc"] = _safe_rate(nonrare_top1_count, nonrare_count)
     averaged["count"] = total_count
     averaged["rare_count"] = rare_count
+    averaged["nonrare_count"] = nonrare_count
+    averaged["residual_loss_probe"] = {name: _mean_or_none(stat) for name, stat in residual_stats.items()}
+    hit_only = averaged["residual_loss_probe"]["hit_only"]
+    polluted = averaged["residual_loss_probe"]["current_all"]
+    if hit_only is None or polluted is None:
+        averaged["residual_loss_probe"]["pollution_delta_all_minus_hit"] = None
+    else:
+        averaged["residual_loss_probe"]["pollution_delta_all_minus_hit"] = polluted - hit_only
+    averaged["score_oracles"] = {
+        name: _finalize_metric_accumulators(accumulators)
+        for name, accumulators in score_oracle_accumulators.items()
+    }
+    averaged["score_quality_probe"] = {name: _mean_or_none(stat) for name, stat in score_quality_stats.items()}
     return averaged
 
 
@@ -205,6 +387,15 @@ def main():
         "checkpoint": args.checkpoint,
         "dataset_name": dataset_name,
         "split": args.split,
+        "diagnostic_notes": {
+            "residual_loss_probe.current_all": (
+                "Current training behavior: if GT prototype is absent from top-k, slot 0 is used by argmax."
+            ),
+            "residual_loss_probe.hit_only": "Endpoint residual loss restricted to samples whose GT prototype is in top-k.",
+            "score_oracles": "Same candidate trajectories, but scores are replaced by true ADE/FDE-derived ordering.",
+            "score_quality_probe.rank_corr_ADE_FDE": "Spearman-style rank correlation; higher means model scores agree with true candidate quality.",
+            "GLeV_direction": "Lower is better in model/metrics.py.",
+        },
         "variants": {},
     }
     for variant in variants:
