@@ -138,6 +138,12 @@ def build_parser():
     parser.add_argument("--proto_soft_topm", type=int, default=5)
     parser.add_argument("--proto_soft_temperature", type=float, default=1.0)
     parser.add_argument("--proto_topk_margin", type=float, default=0.1)
+    parser.add_argument(
+        "--proto_aux_stage",
+        type=str,
+        default="all",
+        choices=["all", "pre_refiner", "refiner", "basis_warmup"],
+    )
     parser.add_argument("--lambda_res", type=float, default=0.2)
     parser.add_argument("--lambda_score", type=float, default=0.03)
     parser.add_argument("--lambda_rank", type=float, default=0.1)
@@ -807,6 +813,7 @@ def main():
         proto_soft_topm=args.proto_soft_topm,
         proto_soft_temperature=args.proto_soft_temperature,
         proto_topk_margin=args.proto_topk_margin,
+        proto_aux_stage=args.proto_aux_stage,
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,

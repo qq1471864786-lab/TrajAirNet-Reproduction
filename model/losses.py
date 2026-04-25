@@ -80,6 +80,18 @@ def _proto_topk_margin_loss(logits, target, topk, margin=0.1):
     return F.relu(float(margin) + kth_negative - target_logit).mean()
 
 
+def _stage_allows_proto_aux(stage_cfg, mode):
+    if mode == "all":
+        return True
+    if mode == "pre_refiner":
+        return not bool(stage_cfg.get("enable_refiner", False))
+    if mode == "refiner":
+        return bool(stage_cfg.get("enable_refiner", False))
+    if mode == "basis_warmup":
+        return stage_cfg.get("name") == "basis_warmup"
+    raise ValueError(f"Unsupported proto_aux_stage: {mode}")
+
+
 class ProtoBasisLoss(nn.Module):
     def __init__(
         self,
@@ -97,6 +109,7 @@ class ProtoBasisLoss(nn.Module):
         proto_soft_topm=5,
         proto_soft_temperature=1.0,
         proto_topk_margin=0.1,
+        proto_aux_stage="all",
         score_hard_mix=0.25,
         score_fde_weight=0.75,
         score_soft_temperature=0.35,
@@ -116,6 +129,7 @@ class ProtoBasisLoss(nn.Module):
         self.proto_soft_topm = proto_soft_topm
         self.proto_soft_temperature = proto_soft_temperature
         self.proto_topk_margin = proto_topk_margin
+        self.proto_aux_stage = proto_aux_stage
         self.score_hard_mix = min(max(score_hard_mix, 0.0), 1.0)
         self.score_fde_weight = score_fde_weight
         self.score_soft_temperature = score_soft_temperature
@@ -175,8 +189,9 @@ class ProtoBasisLoss(nn.Module):
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
         total = total + self.lambda_proto * proto_loss
-        total = total + self.lambda_proto_soft * proto_soft_loss
-        total = total + self.lambda_proto_topk * proto_topk_loss
+        if _stage_allows_proto_aux(stage_cfg, self.proto_aux_stage):
+            total = total + self.lambda_proto_soft * proto_soft_loss
+            total = total + self.lambda_proto_topk * proto_topk_loss
         total = total + self.lambda_res * res_loss
         total = total + self.lambda_score * score_loss
         total = total + stage_cfg["rank_weight"] * self.lambda_rank * rank_loss
