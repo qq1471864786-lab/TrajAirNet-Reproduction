@@ -48,8 +48,6 @@ LOSS_STAT_KEYS = (
     "coeff",
     "smooth",
     "winner_ade",
-    "res_hit_rate",
-    "res_miss_rate",
 )
 
 ANSI_GREEN = "\033[92m"
@@ -708,7 +706,6 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"fde={format_scalar(loss_stats['fde'])}",
         f"proto={format_scalar(loss_stats['proto'])}",
         f"res={format_scalar(loss_stats['res'])}",
-        f"res_hit={format_scalar(loss_stats['res_hit_rate'])}",
         f"score={format_scalar(loss_stats['score'])}",
         f"rank={format_scalar(loss_stats['rank'])}",
         f"div={format_scalar(loss_stats['div'])}",

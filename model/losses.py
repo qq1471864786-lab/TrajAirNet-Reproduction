@@ -107,13 +107,9 @@ class ProtoBasisLoss(nn.Module):
         proto_loss = F.cross_entropy(proto_logits, gt_proto_id)
 
         match_mask = top_proto_idx.eq(gt_proto_id.unsqueeze(1))
-        hit_mask = match_mask.any(dim=1)
         gt_slot = match_mask.float().argmax(dim=1)
         pred_residual = aux["endpoint_residual"][torch.arange(gt_slot.size(0), device=gt_slot.device), gt_slot]
-        if hit_mask.any():
-            res_loss = F.smooth_l1_loss(pred_residual[hit_mask], gt_proto_residual[hit_mask])
-        else:
-            res_loss = aux["endpoint_residual"].sum() * 0.0
+        res_loss = F.smooth_l1_loss(pred_residual, gt_proto_residual)
 
         hard_score_loss = F.cross_entropy(pred_score, best_idx)
         soft_score_targets = _score_quality_targets(
@@ -150,7 +146,5 @@ class ProtoBasisLoss(nn.Module):
             "coeff": float(coeff_loss.detach().item()),
             "smooth": float(smooth_loss.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
-            "res_hit_rate": float(hit_mask.float().mean().detach().item()),
-            "res_miss_rate": float((~hit_mask).float().mean().detach().item()),
         }
         return total, stats
