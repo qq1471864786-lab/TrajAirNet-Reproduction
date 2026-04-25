@@ -68,7 +68,7 @@ def build_parser():
     parser.add_argument("--obs_stride", type=int, default=1)
     parser.add_argument("--pred_stride", type=int, default=1)
     parser.add_argument("--max_agents", type=int, default=7)
-    parser.add_argument("--n_proto", type=int, default=64)
+    parser.add_argument("--n_proto", type=int, default=None)
     parser.add_argument("--basis_dim", type=int, default=16)
     parser.add_argument("--local_basis_dim", type=int, default=None)
     parser.add_argument("--support_aware_local_basis", dest="support_aware_local_basis", action="store_true")
@@ -229,7 +229,10 @@ def apply_training_defaults(args):
     is_unified = args.protocol_name == "trajair_40to120_best20"
     is_main_dataset = args.dataset_name == "111_days"
     is_small_dataset = args.dataset_name.lower().startswith("7days")
+    uses_validated_basis_profile = is_unified and (is_main_dataset or is_small_dataset)
 
+    if args.n_proto is None:
+        args.n_proto = 96 if is_unified and is_small_dataset else 64
     if args.d_model is None:
         args.d_model = 128 if is_unified and is_main_dataset else 96
     if args.ff_dim is None:
@@ -237,13 +240,13 @@ def apply_training_defaults(args):
     if args.encoder_layers is None:
         args.encoder_layers = 4 if is_unified and is_main_dataset else 3
     if args.local_basis_dim is None:
-        args.local_basis_dim = 2 if is_unified and is_main_dataset else 0
+        args.local_basis_dim = 2 if uses_validated_basis_profile else 0
     if args.support_aware_local_basis is None:
-        args.support_aware_local_basis = bool(is_unified and is_main_dataset and args.local_basis_dim > 0)
+        args.support_aware_local_basis = bool(uses_validated_basis_profile and args.local_basis_dim > 0)
     if args.two_stage_decoder is None:
-        args.two_stage_decoder = bool(is_unified and is_main_dataset)
+        args.two_stage_decoder = bool(uses_validated_basis_profile)
     if args.two_stage_rescore is None:
-        args.two_stage_rescore = not (is_unified and is_main_dataset)
+        args.two_stage_rescore = not uses_validated_basis_profile
     if args.micro_coeff_anchors is None:
         args.micro_coeff_anchors = True
 
