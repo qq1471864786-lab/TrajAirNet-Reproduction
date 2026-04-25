@@ -49,6 +49,8 @@ LOSS_STAT_KEYS = (
     "coeff",
     "smooth",
     "winner_ade",
+    "res_hit_rate",
+    "res_miss_rate",
 )
 
 ANSI_GREEN = "\033[92m"
@@ -90,6 +92,13 @@ def build_parser():
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
     parser.add_argument("--micro_endpoint_scale", type=float, default=0.0)
+    parser.add_argument(
+        "--endpoint_conditioning",
+        type=str,
+        default="rank",
+        choices=["rank", "proto"],
+        help="Condition endpoint residuals by candidate rank or by the selected prototype token.",
+    )
     parser.add_argument("--d_model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--ff_dim", type=int, default=None)
@@ -150,6 +159,13 @@ def build_parser():
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
+    parser.add_argument(
+        "--endpoint_residual_supervision",
+        type=str,
+        default="all",
+        choices=["all", "hit_only"],
+        help="Use legacy endpoint residual supervision for all samples or only samples whose GT prototype is in top-k.",
+    )
 
     parser.add_argument("--disable_social", action="store_true")
     parser.add_argument("--disable_router", action="store_true")
@@ -417,6 +433,7 @@ def build_model(args, model_artifact):
         ),
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
         micro_endpoint_scale=args.micro_endpoint_scale,
+        endpoint_conditioning=args.endpoint_conditioning,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
@@ -717,6 +734,7 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"proto={format_scalar(loss_stats['proto'])}",
         f"proto_soft={format_scalar(loss_stats['proto_soft'])}",
         f"res={format_scalar(loss_stats['res'])}",
+        f"res_hit={format_scalar(loss_stats['res_hit_rate'])}",
         f"score={format_scalar(loss_stats['score'])}",
         f"rank={format_scalar(loss_stats['rank'])}",
         f"div={format_scalar(loss_stats['div'])}",
@@ -811,6 +829,7 @@ def main():
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,
+        endpoint_residual_supervision=args.endpoint_residual_supervision,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -830,6 +849,8 @@ def main():
         "rare_count": int(len(model_artifact["rare_ids"])),
         "n_proto": args.n_proto,
         "basis_dim": args.basis_dim,
+        "endpoint_conditioning": args.endpoint_conditioning,
+        "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "amp_enabled": use_amp,
     }

@@ -104,6 +104,7 @@ def _build_model(config, checkpoint):
         else None,
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
         micro_endpoint_scale=float(micro_endpoint_scale),
+        endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -331,42 +332,14 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
     else:
         target_ctx, scene_ctx = model.social_aggregator(agent_feat, obs_mask)
 
-    router_input = torch.cat([target_ctx, scene_ctx], dim=-1)
-    router_hidden = model.prototype_router.trunk(router_input)
-    proto_logits = model.prototype_router.logit_head(router_hidden)
-    top_proto_idx = proto_logits.topk(model.prototype_router.topk, dim=-1).indices
-    if force_gt_proto and gt_proto_id is not None:
-        top_proto_idx = top_proto_idx.clone()
-        for batch_index in range(top_proto_idx.size(0)):
-            gt_idx = int(gt_proto_id[batch_index].item())
-            if gt_idx not in top_proto_idx[batch_index].tolist():
-                top_proto_idx[batch_index, -1] = gt_idx
-    if model.disable_router:
-        proto_token = model.prototype_router.generic_proto[None, :, :].expand(router_hidden.size(0), -1, -1)
-        endpoint_source = router_hidden
-        endpoint_residual = model.prototype_router.generic_endpoint_head(endpoint_source).view(
-            router_hidden.size(0),
-            model.prototype_router.topk,
-            3,
-        )
-        endpoint_local = endpoint_residual
-    else:
-        proto_token = model.prototype_router.proto_emb(top_proto_idx) + model.prototype_router.proto_proj(
-            model.proto_summary_5d[top_proto_idx]
-        )
-        endpoint_head = model.prototype_router.endpoint_head
-        first_linear = endpoint_head[0] if isinstance(endpoint_head, nn.Sequential) else endpoint_head
-        endpoint_source = router_input if first_linear.in_features == router_input.size(-1) else router_hidden
-        endpoint_raw = endpoint_head(endpoint_source)
-        if endpoint_raw.size(-1) == 3:
-            endpoint_residual = endpoint_raw[:, None, :].expand(-1, model.prototype_router.topk, -1)
-        else:
-            endpoint_residual = endpoint_raw.view(
-                router_hidden.size(0),
-                model.prototype_router.topk,
-                3,
-            )
-        endpoint_local = model.proto_summary_5d[top_proto_idx, :3] + endpoint_residual
+    proto_logits, top_proto_idx, proto_token, endpoint_residual, endpoint_local = model.prototype_router(
+        target_ctx,
+        scene_ctx,
+        model.proto_summary_5d,
+        gt_proto_id=gt_proto_id,
+        force_gt_proto=force_gt_proto,
+        disable_router=model.disable_router,
+    )
     micro_coeff_anchor = model.micro_coeff_anchors[top_proto_idx] if model.has_micro_coeff_anchors else None
     micro_endpoint_anchor = model.micro_endpoint_anchors[top_proto_idx] if model.has_micro_endpoint_anchors else None
     query_feat, coeff, pred_score, difficulty_gate, coeff_delta = model.query_decoder(
@@ -525,7 +498,10 @@ def main():
     local_bank = artifact["local_basis_bank"].astype(np.float32)
     for row, proto_id in enumerate(test_proto):
         residual_anchor = proto_mean_path[row : row + 1]
-        local_matrix = local_bank[proto_id].reshape(local_bank.shape[1], -1).astype(np.float32)
+        if local_bank.shape[1] > 0:
+            local_matrix = local_bank[proto_id].reshape(local_bank.shape[1], -1).astype(np.float32)
+        else:
+            local_matrix = np.zeros((0, pred_len * 3), dtype=np.float32)
         local_recon[row : row + 1] = _solve_linear_reconstruction(residual_anchor, test_future[row : row + 1], local_matrix)
         combined = np.concatenate([basis_matrix, local_matrix], axis=0)
         global_local_recon[row : row + 1] = _solve_linear_reconstruction(

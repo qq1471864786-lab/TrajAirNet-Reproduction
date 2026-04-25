@@ -166,9 +166,12 @@ class TargetSocialAggregator(nn.Module):
 
 
 class PrototypeRouter(nn.Module):
-    def __init__(self, n_proto=64, d_model=96, topk=5, dropout=0.1):
+    def __init__(self, n_proto=64, d_model=96, topk=5, dropout=0.1, endpoint_conditioning="rank"):
         super().__init__()
+        if endpoint_conditioning not in {"rank", "proto"}:
+            raise ValueError(f"Unsupported endpoint_conditioning: {endpoint_conditioning}")
         self.topk = topk
+        self.endpoint_conditioning = endpoint_conditioning
         self.proto_emb = nn.Embedding(n_proto, d_model)
         self.proto_proj = nn.Linear(5, d_model)
         self.trunk = nn.Sequential(
@@ -179,11 +182,29 @@ class PrototypeRouter(nn.Module):
         )
         self.logit_head = nn.Linear(d_model, n_proto)
         self.endpoint_head = nn.Linear(d_model, topk * 3)
+        if self.endpoint_conditioning == "proto":
+            self.endpoint_proto_head = nn.Sequential(
+                nn.Linear(d_model * 2 + 5, d_model),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, 3),
+            )
+        else:
+            self.endpoint_proto_head = None
         self.generic_proto = nn.Parameter(torch.randn(topk, d_model))
         self.generic_endpoint_head = nn.Linear(d_model, topk * 3)
 
+    def _rank_endpoint_residual(self, router_input, hidden):
+        first_layer = self.endpoint_head[0] if isinstance(self.endpoint_head, nn.Sequential) else self.endpoint_head
+        endpoint_source = router_input if first_layer.in_features == router_input.size(-1) else hidden
+        endpoint_raw = self.endpoint_head(endpoint_source)
+        if endpoint_raw.size(-1) == 3:
+            return endpoint_raw[:, None, :].expand(-1, self.topk, -1)
+        return endpoint_raw.view(hidden.size(0), self.topk, 3)
+
     def forward(self, target_ctx, scene_ctx, proto_summary_5d, gt_proto_id=None, force_gt_proto=False, disable_router=False):
-        hidden = self.trunk(torch.cat([target_ctx, scene_ctx], dim=-1))
+        router_input = torch.cat([target_ctx, scene_ctx], dim=-1)
+        hidden = self.trunk(router_input)
         logits = self.logit_head(hidden)
         top_idx = logits.topk(self.topk, dim=-1).indices
 
@@ -199,9 +220,15 @@ class PrototypeRouter(nn.Module):
             endpoint_residual = self.generic_endpoint_head(hidden).view(hidden.size(0), self.topk, 3)
             endpoint_local = endpoint_residual
         else:
-            proto_token = self.proto_emb(top_idx) + self.proto_proj(proto_summary_5d[top_idx])
-            endpoint_residual = self.endpoint_head(hidden).view(hidden.size(0), self.topk, 3)
-            endpoint_local = proto_summary_5d[top_idx, :3] + endpoint_residual
+            selected_summary = proto_summary_5d[top_idx]
+            proto_token = self.proto_emb(top_idx) + self.proto_proj(selected_summary)
+            if self.endpoint_conditioning == "proto":
+                hidden_rep = hidden[:, None, :].expand(-1, self.topk, -1)
+                endpoint_input = torch.cat([hidden_rep, proto_token, selected_summary], dim=-1)
+                endpoint_residual = self.endpoint_proto_head(endpoint_input)
+            else:
+                endpoint_residual = self._rank_endpoint_residual(router_input, hidden)
+            endpoint_local = selected_summary[:, :, :3] + endpoint_residual
         return logits, top_idx, proto_token, endpoint_residual, endpoint_local
 
 
@@ -348,6 +375,7 @@ class ProtoBasisNet(nn.Module):
         micro_endpoint_anchors: Optional[torch.Tensor] = None,
         use_micro_coeff_anchors=False,
         micro_endpoint_scale=0.0,
+        endpoint_conditioning="rank",
         disable_social=False,
         disable_router=False,
         disable_refiner=False,
@@ -396,6 +424,7 @@ class ProtoBasisNet(nn.Module):
             d_model=d_model,
             topk=topk_proto,
             dropout=dropout,
+            endpoint_conditioning=endpoint_conditioning,
         )
         self.query_decoder = PrototypeConditionedQueryDecoder(
             d_model=d_model,

@@ -100,8 +100,11 @@ class ProtoBasisLoss(nn.Module):
         score_hard_mix=0.25,
         score_fde_weight=0.75,
         score_soft_temperature=0.35,
+        endpoint_residual_supervision="all",
     ):
         super().__init__()
+        if endpoint_residual_supervision not in {"all", "hit_only"}:
+            raise ValueError(f"Unsupported endpoint_residual_supervision: {endpoint_residual_supervision}")
         self.lambda_xyz = lambda_xyz
         self.lambda_fde = lambda_fde
         self.lambda_proto = lambda_proto
@@ -118,6 +121,7 @@ class ProtoBasisLoss(nn.Module):
         self.score_hard_mix = min(max(score_hard_mix, 0.0), 1.0)
         self.score_fde_weight = score_fde_weight
         self.score_soft_temperature = score_soft_temperature
+        self.endpoint_residual_supervision = endpoint_residual_supervision
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -147,9 +151,15 @@ class ProtoBasisLoss(nn.Module):
         proto_soft_loss = _soft_label_cross_entropy(proto_logits, proto_soft_targets)
 
         match_mask = top_proto_idx.eq(gt_proto_id.unsqueeze(1))
+        hit_mask = match_mask.any(dim=1)
         gt_slot = match_mask.float().argmax(dim=1)
         pred_residual = aux["endpoint_residual"][torch.arange(gt_slot.size(0), device=gt_slot.device), gt_slot]
-        res_loss = F.smooth_l1_loss(pred_residual, gt_proto_residual)
+        if self.endpoint_residual_supervision == "hit_only" and hit_mask.any():
+            res_loss = F.smooth_l1_loss(pred_residual[hit_mask], gt_proto_residual[hit_mask])
+        elif self.endpoint_residual_supervision == "hit_only":
+            res_loss = aux["endpoint_residual"].sum() * 0.0
+        else:
+            res_loss = F.smooth_l1_loss(pred_residual, gt_proto_residual)
 
         hard_score_loss = F.cross_entropy(pred_score, best_idx)
         soft_score_targets = _score_quality_targets(
@@ -189,5 +199,7 @@ class ProtoBasisLoss(nn.Module):
             "coeff": float(coeff_loss.detach().item()),
             "smooth": float(smooth_loss.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
+            "res_hit_rate": float(hit_mask.float().mean().detach().item()),
+            "res_miss_rate": float((~hit_mask).float().mean().detach().item()),
         }
         return total, stats
