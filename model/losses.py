@@ -69,17 +69,6 @@ def _prototype_soft_targets(gt_summary_5d, proto_summary_5d, topm=5, temperature
     return targets
 
 
-def _proto_topk_margin_loss(logits, target, topk, margin=0.1):
-    if logits.size(1) <= 1:
-        return logits.new_tensor(0.0)
-    safe_topk = min(max(int(topk), 1), logits.size(1) - 1)
-    target_logit = logits.gather(1, target.unsqueeze(1)).squeeze(1)
-    target_mask = F.one_hot(target, num_classes=logits.size(1)).bool()
-    negative_logits = logits.masked_fill(target_mask, -torch.inf)
-    kth_negative = negative_logits.topk(safe_topk, dim=1).values[:, -1]
-    return F.relu(float(margin) + kth_negative - target_logit).mean()
-
-
 def _stage_allows_proto_aux(stage_cfg, mode):
     if mode == "all":
         return True
@@ -99,7 +88,6 @@ class ProtoBasisLoss(nn.Module):
         lambda_fde=0.8,
         lambda_proto=0.4,
         lambda_proto_soft=0.0,
-        lambda_proto_topk=0.0,
         lambda_res=0.2,
         lambda_score=0.5,
         lambda_rank=0.1,
@@ -108,7 +96,6 @@ class ProtoBasisLoss(nn.Module):
         lambda_smooth=0.10,
         proto_soft_topm=5,
         proto_soft_temperature=1.0,
-        proto_topk_margin=0.1,
         proto_aux_stage="all",
         score_hard_mix=0.25,
         score_fde_weight=0.75,
@@ -119,7 +106,6 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_fde = lambda_fde
         self.lambda_proto = lambda_proto
         self.lambda_proto_soft = lambda_proto_soft
-        self.lambda_proto_topk = lambda_proto_topk
         self.lambda_res = lambda_res
         self.lambda_score = lambda_score
         self.lambda_rank = lambda_rank
@@ -128,7 +114,6 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_smooth = lambda_smooth
         self.proto_soft_topm = proto_soft_topm
         self.proto_soft_temperature = proto_soft_temperature
-        self.proto_topk_margin = proto_topk_margin
         self.proto_aux_stage = proto_aux_stage
         self.score_hard_mix = min(max(score_hard_mix, 0.0), 1.0)
         self.score_fde_weight = score_fde_weight
@@ -160,12 +145,6 @@ class ProtoBasisLoss(nn.Module):
             temperature=self.proto_soft_temperature,
         )
         proto_soft_loss = _soft_label_cross_entropy(proto_logits, proto_soft_targets)
-        proto_topk_loss = _proto_topk_margin_loss(
-            proto_logits,
-            gt_proto_id,
-            topk=top_proto_idx.size(1),
-            margin=self.proto_topk_margin,
-        )
 
         match_mask = top_proto_idx.eq(gt_proto_id.unsqueeze(1))
         gt_slot = match_mask.float().argmax(dim=1)
@@ -191,7 +170,6 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_proto * proto_loss
         if _stage_allows_proto_aux(stage_cfg, self.proto_aux_stage):
             total = total + self.lambda_proto_soft * proto_soft_loss
-            total = total + self.lambda_proto_topk * proto_topk_loss
         total = total + self.lambda_res * res_loss
         total = total + self.lambda_score * score_loss
         total = total + stage_cfg["rank_weight"] * self.lambda_rank * rank_loss
@@ -204,7 +182,6 @@ class ProtoBasisLoss(nn.Module):
             "fde": float(fde_loss.detach().item()),
             "proto": float(proto_loss.detach().item()),
             "proto_soft": float(proto_soft_loss.detach().item()),
-            "proto_topk": float(proto_topk_loss.detach().item()),
             "res": float(res_loss.detach().item()),
             "score": float(score_loss.detach().item()),
             "rank": float(rank_loss.detach().item()),
