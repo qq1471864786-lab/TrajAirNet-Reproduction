@@ -4,11 +4,10 @@ import json
 import os
 import re
 import shlex
-import socket
-import subprocess
 import sys
-from pathlib import Path
 from typing import Any
+
+from remote_common import add_remote_conda_args, add_remote_project_root_arg, add_remote_target_args, run_target_command
 
 
 REMOTE_LAUNCH_SCRIPT = r"""
@@ -82,11 +81,9 @@ print(json.dumps({"run_root": str(run_root), "pid": proc.pid, "resolved_run_dir"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch a remote ProtoBasis-Net training run with traceable logs.")
-    parser.add_argument("--host", default="10.23.66.99")
-    parser.add_argument("--user", default="wangzhilin")
-    parser.add_argument("--project-root", default="/home/wangzhilin/ProtoBasis-Net")
-    parser.add_argument("--conda-sh", default="/home/wangzhilin/miniconda3/etc/profile.d/conda.sh")
-    parser.add_argument("--conda-env", default="trajair")
+    add_remote_target_args(parser)
+    add_remote_project_root_arg(parser)
+    add_remote_conda_args(parser)
     parser.add_argument("--python-exec", default="python")
     parser.add_argument("--train-script", default="train.py")
     parser.add_argument("--name", default="", help="Optional readable name prefix for the remote run.")
@@ -109,58 +106,6 @@ def extract_arg(args: list[str], key: str, default: str) -> str:
         if item.startswith(key_eq):
             return item[len(key_eq) :]
     return default
-
-
-def run_ssh(user: str, host: str, command: str) -> str:
-    result = subprocess.run(
-        ["ssh", f"{user}@{host}", command],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
-
-
-def run_local(command: str) -> str:
-    result = subprocess.run(
-        ["bash", "-lc", command],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
-
-
-def local_addresses() -> set[str]:
-    addresses = {"127.0.0.1", "::1", "localhost"}
-    for name in {socket.gethostname(), socket.getfqdn()}:
-        if name:
-            addresses.add(name.lower())
-        try:
-            for _, _, _, _, sockaddr in socket.getaddrinfo(name, None):
-                if sockaddr and sockaddr[0]:
-                    addresses.add(sockaddr[0].lower())
-        except OSError:
-            continue
-    return addresses
-
-
-def should_run_locally(host: str, project_root: str) -> bool:
-    if not Path(project_root).exists():
-        return False
-
-    host_norm = host.strip().lower()
-    local_addrs = local_addresses()
-    if host_norm in local_addrs:
-        return True
-
-    try:
-        for _, _, _, _, sockaddr in socket.getaddrinfo(host, None):
-            if sockaddr and sockaddr[0].lower() in local_addrs:
-                return True
-    except OSError:
-        return False
-    return False
 
 
 def main() -> int:
@@ -192,16 +137,22 @@ def main() -> int:
     command = f"{env_prefix} python3 - <<'PY'\n{REMOTE_LAUNCH_SCRIPT}\nPY"
 
     try:
-        if should_run_locally(args.host, args.project_root):
-            stdout = run_local(command)
-        else:
-            stdout = run_ssh(args.user, args.host, command)
-    except subprocess.CalledProcessError as exc:
+        stdout = run_target_command(
+            args.host,
+            args.project_root,
+            args.user,
+            args.port,
+            command,
+            password_env=args.password_env,
+        )
+    except Exception as exc:
         print("远端训练启动失败。", file=sys.stderr)
-        if exc.stdout:
+        if getattr(exc, "stdout", ""):
             print(exc.stdout, file=sys.stderr)
-        if exc.stderr:
+        if getattr(exc, "stderr", ""):
             print(exc.stderr, file=sys.stderr)
+        if not getattr(exc, "stdout", "") and not getattr(exc, "stderr", ""):
+            print(str(exc), file=sys.stderr)
         return 1
 
     payload: dict[str, Any] = json.loads(stdout)

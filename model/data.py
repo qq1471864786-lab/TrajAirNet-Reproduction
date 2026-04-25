@@ -2,6 +2,7 @@ import hashlib
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -109,6 +110,8 @@ def _artifact_path(
     n_proto,
     basis_dim,
     local_basis_dim,
+    micro_per_proto,
+    artifact_max_samples,
     obs_len,
     pred_len,
     obs_stride=1,
@@ -116,16 +119,40 @@ def _artifact_path(
     rare_threshold=0.02,
 ):
     cache_dir = os.path.join(data_dir, ".cache")
+    sample_suffix = f"_am{artifact_max_samples}" if int(artifact_max_samples) > 0 else ""
     return os.path.join(
         cache_dir,
         (
-            f"protobasis_artifact_v3_o{obs_len}_p{pred_len}_os{obs_stride}_ps{pred_stride}_"
-            f"n{n_proto}_b{basis_dim}_lb{local_basis_dim}_r{rare_threshold:.4f}.pt"
+            f"protobasis_artifact_v5_o{obs_len}_p{pred_len}_os{obs_stride}_ps{pred_stride}_"
+            f"n{n_proto}_b{basis_dim}_lb{local_basis_dim}_mc{micro_per_proto}"
+            f"{sample_suffix}_r{rare_threshold:.4f}.pt"
         ),
     )
 
 
-def _run_kmeans(data, n_clusters, random_state=3407, iters=50):
+def _run_progress_step(description, fn):
+    start = time.perf_counter()
+    progress = tqdm(
+        total=1,
+        desc=description,
+        dynamic_ncols=True,
+        leave=False,
+        file=sys.stdout,
+    )
+    try:
+        result = fn()
+    except Exception:
+        progress.close()
+        raise
+    elapsed = time.perf_counter() - start
+    progress.update(1)
+    progress.set_postfix_str(f"{elapsed:.1f}s", refresh=False)
+    progress.close()
+    print(f"[Cache] {description} done in {elapsed:.1f}s", flush=True)
+    return result
+
+
+def _run_kmeans(data, n_clusters, random_state=3407, iters=50, show_progress=False, progress_desc="kmeans"):
     rng = np.random.default_rng(random_state)
     if data.shape[0] < n_clusters:
         raise ValueError(f"n_clusters={n_clusters} exceeds sample count={data.shape[0]}")
@@ -133,7 +160,19 @@ def _run_kmeans(data, n_clusters, random_state=3407, iters=50):
     initial_ids = rng.choice(data.shape[0], size=n_clusters, replace=False)
     centers = data[initial_ids].copy()
 
-    for _ in range(iters):
+    iteration_iter = range(iters)
+    progress = None
+    if show_progress:
+        progress = tqdm(
+            iteration_iter,
+            desc=progress_desc,
+            dynamic_ncols=True,
+            leave=False,
+            file=sys.stdout,
+        )
+        iteration_iter = progress
+
+    for iteration in iteration_iter:
         distances = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=-1)
         labels = distances.argmin(axis=1)
         new_centers = centers.copy()
@@ -147,13 +186,25 @@ def _run_kmeans(data, n_clusters, random_state=3407, iters=50):
             centers = new_centers
             break
         centers = new_centers
+        if progress is not None:
+            progress.set_postfix(iter=iteration + 1, refresh=False)
+
+    if progress is not None:
+        progress.close()
 
     final_distances = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=-1)
     labels = final_distances.argmin(axis=1)
     return centers.astype(np.float32), labels.astype(np.int64)
 
 
-def _fit_basis_bank(future_local_bank, pred_len, basis_dim, max_samples=60000, random_state=3407):
+def _fit_basis_bank(
+    future_local_bank,
+    pred_len,
+    basis_dim,
+    max_samples=60000,
+    random_state=3407,
+    progress_desc=None,
+):
     if basis_dim <= 0:
         return np.zeros((0, pred_len, 3), dtype=np.float32)
     if isinstance(future_local_bank, np.ndarray):
@@ -173,13 +224,100 @@ def _fit_basis_bank(future_local_bank, pred_len, basis_dim, max_samples=60000, r
     anchors = alpha * endpoints
     residual = futures - anchors
     flat_residual = residual.reshape(residual.shape[0], -1)
-    _, _, vt = np.linalg.svd(flat_residual, full_matrices=False)
-    rank = min(basis_dim, vt.shape[0])
-    basis_flat = vt[:rank]
-    if rank < basis_dim:
-        pad = np.zeros((basis_dim - rank, flat_residual.shape[1]), dtype=np.float32)
-        basis_flat = np.concatenate([basis_flat, pad], axis=0)
-    return basis_flat.reshape(basis_dim, pred_len, 3).astype(np.float32)
+
+    def _compute_basis():
+        _, _, vt = np.linalg.svd(flat_residual, full_matrices=False)
+        rank = min(basis_dim, vt.shape[0])
+        basis_flat = vt[:rank]
+        if rank < basis_dim:
+            pad = np.zeros((basis_dim - rank, flat_residual.shape[1]), dtype=np.float32)
+            basis_flat = np.concatenate([basis_flat, pad], axis=0)
+        return basis_flat.reshape(basis_dim, pred_len, 3).astype(np.float32)
+
+    if progress_desc:
+        return _run_progress_step(progress_desc, _compute_basis)
+
+    basis = _compute_basis()
+    return basis
+
+
+def _solve_basis_coefficients(future_local, basis_bank, pred_len):
+    if basis_bank.shape[0] <= 0:
+        return np.zeros((future_local.shape[0], 0), dtype=np.float32)
+    alpha = np.linspace(0.0, 1.0, num=pred_len, dtype=np.float32)[None, :, None]
+    anchors = alpha * future_local[:, -1:, :]
+    residual = (future_local - anchors).reshape(future_local.shape[0], -1).T
+    basis_matrix = basis_bank.reshape(basis_bank.shape[0], -1).T
+    coeff, *_ = np.linalg.lstsq(basis_matrix, residual, rcond=None)
+    return coeff.T.astype(np.float32)
+
+
+def _fit_micro_anchors(
+    future_local_bank,
+    labels,
+    proto_centers,
+    basis_bank,
+    pred_len,
+    n_proto,
+    micro_per_proto,
+    max_samples_per_proto=5000,
+    random_state=3407,
+):
+    basis_dim = int(basis_bank.shape[0])
+    if micro_per_proto <= 0 or basis_dim <= 0:
+        return (
+            np.zeros((n_proto, max(int(micro_per_proto), 0), basis_dim), dtype=np.float32),
+            np.zeros((n_proto, max(int(micro_per_proto), 0), 3), dtype=np.float32),
+        )
+
+    coeff_anchors = np.zeros((n_proto, micro_per_proto, basis_dim), dtype=np.float32)
+    endpoint_anchors = np.zeros((n_proto, micro_per_proto, 3), dtype=np.float32)
+    rng = np.random.default_rng(random_state)
+    progress = tqdm(
+        range(n_proto),
+        desc="artifact:micro_anchors",
+        dynamic_ncols=True,
+        leave=False,
+        file=sys.stdout,
+    )
+    for proto_id in progress:
+        proto_indices = np.flatnonzero(labels == proto_id)
+        if proto_indices.size == 0:
+            continue
+        if proto_indices.size > max_samples_per_proto:
+            proto_indices = rng.choice(proto_indices, size=max_samples_per_proto, replace=False)
+        proto_future = future_local_bank[proto_indices].astype(np.float32, copy=False)
+        coeff_samples = _solve_basis_coefficients(
+            proto_future,
+            basis_bank,
+            pred_len,
+        )
+        endpoint_samples = proto_future[:, -1, :] - proto_centers[proto_id, :3][None, :]
+        if coeff_samples.shape[0] >= micro_per_proto:
+            centers, micro_labels = _run_kmeans(
+                coeff_samples,
+                n_clusters=micro_per_proto,
+                random_state=random_state + proto_id,
+                iters=30,
+            )
+            coeff_anchors[proto_id] = centers
+            endpoint_centers = np.zeros((micro_per_proto, 3), dtype=np.float32)
+            for micro_id in range(micro_per_proto):
+                mask = micro_labels == micro_id
+                if mask.any():
+                    endpoint_centers[micro_id] = endpoint_samples[mask].mean(axis=0)
+                else:
+                    endpoint_centers[micro_id] = endpoint_samples.mean(axis=0)
+            endpoint_anchors[proto_id] = endpoint_centers - endpoint_centers.mean(axis=0, keepdims=True)
+        else:
+            coeff_anchors[proto_id, : coeff_samples.shape[0]] = coeff_samples
+            coeff_anchors[proto_id, coeff_samples.shape[0] :] = coeff_samples[-1]
+            endpoint_anchors[proto_id, : endpoint_samples.shape[0]] = endpoint_samples
+            endpoint_anchors[proto_id, endpoint_samples.shape[0] :] = endpoint_samples[-1]
+            endpoint_anchors[proto_id] -= endpoint_anchors[proto_id].mean(axis=0, keepdims=True)
+        progress.set_postfix(proto=proto_id + 1, refresh=False)
+    progress.close()
+    return coeff_anchors.astype(np.float32), endpoint_anchors.astype(np.float32)
 
 
 def _empty_sample_store(max_agents, pred_len):
@@ -232,9 +370,12 @@ class ProtoBasisArtifact:
     basis_bank: np.ndarray
     prototype_mean_path: np.ndarray
     local_basis_bank: np.ndarray
+    micro_coeff_anchors: np.ndarray
+    micro_endpoint_anchors: np.ndarray
     n_proto: int
     basis_dim: int
     local_basis_dim: int
+    micro_per_proto: int
     rare_threshold: float
     obs_len: int
     pred_len: int
@@ -249,9 +390,12 @@ class ProtoBasisArtifact:
             "basis_bank": self.basis_bank,
             "prototype_mean_path": self.prototype_mean_path,
             "local_basis_bank": self.local_basis_bank,
+            "micro_coeff_anchors": self.micro_coeff_anchors,
+            "micro_endpoint_anchors": self.micro_endpoint_anchors,
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
             "local_basis_dim": self.local_basis_dim,
+            "micro_per_proto": self.micro_per_proto,
             "rare_threshold": self.rare_threshold,
             "obs_len": self.obs_len,
             "pred_len": self.pred_len,
@@ -277,6 +421,8 @@ class ProtoBasisSceneDataset(Dataset):
         n_proto=64,
         basis_dim=16,
         local_basis_dim=0,
+        micro_per_proto=0,
+        artifact_max_samples=0,
         rare_threshold=0.02,
     ):
         super().__init__()
@@ -292,6 +438,8 @@ class ProtoBasisSceneDataset(Dataset):
         self.n_proto = n_proto
         self.basis_dim = basis_dim
         self.local_basis_dim = local_basis_dim
+        self.micro_per_proto = max(int(micro_per_proto), 0)
+        self.artifact_max_samples = max(int(artifact_max_samples), 0)
         self.rare_threshold = rare_threshold
         self.obs_index_offsets = np.arange(obs_len, dtype=np.int32) * obs_stride
         self.pred_index_offsets = (
@@ -306,7 +454,10 @@ class ProtoBasisSceneDataset(Dataset):
         if os.path.isfile(cache_path):
             print(f"[Cache] loading {split_name} split: {cache_path}", flush=True)
             try:
-                cached = torch.load(cache_path, weights_only=False)
+                cached = _run_progress_step(
+                    f"load:{split_name}:split",
+                    lambda: torch.load(cache_path, weights_only=False),
+                )
             except Exception:
                 os.remove(cache_path)
                 self._build_and_cache(cache_path)
@@ -334,6 +485,8 @@ class ProtoBasisSceneDataset(Dataset):
                 n_proto,
                 basis_dim,
                 local_basis_dim,
+                self.micro_per_proto,
+                self.artifact_max_samples,
                 obs_len=obs_len,
                 pred_len=pred_len,
                 obs_stride=obs_stride,
@@ -342,12 +495,18 @@ class ProtoBasisSceneDataset(Dataset):
             )
             if os.path.isfile(artifact_path):
                 print(f"[Cache] loading train artifact: {artifact_path}", flush=True)
-                model_artifact = torch.load(artifact_path, weights_only=False)
+                model_artifact = _run_progress_step(
+                    "load:train:artifact",
+                    lambda: torch.load(artifact_path, weights_only=False),
+                )
             else:
                 print(f"[Cache] fitting train artifact from {len(self)} cached samples...", flush=True)
                 model_artifact = self._fit_model_artifact()
                 os.makedirs(os.path.dirname(artifact_path), exist_ok=True)
-                torch.save(model_artifact, artifact_path)
+                _run_progress_step(
+                    "save:train:artifact",
+                    lambda: torch.save(model_artifact, artifact_path),
+                )
                 print(f"[Cache] saved train artifact: {artifact_path}", flush=True)
         self.model_artifact = model_artifact
         self.basis_bank = np.asarray(model_artifact["basis_bank"], dtype=np.float32)
@@ -355,10 +514,21 @@ class ProtoBasisSceneDataset(Dataset):
         self.prototype_frequency = np.asarray(model_artifact["frequency"], dtype=np.float32)
         self.rare_proto_ids = np.asarray(model_artifact["rare_ids"], dtype=np.int64)
         self.local_basis_dim = int(model_artifact.get("local_basis_dim", self.local_basis_dim))
+        self.micro_per_proto = int(model_artifact.get("micro_per_proto", self.micro_per_proto))
         default_mean_path = np.zeros((self.n_proto, self.pred_len, 3), dtype=np.float32)
         default_local_basis = np.zeros((self.n_proto, self.local_basis_dim, self.pred_len, 3), dtype=np.float32)
+        default_micro_coeff = np.zeros((self.n_proto, self.micro_per_proto, self.basis_dim), dtype=np.float32)
+        default_micro_endpoint = np.zeros((self.n_proto, self.micro_per_proto, 3), dtype=np.float32)
         self.prototype_mean_path = np.asarray(model_artifact.get("prototype_mean_path", default_mean_path), dtype=np.float32)
         self.local_basis_bank = np.asarray(model_artifact.get("local_basis_bank", default_local_basis), dtype=np.float32)
+        self.micro_coeff_anchors = np.asarray(
+            model_artifact.get("micro_coeff_anchors", default_micro_coeff),
+            dtype=np.float32,
+        )
+        self.micro_endpoint_anchors = np.asarray(
+            model_artifact.get("micro_endpoint_anchors", default_micro_endpoint),
+            dtype=np.float32,
+        )
         self._assign_prototypes()
 
     def _build_and_cache(self, cache_path):
@@ -394,13 +564,16 @@ class ProtoBasisSceneDataset(Dataset):
 
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         try:
-            torch.save(
-                {
-                    "cache_version": self.CACHE_VERSION,
-                    "file_records": self.file_records,
-                    "samples": self.samples,
-                },
-                cache_path,
+            _run_progress_step(
+                f"save:{self.split_name}:split",
+                lambda: torch.save(
+                    {
+                        "cache_version": self.CACHE_VERSION,
+                        "file_records": self.file_records,
+                        "samples": self.samples,
+                    },
+                    cache_path,
+                ),
             )
             print(f"[Cache] saved {self.split_name} split cache: {cache_path}", flush=True)
         except MemoryError:
@@ -472,20 +645,47 @@ class ProtoBasisSceneDataset(Dataset):
 
     def _fit_model_artifact(self):
         summaries = self.samples["proto_summary_5d"]
-        centers, labels = _run_kmeans(summaries, n_clusters=self.n_proto, random_state=3407)
+        future_bank = self.samples["future_local"]
+        total_samples = int(summaries.shape[0])
+        fit_samples = total_samples
+        if self.artifact_max_samples > 0 and summaries.shape[0] > self.artifact_max_samples:
+            rng = np.random.default_rng(3407)
+            fit_indices = rng.choice(summaries.shape[0], size=self.artifact_max_samples, replace=False)
+            fit_indices.sort()
+            summaries = summaries[fit_indices]
+            future_bank = future_bank[fit_indices]
+            fit_samples = int(fit_indices.shape[0])
+        print(
+            f"[Cache] artifact fit samples: using {fit_samples} / {total_samples} "
+            f"(micro_per_proto={self.micro_per_proto})"
+        )
+        centers, labels = _run_kmeans(
+            summaries,
+            n_clusters=self.n_proto,
+            random_state=3407,
+            show_progress=True,
+            progress_desc="artifact:kmeans",
+        )
         frequency = np.bincount(labels, minlength=self.n_proto).astype(np.float32)
         frequency = frequency / max(float(frequency.sum()), 1.0)
         rare_ids = np.nonzero(frequency < self.rare_threshold)[0].astype(np.int64)
         basis_bank = _fit_basis_bank(
-            self.samples["future_local"],
+            future_bank,
             pred_len=self.pred_len,
             basis_dim=self.basis_dim,
+            progress_desc="artifact:global_basis",
         )
         prototype_mean_path = np.zeros((self.n_proto, self.pred_len, 3), dtype=np.float32)
         local_basis_bank = np.zeros((self.n_proto, self.local_basis_dim, self.pred_len, 3), dtype=np.float32)
-        future_bank = self.samples["future_local"]
         alpha = np.linspace(0.0, 1.0, num=self.pred_len, dtype=np.float32)[:, None]
-        for proto_id in range(self.n_proto):
+        progress = tqdm(
+            range(self.n_proto),
+            desc="artifact:prototype_stats",
+            dynamic_ncols=True,
+            leave=False,
+            file=sys.stdout,
+        )
+        for proto_id in progress:
             mask = labels == proto_id
             proto_samples = future_bank[mask]
             if proto_samples.shape[0] == 0:
@@ -500,6 +700,17 @@ class ProtoBasisSceneDataset(Dataset):
                     max_samples=20000,
                     random_state=3407 + proto_id,
                 )
+            progress.set_postfix(proto=proto_id + 1, refresh=False)
+        progress.close()
+        micro_coeff_anchors, micro_endpoint_anchors = _fit_micro_anchors(
+            future_bank,
+            labels,
+            centers,
+            basis_bank,
+            pred_len=self.pred_len,
+            n_proto=self.n_proto,
+            micro_per_proto=self.micro_per_proto,
+        )
         return ProtoBasisArtifact(
             summary_5d=centers,
             frequency=frequency,
@@ -507,9 +718,12 @@ class ProtoBasisSceneDataset(Dataset):
             basis_bank=basis_bank,
             prototype_mean_path=prototype_mean_path,
             local_basis_bank=local_basis_bank,
+            micro_coeff_anchors=micro_coeff_anchors,
+            micro_endpoint_anchors=micro_endpoint_anchors,
             n_proto=self.n_proto,
             basis_dim=self.basis_dim,
             local_basis_dim=self.local_basis_dim,
+            micro_per_proto=self.micro_per_proto,
             rare_threshold=self.rare_threshold,
             obs_len=self.obs_len,
             pred_len=self.pred_len,
@@ -524,13 +738,22 @@ class ProtoBasisSceneDataset(Dataset):
         gt_proto_id = np.zeros((sample_count,), dtype=np.int64)
         gt_proto_residual = np.zeros((sample_count, 3), dtype=np.float32)
         chunk_size = 8192
-        for start in range(0, sample_count, chunk_size):
+        progress = tqdm(
+            range(0, sample_count, chunk_size),
+            desc=f"cache:{self.split_name}:assign_proto",
+            dynamic_ncols=True,
+            leave=False,
+            file=sys.stdout,
+        )
+        for start in progress:
             end = min(start + chunk_size, sample_count)
             summary = self.samples["proto_summary_5d"][start:end]
             distances = ((summary[:, None, :] - proto_summary[None, :, :]) ** 2).sum(axis=2)
             chunk_ids = np.argmin(distances, axis=1).astype(np.int64)
             gt_proto_id[start:end] = chunk_ids
             gt_proto_residual[start:end] = summary[:, :3] - proto_endpoints[chunk_ids]
+            progress.set_postfix(samples=end, refresh=False)
+        progress.close()
         self.samples["gt_proto_id"] = gt_proto_id
         self.samples["gt_proto_residual"] = gt_proto_residual
         self.samples["is_rare"] = np.isin(gt_proto_id, self.rare_proto_ids)
@@ -543,9 +766,12 @@ class ProtoBasisSceneDataset(Dataset):
             "basis_bank": self.basis_bank.copy(),
             "prototype_mean_path": self.prototype_mean_path.copy(),
             "local_basis_bank": self.local_basis_bank.copy(),
+            "micro_coeff_anchors": self.micro_coeff_anchors.copy(),
+            "micro_endpoint_anchors": self.micro_endpoint_anchors.copy(),
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
             "local_basis_dim": self.local_basis_dim,
+            "micro_per_proto": self.micro_per_proto,
             "rare_threshold": self.rare_threshold,
             "obs_len": self.obs_len,
             "pred_len": self.pred_len,

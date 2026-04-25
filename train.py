@@ -85,6 +85,10 @@ def build_parser():
     parser.set_defaults(two_stage_decoder=None, two_stage_rescore=None)
     parser.add_argument("--topk_proto", type=int, default=5)
     parser.add_argument("--micro_per_proto", type=int, default=4)
+    parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
+    parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
+    parser.set_defaults(micro_coeff_anchors=None)
+    parser.add_argument("--micro_endpoint_scale", type=float, default=0.0)
     parser.add_argument("--d_model", type=int, default=None)
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--ff_dim", type=int, default=None)
@@ -145,6 +149,12 @@ def build_parser():
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
     parser.add_argument("--limit_eval_batches", type=int, default=0)
+    parser.add_argument(
+        "--artifact_max_samples",
+        type=int,
+        default=0,
+        help="Cap train artifact fitting samples for smoke validation. 0 keeps full artifact fitting.",
+    )
     return parser
 
 
@@ -208,6 +218,8 @@ def apply_training_defaults(args):
         args.two_stage_decoder = bool(is_unified and is_main_dataset)
     if args.two_stage_rescore is None:
         args.two_stage_rescore = not (is_unified and is_main_dataset)
+    if args.micro_coeff_anchors is None:
+        args.micro_coeff_anchors = True
 
     if args.batch_size <= 0:
         if is_unified and is_main_dataset:
@@ -379,6 +391,22 @@ def build_model(args, model_artifact):
         basis_bank=torch.tensor(model_artifact["basis_bank"], dtype=torch.float32),
         prototype_mean_path=torch.tensor(model_artifact["prototype_mean_path"], dtype=torch.float32),
         local_basis_bank=torch.tensor(model_artifact["local_basis_bank"], dtype=torch.float32),
+        micro_coeff_anchors=torch.tensor(
+            model_artifact.get(
+                "micro_coeff_anchors",
+                np.zeros((args.n_proto, args.micro_per_proto, args.basis_dim), dtype=np.float32),
+            ),
+            dtype=torch.float32,
+        ),
+        micro_endpoint_anchors=torch.tensor(
+            model_artifact.get(
+                "micro_endpoint_anchors",
+                np.zeros((args.n_proto, args.micro_per_proto, 3), dtype=np.float32),
+            ),
+            dtype=torch.float32,
+        ),
+        use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
+        micro_endpoint_scale=args.micro_endpoint_scale,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
@@ -446,6 +474,8 @@ def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model
         "basis_bank": model_artifact["basis_bank"],
         "prototype_mean_path": model_artifact["prototype_mean_path"],
         "local_basis_bank": model_artifact["local_basis_bank"],
+        "micro_coeff_anchors": model_artifact.get("micro_coeff_anchors"),
+        "micro_endpoint_anchors": model_artifact.get("micro_endpoint_anchors"),
         "config": config,
         "meta": meta,
     }
@@ -724,6 +754,8 @@ def main():
         n_proto=args.n_proto,
         basis_dim=args.basis_dim,
         local_basis_dim=args.local_basis_dim,
+        micro_per_proto=args.micro_per_proto if args.micro_coeff_anchors else 0,
+        artifact_max_samples=args.artifact_max_samples,
         rare_threshold=args.rare_threshold,
     )
     model_artifact = train_dataset.export_model_artifact()
@@ -739,6 +771,7 @@ def main():
         n_proto=args.n_proto,
         basis_dim=args.basis_dim,
         local_basis_dim=args.local_basis_dim,
+        micro_per_proto=args.micro_per_proto if args.micro_coeff_anchors else 0,
         rare_threshold=args.rare_threshold,
     )
 
@@ -782,6 +815,7 @@ def main():
         "rare_count": int(len(model_artifact["rare_ids"])),
         "n_proto": args.n_proto,
         "basis_dim": args.basis_dim,
+        "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

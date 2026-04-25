@@ -66,6 +66,12 @@ Project note:
 
 Remote workflow:
 
+- Bootstrap / repair the remote conda environment:
+
+```bash
+python scripts/setup_remote_env.py
+```
+
 - Sync modified source files to the server:
 
 ```bash
@@ -101,6 +107,7 @@ python scripts/server_status.py --json --full
 
 Automation note:
 
+- `scripts/setup_remote_env.py` creates or refreshes the remote `trajair` env from `requirements.txt`, installs the CUDA PyTorch wheel, and marks the remote repo as a git safe directory.
 - `scripts/sync_remote.py` performs incremental source sync and records the last sync timestamp locally.
 - `scripts/launch_remote_train.py` starts remote training under `.remote_runs/<timestamp_name>/` and preserves command/stdout/stderr.
 - `scripts/server_status.py` defaults to a compact status summary so remote checks stay token-efficient.

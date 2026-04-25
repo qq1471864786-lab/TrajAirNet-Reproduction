@@ -70,6 +70,10 @@ def build_model(config, checkpoint):
         basis_dim=config["basis_dim"],
         local_basis_dim=config.get("local_basis_dim", 0),
         support_aware_local_basis=config.get("support_aware_local_basis", False),
+        two_stage_decoder=bool(config.get("two_stage_decoder", False)),
+        two_stage_update_endpoint=not config.get("no_two_stage_update_endpoint", False),
+        two_stage_update_coeff=not config.get("no_two_stage_update_coeff", False),
+        two_stage_rescore=bool(config.get("two_stage_rescore", True)),
         dropout=config["dropout"],
         proto_summary_5d=torch.tensor(checkpoint["proto_summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(checkpoint["proto_freq"], dtype=torch.float32),
@@ -80,6 +84,10 @@ def build_model(config, checkpoint):
         local_basis_bank=torch.tensor(checkpoint.get("local_basis_bank"), dtype=torch.float32)
         if checkpoint.get("local_basis_bank") is not None
         else None,
+        micro_coeff_anchors=torch.tensor(checkpoint.get("micro_coeff_anchors"), dtype=torch.float32)
+        if checkpoint.get("micro_coeff_anchors") is not None
+        else None,
+        use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -229,9 +237,11 @@ def main():
         "basis_bank": checkpoint["basis_bank"],
         "prototype_mean_path": checkpoint.get("prototype_mean_path"),
         "local_basis_bank": checkpoint.get("local_basis_bank"),
+        "micro_coeff_anchors": checkpoint.get("micro_coeff_anchors"),
         "n_proto": config["n_proto"],
         "basis_dim": config["basis_dim"],
         "local_basis_dim": config.get("local_basis_dim", 0),
+        "micro_per_proto": config.get("micro_per_proto", 0) if config.get("micro_coeff_anchors", False) else 0,
         "rare_threshold": config["rare_threshold"],
         "obs_len": config["obs"],
         "pred_len": config["preds"],
@@ -250,6 +260,7 @@ def main():
         n_proto=config["n_proto"],
         basis_dim=config["basis_dim"],
         local_basis_dim=config.get("local_basis_dim", 0),
+        micro_per_proto=config.get("micro_per_proto", 0) if config.get("micro_coeff_anchors", False) else 0,
         rare_threshold=config["rare_threshold"],
     )
     loader = build_loader(dataset, args.batch_size, args, config["max_agents"])

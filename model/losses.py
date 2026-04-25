@@ -99,7 +99,8 @@ class ProtoBasisLoss(nn.Module):
 
         best_idx, ade, fde = _winner_indices(pred_xyz, gt_xyz)
         winner_xyz = _gather_candidates(pred_xyz, best_idx)
-        winner_coeff = _gather_candidates(aux["coeff"], best_idx)
+        coeff_for_regularization = aux.get("coeff_delta", aux["coeff"])
+        winner_coeff = _gather_candidates(coeff_for_regularization, best_idx)
 
         xyz_loss = F.smooth_l1_loss(winner_xyz, gt_xyz)
         fde_loss = F.smooth_l1_loss(winner_xyz[:, -1], gt_xyz[:, -1])

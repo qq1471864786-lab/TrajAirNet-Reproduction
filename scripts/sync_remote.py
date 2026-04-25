@@ -1,9 +1,10 @@
 import argparse
 import json
 import os
-import subprocess
 import time
 from pathlib import Path
+
+from remote_common import add_remote_project_root_arg, add_remote_target_args, upload_file
 
 
 INCLUDE_EXTS = {".py", ".md", ".txt", ".yaml", ".yml", ".sh", ".toml"}
@@ -22,9 +23,8 @@ EXCLUDE_DIRS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync ProtoBasis-Net source files to the remote server.")
-    parser.add_argument("--host", default="10.23.66.99")
-    parser.add_argument("--user", default="wangzhilin")
-    parser.add_argument("--remote-root", default="/home/wangzhilin/ProtoBasis-Net")
+    add_remote_target_args(parser)
+    add_remote_project_root_arg(parser, flag="--remote-root")
     parser.add_argument("--project-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--full", action="store_true", help="Sync all included files instead of only modified files.")
     return parser.parse_args()
@@ -75,10 +75,6 @@ def collect_files(project_root: Path, full: bool) -> list[Path]:
     return sorted(selected)
 
 
-def run_shell(command: list[str]) -> None:
-    subprocess.run(command, check=True)
-
-
 def main() -> int:
     args = parse_args()
     project_root = Path(args.project_root).resolve()
@@ -91,9 +87,14 @@ def main() -> int:
     for local_file in files:
         rel = local_file.relative_to(project_root).as_posix()
         remote_file = f"{args.remote_root}/{rel}"
-        remote_dir = remote_file.rsplit("/", 1)[0]
-        run_shell(["ssh", f"{args.user}@{args.host}", f"mkdir -p {remote_dir}"])
-        run_shell(["scp", str(local_file), f"{args.user}@{args.host}:{remote_file}"])
+        upload_file(
+            local_file,
+            remote_file,
+            user=args.user,
+            host=args.host,
+            port=args.port,
+            password_env=args.password_env,
+        )
         synced_rel.append(rel)
 
     save_last_sync(project_root, time.time(), synced_rel)

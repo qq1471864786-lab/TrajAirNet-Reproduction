@@ -1,12 +1,10 @@
 import argparse
 import json
-import os
 import shlex
-import socket
-import subprocess
 import sys
-from pathlib import Path
 from typing import Any
+
+from remote_common import add_remote_project_root_arg, add_remote_target_args, run_target_command
 
 
 REMOTE_DISCOVER_SCRIPT = r"""
@@ -14,6 +12,7 @@ import glob
 import json
 import os
 import pwd
+import shlex
 import shutil
 import socket
 import subprocess
@@ -258,10 +257,56 @@ def discover_launcher_run():
     return payload
 
 
-def resolve_run_dir(launcher_run):
+def extract_arg(args, key, default=""):
+    if key in args:
+        idx = args.index(key)
+        if idx + 1 < len(args):
+            return args[idx + 1]
+    key_eq = key + "="
+    for item in args:
+        if item.startswith(key_eq):
+            return item[len(key_eq) :]
+    return default
+
+
+def resolve_active_run_dir(project_processes):
+    for item in sorted(project_processes, key=lambda row: row.get("pid", 0), reverse=True):
+        cmdline = item.get("cmdline") or ""
+        if "train.py" not in cmdline:
+            continue
+        try:
+            parts = shlex.split(cmdline)
+        except Exception:
+            parts = cmdline.split()
+        save_dir = extract_arg(parts, "--save_dir", "save_model")
+        dataset_name = extract_arg(parts, "--dataset_name", "")
+        seed = extract_arg(parts, "--seed", "3407")
+        if not dataset_name:
+            for idx, token in enumerate(parts):
+                if token.endswith("train.py") and idx + 1 < len(parts):
+                    candidate = parts[idx + 1]
+                    if not candidate.startswith("-"):
+                        dataset_name = candidate
+                        break
+        if not dataset_name:
+            continue
+        if os.path.isabs(save_dir):
+            return os.path.join(save_dir, dataset_name, f"seed{seed}")
+        return os.path.join(project_root, save_dir, dataset_name, f"seed{seed}")
+    return ""
+
+
+def resolve_run_dir(launcher_run, project_processes):
     run_dir = requested_run_dir
+    run_dir_source = "requested" if run_dir else ""
+    if not run_dir:
+        run_dir = resolve_active_run_dir(project_processes)
+        if run_dir:
+            run_dir_source = "active_process"
     if not run_dir and launcher_run and isinstance(launcher_run.get("meta"), dict):
         run_dir = launcher_run["meta"].get("resolved_run_dir", "")
+        if run_dir:
+            run_dir_source = "launcher"
 
     if not run_dir:
         candidates = sorted(
@@ -269,10 +314,12 @@ def resolve_run_dir(launcher_run):
             key=lambda path: os.path.getmtime(path),
             reverse=True,
         )
-        return candidates[0] if candidates else ""
+        if candidates:
+            return candidates[0], "latest_save_model"
+        return "", ""
     if os.path.isabs(run_dir):
-        return run_dir
-    return os.path.join(project_root, run_dir)
+        return run_dir, run_dir_source
+    return os.path.join(project_root, run_dir), run_dir_source
 
 
 def discover_root_logs():
@@ -307,7 +354,7 @@ def latest_epoch_record(live_status, epoch_metrics_path):
 launcher_run = discover_launcher_run()
 project_processes = discover_project_processes()
 project_pids = {str(item["pid"]) for item in project_processes}
-run_dir = resolve_run_dir(launcher_run)
+run_dir, run_dir_source = resolve_run_dir(launcher_run, project_processes)
 
 live_status = load_json(os.path.join(run_dir, "live_status.json")) if run_dir else None
 run_summary = load_json(os.path.join(run_dir, "run_summary.json")) if run_dir else None
@@ -337,6 +384,7 @@ payload = {
     "project_root": project_root,
     "project_processes": project_processes,
     "run_dir": run_dir,
+    "run_dir_source": run_dir_source,
     "launcher_run": launcher_run,
     "live_status": live_status,
     "run_summary": run_summary,
@@ -356,9 +404,8 @@ print(json.dumps(payload, ensure_ascii=False))
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Inspect remote training status for ProtoBasis-Net.")
-    parser.add_argument("--host", default="10.23.66.99")
-    parser.add_argument("--user", default="wangzhilin")
-    parser.add_argument("--project-root", default="/home/wangzhilin/ProtoBasis-Net")
+    add_remote_target_args(parser)
+    add_remote_project_root_arg(parser)
     parser.add_argument("--run-dir", default="", help="Absolute remote run dir or path relative to project root.")
     parser.add_argument("--show-logs", action="store_true", help="Print recent stdout/stderr tails.")
     parser.add_argument("--show-epochs", action="store_true", help="Print last few epoch JSON rows.")
@@ -368,61 +415,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run_ssh(user: str, host: str, command: str) -> str:
-    result = subprocess.run(
-        ["ssh", f"{user}@{host}", command],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
-
-
-def run_local(command: str) -> str:
-    result = subprocess.run(
-        ["bash", "-lc", command],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
-
-
-def local_addresses() -> set[str]:
-    addresses = {"127.0.0.1", "::1", "localhost"}
-    for name in {socket.gethostname(), socket.getfqdn()}:
-        if name:
-            addresses.add(name.lower())
-        try:
-            for _, _, _, _, sockaddr in socket.getaddrinfo(name, None):
-                if sockaddr and sockaddr[0]:
-                    addresses.add(sockaddr[0].lower())
-        except OSError:
-            continue
-    return addresses
-
-
-def should_run_locally(host: str, project_root: str) -> bool:
-    if not Path(project_root).exists():
-        return False
-
-    host_norm = host.strip().lower()
-    local_addrs = local_addresses()
-    if host_norm in local_addrs:
-        return True
-
-    try:
-        for _, _, _, _, sockaddr in socket.getaddrinfo(host, None):
-            if sockaddr and sockaddr[0].lower() in local_addrs:
-                return True
-    except OSError:
-        return False
-    return False
-
-
 def remote_json(
     user: str,
     host: str,
+    port: int,
     project_root: str,
     run_dir: str,
     *,
@@ -430,6 +426,7 @@ def remote_json(
     include_epochs: bool,
     include_system: bool,
     include_run_config: bool,
+    password_env: str,
 ) -> dict[str, Any]:
     env_parts = [f"PROJECT_ROOT={shlex.quote(project_root)}"]
     if run_dir:
@@ -444,10 +441,14 @@ def remote_json(
         env_parts.append("INCLUDE_RUN_CONFIG=1")
     env_prefix = " ".join(env_parts)
     command = f"{env_prefix} python3 - <<'PY'\n{REMOTE_DISCOVER_SCRIPT}\nPY"
-    if should_run_locally(host, project_root):
-        stdout = run_local(command)
-    else:
-        stdout = run_ssh(user, host, command)
+    stdout = run_target_command(
+        host,
+        project_root,
+        user,
+        port,
+        command,
+        password_env=password_env,
+    )
     return json.loads(stdout)
 
 
@@ -513,6 +514,7 @@ def build_compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
     system_snapshot = payload.get("system_snapshot") or {}
     launcher_run = payload.get("launcher_run") or {}
     launcher_meta = launcher_run.get("meta") or {}
+    launcher_matches_run = launcher_meta.get("resolved_run_dir") == payload.get("run_dir")
     git_info = system_snapshot.get("git") or {}
     gpu_info = system_snapshot.get("gpu") or {}
     disk_info = system_snapshot.get("disk") or {}
@@ -537,6 +539,7 @@ def build_compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "server_time": payload.get("server_time"),
         "project_root": payload.get("project_root"),
         "run_dir": payload.get("run_dir"),
+        "run_dir_source": payload.get("run_dir_source"),
         "status": status,
         "current_epoch": live_status.get("current_epoch", run_summary.get("current_epoch")),
         "phase": latest_epoch.get("phase"),
@@ -546,15 +549,20 @@ def build_compact_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "metrics": metrics,
         "best": best_summary,
         "error": error_message,
-        "launcher": {
-            "run_root": launcher_run.get("run_root"),
-            "run_name": launcher_meta.get("run_name"),
-            "pid": launcher_run.get("pid"),
-            "pid_alive": launcher_run.get("pid_alive"),
-            "launched_at": launcher_meta.get("launched_at"),
-            "resolved_run_dir": launcher_meta.get("resolved_run_dir"),
-            "train_command": launcher_meta.get("train_command"),
-        },
+        "launcher": (
+            {
+                "run_root": launcher_run.get("run_root"),
+                "run_name": launcher_meta.get("run_name"),
+                "pid": launcher_run.get("pid"),
+                "pid_alive": launcher_run.get("pid_alive"),
+                "launched_at": launcher_meta.get("launched_at"),
+                "resolved_run_dir": launcher_meta.get("resolved_run_dir"),
+                "train_command": launcher_meta.get("train_command"),
+                "matches_run_dir": launcher_matches_run,
+            }
+            if launcher_run and (launcher_run.get("pid_alive") or launcher_matches_run)
+            else None
+        ),
         "project_processes": [
             {
                 "pid": item.get("pid"),
@@ -593,6 +601,8 @@ def print_compact_summary(summary: dict[str, Any]) -> None:
     print(f"server_time: {summary.get('server_time') or '-'}")
     print(f"project_root: {summary.get('project_root') or '-'}")
     print(f"run_dir: {summary.get('run_dir') or '(none)'}")
+    if summary.get("run_dir_source"):
+        print(f"run_dir_source: {summary.get('run_dir_source')}")
 
     status_line = f"status: {summary.get('status') or 'unknown'}"
     current_epoch = summary.get("current_epoch")
@@ -803,19 +813,23 @@ def main() -> int:
         payload = remote_json(
             args.user,
             args.host,
+            args.port,
             args.project_root,
             args.run_dir,
             include_logs=include_logs,
             include_epochs=include_epochs,
             include_system=include_system,
             include_run_config=include_run_config,
+            password_env=args.password_env,
         )
-    except subprocess.CalledProcessError as exc:
+    except Exception as exc:
         print("远程状态查询失败。", file=sys.stderr)
-        if exc.stdout:
+        if getattr(exc, "stdout", ""):
             print(exc.stdout, file=sys.stderr)
-        if exc.stderr:
+        if getattr(exc, "stderr", ""):
             print(exc.stderr, file=sys.stderr)
+        if not getattr(exc, "stdout", "") and not getattr(exc, "stderr", ""):
+            print(str(exc), file=sys.stderr)
         return 1
 
     compact = build_compact_summary(payload)

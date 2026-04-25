@@ -210,6 +210,7 @@ class PrototypeConditionedQueryDecoder(nn.Module):
         super().__init__()
         self.n_micro = n_micro
         self.endpoint_proj = nn.Linear(3, d_model)
+        self.coeff_anchor_proj = nn.Linear(basis_dim, d_model)
         self.micro = nn.Parameter(torch.randn(n_micro, d_model))
 
         self.self_attn = nn.ModuleList(
@@ -235,13 +236,19 @@ class PrototypeConditionedQueryDecoder(nn.Module):
         self.score_head = nn.Sequential(nn.Linear(d_model, 64), nn.ReLU(), nn.Linear(64, 1))
         self.gate_head = nn.Sequential(nn.Linear(d_model, 64), nn.ReLU(), nn.Linear(64, 1))
 
-    def forward(self, proto_token, endpoint_local, target_ctx, agent_feat, obs_mask):
+    def forward(self, proto_token, endpoint_local, target_ctx, agent_feat, obs_mask, micro_coeff_anchor=None):
         batch_size = proto_token.size(0)
+        topk_proto = proto_token.size(1)
         endpoint_token = self.endpoint_proj(endpoint_local)
+        if micro_coeff_anchor is None:
+            coeff_anchor_token = 0.0
+        else:
+            coeff_anchor_token = self.coeff_anchor_proj(micro_coeff_anchor)
         hidden = (
             proto_token[:, :, None, :]
             + endpoint_token[:, :, None, :]
             + self.micro[None, None, :, :]
+            + coeff_anchor_token
             + target_ctx[:, None, None, :]
         )
         hidden = hidden.view(batch_size, proto_token.size(1) * self.n_micro, -1)
@@ -263,10 +270,14 @@ class PrototypeConditionedQueryDecoder(nn.Module):
             hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
             norm_index += 1
 
-        coeff = self.coeff_head(hidden)
+        coeff_delta = self.coeff_head(hidden)
+        if micro_coeff_anchor is None:
+            coeff = coeff_delta
+        else:
+            coeff = coeff_delta + micro_coeff_anchor.reshape(batch_size, topk_proto * self.n_micro, -1)
         score = self.score_head(hidden).squeeze(-1)
         gate = torch.sigmoid(self.gate_head(hidden)).squeeze(-1)
-        return hidden, coeff, score, gate
+        return hidden, coeff, score, gate, coeff_delta
 
 
 class BasisBank(nn.Module):
@@ -333,6 +344,10 @@ class ProtoBasisNet(nn.Module):
         basis_bank: Optional[torch.Tensor] = None,
         prototype_mean_path: Optional[torch.Tensor] = None,
         local_basis_bank: Optional[torch.Tensor] = None,
+        micro_coeff_anchors: Optional[torch.Tensor] = None,
+        micro_endpoint_anchors: Optional[torch.Tensor] = None,
+        use_micro_coeff_anchors=False,
+        micro_endpoint_scale=0.0,
         disable_social=False,
         disable_router=False,
         disable_refiner=False,
@@ -358,6 +373,8 @@ class ProtoBasisNet(nn.Module):
         self.two_stage_update_endpoint = two_stage_update_endpoint
         self.two_stage_update_coeff = two_stage_update_coeff
         self.two_stage_rescore = two_stage_rescore
+        self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
+        self.micro_endpoint_scale = float(micro_endpoint_scale)
         self.pose_normalizer = PoseNormalizer()
         self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
@@ -399,6 +416,46 @@ class ProtoBasisNet(nn.Module):
             local_basis_bank = torch.zeros(n_proto, self.local_basis_dim, pred_len, 3, dtype=torch.float32)
         self.register_buffer("prototype_mean_path", prototype_mean_path.float())
         self.register_buffer("local_basis_bank", local_basis_bank.float())
+        if micro_coeff_anchors is None:
+            micro_coeff_anchors = torch.zeros(n_proto, n_micro, basis_dim, dtype=torch.float32)
+        micro_coeff_anchors = micro_coeff_anchors.float()
+        if micro_coeff_anchors.dim() != 3 or micro_coeff_anchors.size(0) != n_proto or micro_coeff_anchors.size(2) != basis_dim:
+            micro_coeff_anchors = torch.zeros(n_proto, n_micro, basis_dim, dtype=torch.float32)
+        elif micro_coeff_anchors.size(1) < n_micro:
+            pad = torch.zeros(
+                n_proto,
+                n_micro - micro_coeff_anchors.size(1),
+                basis_dim,
+                dtype=micro_coeff_anchors.dtype,
+                device=micro_coeff_anchors.device,
+            )
+            micro_coeff_anchors = torch.cat([micro_coeff_anchors, pad], dim=1)
+        elif micro_coeff_anchors.size(1) > n_micro:
+            micro_coeff_anchors = micro_coeff_anchors[:, :n_micro]
+        self.register_buffer("micro_coeff_anchors", micro_coeff_anchors, persistent=False)
+        self.has_micro_coeff_anchors = self.use_micro_coeff_anchors and self.micro_coeff_anchors.numel() > 0
+        if micro_endpoint_anchors is None:
+            micro_endpoint_anchors = torch.zeros(n_proto, n_micro, 3, dtype=torch.float32)
+        micro_endpoint_anchors = micro_endpoint_anchors.float()
+        if (
+            micro_endpoint_anchors.dim() != 3
+            or micro_endpoint_anchors.size(0) != n_proto
+            or micro_endpoint_anchors.size(2) != 3
+        ):
+            micro_endpoint_anchors = torch.zeros(n_proto, n_micro, 3, dtype=torch.float32)
+        elif micro_endpoint_anchors.size(1) < n_micro:
+            pad = torch.zeros(
+                n_proto,
+                n_micro - micro_endpoint_anchors.size(1),
+                3,
+                dtype=micro_endpoint_anchors.dtype,
+                device=micro_endpoint_anchors.device,
+            )
+            micro_endpoint_anchors = torch.cat([micro_endpoint_anchors, pad], dim=1)
+        elif micro_endpoint_anchors.size(1) > n_micro:
+            micro_endpoint_anchors = micro_endpoint_anchors[:, :n_micro]
+        self.register_buffer("micro_endpoint_anchors", micro_endpoint_anchors, persistent=False)
+        self.has_micro_endpoint_anchors = self.use_micro_coeff_anchors and self.micro_endpoint_anchors.numel() > 0
         self.has_local_basis = self.local_basis_dim > 0 and self.local_basis_bank.numel() > 0
         if self.has_local_basis:
             self.local_coeff_head = nn.Sequential(
@@ -448,14 +505,23 @@ class ProtoBasisNet(nn.Module):
             disable_router=self.disable_router,
         )
 
-        query_feat, coeff, pred_score, difficulty_gate = self.query_decoder(
+        micro_coeff_anchor = self.micro_coeff_anchors[top_proto_idx] if self.has_micro_coeff_anchors else None
+        micro_endpoint_anchor = self.micro_endpoint_anchors[top_proto_idx] if self.has_micro_endpoint_anchors else None
+        query_feat, coeff, pred_score, difficulty_gate, coeff_delta = self.query_decoder(
             proto_token,
             endpoint_local,
             target_ctx,
             agent_feat,
             obs_mask,
+            micro_coeff_anchor=micro_coeff_anchor,
         )
         endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
+        if micro_endpoint_anchor is not None and self.micro_endpoint_scale != 0.0:
+            endpoint_mode_local = endpoint_mode_local + self.micro_endpoint_scale * micro_endpoint_anchor.reshape(
+                endpoint_mode_local.size(0),
+                endpoint_mode_local.size(1),
+                3,
+            )
         anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
         coarse_local = self.basis_bank(anchor_local, coeff)
         active_query = query_feat
@@ -465,7 +531,9 @@ class ProtoBasisNet(nn.Module):
             if self.two_stage_update_endpoint:
                 endpoint_mode_local = endpoint_mode_local + self.stage2_endpoint_head(stage2_query)
             if self.two_stage_update_coeff:
-                coeff = coeff + self.stage2_coeff_head(stage2_query)
+                stage2_coeff_delta = self.stage2_coeff_head(stage2_query)
+                coeff = coeff + stage2_coeff_delta
+                coeff_delta = coeff_delta + stage2_coeff_delta
             if self.two_stage_rescore:
                 pred_score = self.query_decoder.score_head(stage2_query).squeeze(-1)
                 difficulty_gate = torch.sigmoid(self.query_decoder.gate_head(stage2_query)).squeeze(-1)
@@ -489,7 +557,7 @@ class ProtoBasisNet(nn.Module):
                 support_scale = (proto_support / self.proto_frequency.max().clamp_min(1e-6)).clamp_min(1e-6).sqrt()
                 support_scale = support_scale.repeat_interleave(self.n_micro, dim=1).unsqueeze(-1).unsqueeze(-1)
                 local_gate = local_gate * support_scale
-            coarse_local = coarse_local + local_gate * (local_path - anchor_local)
+            coarse_local = coarse_local + local_gate * (local_path - coarse_local)
         use_refiner = enable_refiner and (not self.disable_refiner)
         refined_local = self.refiner(coarse_local, active_query, difficulty_gate) if use_refiner else coarse_local
 
@@ -502,6 +570,7 @@ class ProtoBasisNet(nn.Module):
             "top_proto_idx": top_proto_idx,
             "aux": {
                 "coeff": coeff,
+                "coeff_delta": coeff_delta,
                 "endpoint_residual": endpoint_residual,
             },
         }
