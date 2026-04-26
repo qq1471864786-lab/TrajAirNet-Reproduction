@@ -92,6 +92,7 @@ def build_model(config, checkpoint):
         candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
+        endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),

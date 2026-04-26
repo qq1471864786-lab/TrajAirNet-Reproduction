@@ -96,6 +96,7 @@ def _build_model(config, checkpoint):
         candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
+        endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -403,6 +404,8 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
         coarse_local = coarse_local + local_gate * (local_path - coarse_local)
     use_refiner = enable_refiner and (not model.disable_refiner)
     refined_local = model.refiner(coarse_local, active_query, difficulty_gate) if use_refiner else coarse_local
+    if getattr(model, "endpoint_shape_refiner", None) is not None:
+        refined_local = model.endpoint_shape_refiner(refined_local, active_query)
     pred_xyz = model.pose_normalizer.inverse(refined_local, origin, rotation)
     outputs = {
         "pred_xyz": pred_xyz,

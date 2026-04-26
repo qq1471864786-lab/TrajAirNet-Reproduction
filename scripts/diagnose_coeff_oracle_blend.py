@@ -134,7 +134,6 @@ def forward_pre_refiner_state(model, obs_xyz, obs_mask, enable_refiner=True):
             model.anchor_alpha,
         )
         coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
-
     candidate_proto_idx = top_proto_idx.repeat_interleave(model.n_micro, dim=1)
     if getattr(model, "candidate_keep_indices", None) is not None and model.candidate_keep_indices.numel() > 0:
         keep = model.candidate_keep_indices.to(device=coeff.device)
@@ -188,6 +187,8 @@ def apply_tail_modules(model, state, coeff):
         local_pred = model.refiner(coarse_local, active_query, state["difficulty_gate"].to(dtype=coeff.dtype))
     else:
         local_pred = coarse_local
+    if getattr(model, "endpoint_shape_refiner", None) is not None:
+        local_pred = model.endpoint_shape_refiner(local_pred, active_query)
     return model.pose_normalizer.inverse(local_pred, state["origin"], state["rotation"])
 
 

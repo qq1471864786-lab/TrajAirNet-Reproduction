@@ -64,3 +64,11 @@ The next implementation target should be a learnable coefficient/path-shape corr
 
 Do not start full training from this probe alone. First run a short implementation validation that tests whether a learned correction can capture a small fraction of the oracle blend gain without using GT at inference.
 
+## Follow-up
+
+Short implementation validation found that a direct coefficient-correction head was weak or harmful depending on supervision, while an endpoint-preserving path-shape refiner captured a stable part of the oracle gain:
+
+- 20-batch official eval: `ADE@20 0.22843 -> 0.22085`, `FDE@20` unchanged.
+- 50-batch official eval: `ADE@20 0.2296 -> 0.2219`, `FDE@20` unchanged.
+
+See `notes/experiments/2026-04-27_endpoint_shape_refiner_probe.md`.

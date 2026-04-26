@@ -94,6 +94,9 @@ def build_parser():
     parser.add_argument("--no_coupled_decoder", dest="coupled_decoder", action="store_false")
     parser.set_defaults(coupled_decoder=None)
     parser.add_argument("--coupled_decoder_iters", type=int, default=None)
+    parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
+    parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
+    parser.set_defaults(endpoint_shape_refiner=None)
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
@@ -190,6 +193,19 @@ def build_parser():
     parser.add_argument("--disable_refiner", action="store_true")
 
     parser.add_argument("--save_dir", type=str, default="save_model")
+    parser.add_argument("--init_checkpoint", type=str, default="", help="Initialize model weights from a checkpoint.")
+    parser.add_argument("--allow_partial_init", action="store_true", help="Allow missing/unexpected keys for init_checkpoint.")
+    parser.add_argument(
+        "--freeze_backbone_except_new_heads",
+        action="store_true",
+        help="Train only newly added heads after init_checkpoint.",
+    )
+    parser.add_argument(
+        "--freeze_backbone_except_coeff_correction",
+        dest="freeze_backbone_except_new_heads",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
     parser.add_argument("--limit_eval_batches", type=int, default=0)
@@ -273,6 +289,8 @@ def apply_training_defaults(args):
         args.coupled_decoder = bool(uses_validated_basis_profile)
     if args.coupled_decoder_iters is None:
         args.coupled_decoder_iters = 2 if args.coupled_decoder else 0
+    if args.endpoint_shape_refiner is None:
+        args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.micro_coeff_anchors is None:
         args.micro_coeff_anchors = True
 
@@ -472,10 +490,54 @@ def build_model(args, model_artifact):
         candidate_dense_topk=args.candidate_dense_topk,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
+        endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
     )
+
+
+def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=False):
+    if not checkpoint_path:
+        return None
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("model", checkpoint)
+    load_result = model.load_state_dict(state_dict, strict=not allow_partial)
+    missing = list(getattr(load_result, "missing_keys", []))
+    unexpected = list(getattr(load_result, "unexpected_keys", []))
+    if (missing or unexpected) and not allow_partial:
+        raise RuntimeError(f"Checkpoint init mismatch: missing={missing}, unexpected={unexpected}")
+    print(
+        "[Init] loaded "
+        f"{checkpoint_path} missing={len(missing)} unexpected={len(unexpected)}"
+    )
+    if missing:
+        print("[Init] missing keys:", ", ".join(missing[:12]) + (" ..." if len(missing) > 12 else ""))
+    if unexpected:
+        print("[Init] unexpected keys:", ", ".join(unexpected[:12]) + (" ..." if len(unexpected) > 12 else ""))
+    return checkpoint
+
+
+def apply_freeze_policy(model, args):
+    if not args.freeze_backbone_except_new_heads:
+        return
+    trainable_modules = [
+        module
+        for module in (getattr(model, "endpoint_shape_refiner", None),)
+        if module is not None
+    ]
+    if not trainable_modules:
+        raise RuntimeError(
+            "--freeze_backbone_except_new_heads requires --endpoint_shape_refiner."
+        )
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+    for module in trainable_modules:
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+    trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    total = sum(parameter.numel() for parameter in model.parameters())
+    print(f"[Freeze] trainable_params={trainable} total_params={total}")
 
 
 def move_batch_to_device(batch, device):
@@ -856,8 +918,18 @@ def main():
 
     eval_loader = build_eval_loader(eval_dataset, args)
     model = build_model(args, model_artifact).to(device)
+    initialize_from_checkpoint(
+        model,
+        args.init_checkpoint,
+        device,
+        allow_partial=args.allow_partial_init,
+    )
+    apply_freeze_policy(model, args)
+    trainable_params = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not trainable_params:
+        raise RuntimeError("No trainable parameters remain after applying freeze policy.")
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        trainable_params,
         lr=args.stage_a_lr,
         betas=(args.beta1, args.beta2),
         weight_decay=args.weight_decay,
@@ -911,6 +983,7 @@ def main():
         "candidate_dense_topk": args.candidate_dense_topk,
         "coupled_decoder": bool(args.coupled_decoder),
         "coupled_decoder_iters": args.coupled_decoder_iters,
+        "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "anchor_recon_supervision": args.anchor_recon_supervision,
         "projection_supervision": args.projection_supervision,
@@ -923,6 +996,8 @@ def main():
         "lambda_projection_path": args.lambda_projection_path,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
+        "init_checkpoint": args.init_checkpoint,
+        "freeze_backbone_except_new_heads": bool(args.freeze_backbone_except_new_heads),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(
