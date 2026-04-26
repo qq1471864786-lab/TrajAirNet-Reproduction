@@ -44,3 +44,13 @@ Do not promote router focal/frequency weighting for now.
 Known remaining bottleneck:
 
 Bucket diagnostics show the new loss mainly improves router-hit, rare, and top1-miss samples. Router-miss samples remain weak and should be the next investigation target.
+
+Follow-up probes not promoted:
+
+| Probe | ADE@20 | FDE@20 | Top1_ADE | rare_FDE@20 | Decision |
+|---|---:|---:|---:|---:|---|
+| `topk_proto=20`, `micro_per_proto=1` | 0.24706 | 0.32504 | 0.63609 | 0.83087 | Not promoted: ADE did not beat coeff=0.10 baseline. |
+| `endpoint_residual_supervision=hit_only` | 0.24710 | 0.33451 | 0.64769 | 0.87523 | Not promoted: no ADE gain. |
+| `lambda_gt_proto_coeff=0.15` | 0.24413 | 0.33534 | 0.63444 | 0.87026 | Not promoted: ADE gain is tiny and FDE/rare regress. |
+| `lambda_gt_proto_coeff=0.20` | 0.24521 | 0.33517 | 0.64305 | 0.87409 | Not promoted: worse than coeff=0.10 baseline. |
+| `endpoint_conditioning=proto` | 0.25857 | 0.33708 | 0.63926 | 0.90616 | Not promoted: lagged before OOM at refiner start. |
