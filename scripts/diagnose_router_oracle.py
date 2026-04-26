@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -84,6 +85,31 @@ def build_model(config, checkpoint):
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
     )
+
+
+def load_checkpoint_state(model, checkpoint, dropout):
+    state_dict = checkpoint["model"]
+    if "prototype_router.endpoint_head.0.weight" in state_dict:
+        device = next(model.parameters()).device
+        first_weight = state_dict["prototype_router.endpoint_head.0.weight"]
+        last_weight = state_dict["prototype_router.endpoint_head.3.weight"]
+        model.prototype_router.endpoint_head = nn.Sequential(
+            nn.Linear(first_weight.shape[1], first_weight.shape[0]),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(last_weight.shape[1], last_weight.shape[0]),
+        ).to(device)
+        load_result = model.load_state_dict(state_dict, strict=False)
+        unexpected = [
+            key for key in load_result.unexpected_keys if not key.startswith("prototype_router.generic_endpoint_head")
+        ]
+        missing = [
+            key for key in load_result.missing_keys if not key.startswith("prototype_router.generic_endpoint_head")
+        ]
+        if missing or unexpected:
+            raise RuntimeError(f"Checkpoint compatibility load mismatch: missing={missing}, unexpected={unexpected}")
+        return
+    model.load_state_dict(state_dict)
 
 
 def build_dataset(config, checkpoint, dataset_name, split):
@@ -189,7 +215,7 @@ def _finalize_metric_accumulators(accumulators):
     return averaged
 
 
-def evaluate_variant(model, loader, device, config, variant, use_amp, limit_eval_batches):
+def evaluate_variant(model, loader, device, config, variant, use_amp, limit_eval_batches, eval_enable_refiner=True):
     primary_k = config.get("eval_topk_primary", 5)
     secondary_k = config.get("eval_topk_secondary", 20)
     metric_names = metric_names_for_protocol(primary_k, secondary_k)
@@ -234,8 +260,13 @@ def evaluate_variant(model, loader, device, config, variant, use_amp, limit_eval
             if limit_eval_batches and batch_index >= limit_eval_batches:
                 break
             batch = move_batch_to_device(raw_batch, device)
-            force_gt = variant in {"force_gt_proto", "force_gt_no_refiner"}
-            enable_refiner = variant not in {"no_refiner", "force_gt_no_refiner"}
+            force_gt = variant in {"force_gt_proto", "force_gt_no_refiner", "with_refiner_force_gt"}
+            if variant in {"no_refiner", "force_gt_no_refiner"}:
+                enable_refiner = False
+            elif variant in {"with_refiner", "with_refiner_force_gt"}:
+                enable_refiner = True
+            else:
+                enable_refiner = bool(eval_enable_refiner)
             with autocast_context(device, use_amp):
                 outputs = model(
                     batch["obs_xyz"],
@@ -361,6 +392,7 @@ def main():
     use_amp = device.type == "cuda" and not args.no_amp
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = checkpoint["config"]
+    eval_enable_refiner = bool(checkpoint.get("meta", {}).get("eval_enable_refiner", True))
     dataset_name = args.dataset_name or config["dataset_name"]
     dataset = build_dataset(config, checkpoint, dataset_name, args.split)
     loader = DataLoader(
@@ -372,14 +404,18 @@ def main():
         pin_memory=device.type == "cuda",
     )
     model = build_model(config, checkpoint).to(device)
-    model.load_state_dict(checkpoint["model"])
+    load_checkpoint_state(model, checkpoint, config["dropout"])
 
     variants = ["actual", "force_gt_proto", "no_refiner", "force_gt_no_refiner"]
+    if not eval_enable_refiner:
+        variants.extend(["with_refiner", "with_refiner_force_gt"])
     result = {
         "checkpoint": args.checkpoint,
         "dataset_name": dataset_name,
         "split": args.split,
+        "eval_enable_refiner": eval_enable_refiner,
         "diagnostic_notes": {
+            "actual": "Uses checkpoint meta.eval_enable_refiner, matching test.py baseline evaluation.",
             "residual_loss_probe.current_all": (
                 "Current training behavior: if GT prototype is absent from top-k, slot 0 is used by argmax."
             ),
@@ -399,6 +435,7 @@ def main():
             variant,
             use_amp,
             args.limit_eval_batches,
+            eval_enable_refiner=eval_enable_refiner,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 

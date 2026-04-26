@@ -12,6 +12,7 @@ warnings.filterwarnings(
 )
 
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -92,6 +93,31 @@ def build_model(config, checkpoint):
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
     )
+
+
+def load_checkpoint_state(model, checkpoint, dropout):
+    state_dict = checkpoint["model"]
+    if "prototype_router.endpoint_head.0.weight" in state_dict:
+        device = next(model.parameters()).device
+        first_weight = state_dict["prototype_router.endpoint_head.0.weight"]
+        last_weight = state_dict["prototype_router.endpoint_head.3.weight"]
+        model.prototype_router.endpoint_head = nn.Sequential(
+            nn.Linear(first_weight.shape[1], first_weight.shape[0]),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(last_weight.shape[1], last_weight.shape[0]),
+        ).to(device)
+        load_result = model.load_state_dict(state_dict, strict=False)
+        unexpected = [
+            key for key in load_result.unexpected_keys if not key.startswith("prototype_router.generic_endpoint_head")
+        ]
+        missing = [
+            key for key in load_result.missing_keys if not key.startswith("prototype_router.generic_endpoint_head")
+        ]
+        if missing or unexpected:
+            raise RuntimeError(f"Checkpoint compatibility load mismatch: missing={missing}, unexpected={unexpected}")
+        return
+    model.load_state_dict(state_dict)
 
 
 def resolve_eval_enable_refiner(checkpoint):
@@ -266,7 +292,7 @@ def main():
     loader = build_loader(dataset, args.batch_size, args, config["max_agents"])
 
     model = build_model(config, checkpoint).to(device)
-    model.load_state_dict(checkpoint["model"])
+    load_checkpoint_state(model, checkpoint, config["dropout"])
     metrics = evaluate(
         model,
         loader,

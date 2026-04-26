@@ -181,7 +181,7 @@ def _collect_motion_baselines(dataset, indices):
     }
 
 
-def _evaluate_model(model, loader, device, config, variant, limit_batches=0):
+def _evaluate_model(model, loader, device, config, variant, limit_batches=0, eval_enable_refiner=True):
     model.eval()
     primary_k = config.get("eval_topk_primary", 5)
     secondary_k = config.get("eval_topk_secondary", 20)
@@ -208,7 +208,13 @@ def _evaluate_model(model, loader, device, config, variant, limit_batches=0):
                 key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
                 for key, value in raw_batch.items()
             }
-            force_gt = variant == "force_gt_proto"
+            force_gt = variant in {"force_gt_proto", "force_gt_no_refiner", "with_refiner_force_gt"}
+            if variant in {"no_refiner", "force_gt_no_refiner"}:
+                enable_refiner = False
+            elif variant in {"with_refiner", "with_refiner_force_gt"}:
+                enable_refiner = True
+            else:
+                enable_refiner = bool(eval_enable_refiner)
             with torch.autocast(device_type="cuda", dtype=torch.float16) if device.type == "cuda" else nullcontext():
                 state = _forward_with_local_state(
                     model,
@@ -216,7 +222,7 @@ def _evaluate_model(model, loader, device, config, variant, limit_batches=0):
                     batch["obs_mask"],
                     gt_proto_id=batch["gt_proto_id"] if force_gt else None,
                     force_gt_proto=force_gt,
-                    enable_refiner=True,
+                    enable_refiner=enable_refiner,
                 )
             outputs = state["outputs"]
             metrics, count, rare_count = summarize_batch_metrics(
@@ -410,6 +416,7 @@ def main():
     device = torch.device(args.device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     config = checkpoint["config"]
+    eval_enable_refiner = bool(checkpoint.get("meta", {}).get("eval_enable_refiner", True))
     dataset_name = args.dataset_name or config["dataset_name"]
     artifact = _load_artifact(checkpoint)
     project_root = os.getcwd()
@@ -502,6 +509,7 @@ def main():
     result = {
         "dataset_name": dataset_name,
         "checkpoint": args.checkpoint,
+        "eval_enable_refiner": eval_enable_refiner,
         "samples": {
             "test_count": int(test_count),
             "train_bank_count": int(train_count),
@@ -527,10 +535,45 @@ def main():
             "gt_proto_mean_path_plus_global_local_basis_ls": _metric_from_paths(global_local_recon, test_future),
         },
         "model_variants": {
-            "actual": _evaluate_model(model, loader, device, config, "actual", args.limit_model_batches),
-            "force_gt_proto": _evaluate_model(model, loader, device, config, "force_gt_proto", args.limit_model_batches),
+            "actual": _evaluate_model(
+                model,
+                loader,
+                device,
+                config,
+                "actual",
+                args.limit_model_batches,
+                eval_enable_refiner=eval_enable_refiner,
+            ),
+            "force_gt_proto": _evaluate_model(
+                model,
+                loader,
+                device,
+                config,
+                "force_gt_proto",
+                args.limit_model_batches,
+                eval_enable_refiner=eval_enable_refiner,
+            ),
         },
     }
+    if not eval_enable_refiner:
+        result["model_variants"]["with_refiner"] = _evaluate_model(
+            model,
+            loader,
+            device,
+            config,
+            "with_refiner",
+            args.limit_model_batches,
+            eval_enable_refiner=eval_enable_refiner,
+        )
+        result["model_variants"]["with_refiner_force_gt"] = _evaluate_model(
+            model,
+            loader,
+            device,
+            config,
+            "with_refiner_force_gt",
+            args.limit_model_batches,
+            eval_enable_refiner=eval_enable_refiner,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 
 
