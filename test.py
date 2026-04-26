@@ -56,10 +56,6 @@ def autocast_context(device, use_amp):
 
 
 def build_model(config, checkpoint):
-    micro_endpoint_anchors = checkpoint.get("micro_endpoint_anchors")
-    micro_endpoint_scale = config.get("micro_endpoint_scale")
-    if micro_endpoint_scale is None:
-        micro_endpoint_scale = 1.0 if micro_endpoint_anchors is not None and config.get("micro_coeff_anchors", False) else 0.0
     return ProtoBasisNet(
         obs_len=config["obs"],
         pred_len=config["preds"],
@@ -77,7 +73,6 @@ def build_model(config, checkpoint):
         two_stage_decoder=bool(config.get("two_stage_decoder", False)),
         two_stage_update_endpoint=not config.get("no_two_stage_update_endpoint", False),
         two_stage_update_coeff=not config.get("no_two_stage_update_coeff", False),
-        two_stage_rescore=bool(config.get("two_stage_rescore", True)),
         dropout=config["dropout"],
         proto_summary_5d=torch.tensor(checkpoint["proto_summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(checkpoint["proto_freq"], dtype=torch.float32),
@@ -91,11 +86,7 @@ def build_model(config, checkpoint):
         micro_coeff_anchors=torch.tensor(checkpoint.get("micro_coeff_anchors"), dtype=torch.float32)
         if checkpoint.get("micro_coeff_anchors") is not None
         else None,
-        micro_endpoint_anchors=torch.tensor(micro_endpoint_anchors, dtype=torch.float32)
-        if micro_endpoint_anchors is not None
-        else None,
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
-        micro_endpoint_scale=float(micro_endpoint_scale),
         endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),

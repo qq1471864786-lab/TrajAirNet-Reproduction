@@ -41,10 +41,8 @@ LOSS_STAT_KEYS = (
     "xyz",
     "fde",
     "proto",
-    "proto_soft",
     "res",
     "score",
-    "rank",
     "div",
     "coeff",
     "smooth",
@@ -83,15 +81,12 @@ def build_parser():
     parser.add_argument("--no_two_stage_decoder", dest="two_stage_decoder", action="store_false")
     parser.add_argument("--no_two_stage_update_endpoint", action="store_true")
     parser.add_argument("--no_two_stage_update_coeff", action="store_true")
-    parser.add_argument("--two_stage_rescore", dest="two_stage_rescore", action="store_true")
-    parser.add_argument("--no_two_stage_rescore", dest="two_stage_rescore", action="store_false")
-    parser.set_defaults(two_stage_decoder=None, two_stage_rescore=None)
+    parser.set_defaults(two_stage_decoder=None)
     parser.add_argument("--topk_proto", type=int, default=5)
     parser.add_argument("--micro_per_proto", type=int, default=4)
     parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
-    parser.add_argument("--micro_endpoint_scale", type=float, default=0.0)
     parser.add_argument(
         "--endpoint_conditioning",
         type=str,
@@ -120,9 +115,7 @@ def build_parser():
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
     parser.add_argument("--min_lr", type=float, default=1.5e-5)
     parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra refiner epochs.")
-    parser.add_argument("--stage_b_rank_weight", type=float, default=0.0)
     parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
-    parser.add_argument("--stage_c_rank_weight", type=float, default=0.0)
     parser.add_argument("--stage_c_div_weight", type=float, default=2.0)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--beta1", type=float, default=0.9)
@@ -141,18 +134,8 @@ def build_parser():
     parser.add_argument("--lambda_xyz", type=float, default=1.0)
     parser.add_argument("--lambda_fde", type=float, default=1.0)
     parser.add_argument("--lambda_proto", type=float, default=0.35)
-    parser.add_argument("--lambda_proto_soft", type=float, default=0.0)
-    parser.add_argument("--proto_soft_topm", type=int, default=5)
-    parser.add_argument("--proto_soft_temperature", type=float, default=1.0)
-    parser.add_argument(
-        "--proto_aux_stage",
-        type=str,
-        default="all",
-        choices=["all", "pre_refiner", "refiner", "basis_warmup"],
-    )
     parser.add_argument("--lambda_res", type=float, default=0.2)
     parser.add_argument("--lambda_score", type=float, default=0.03)
-    parser.add_argument("--lambda_rank", type=float, default=0.1)
     parser.add_argument("--lambda_div", type=float, default=0.05)
     parser.add_argument("--lambda_coeff", type=float, default=0.02)
     parser.add_argument("--lambda_smooth", type=float, default=0.10)
@@ -245,8 +228,6 @@ def apply_training_defaults(args):
         args.support_aware_local_basis = bool(uses_validated_basis_profile and args.local_basis_dim > 0)
     if args.two_stage_decoder is None:
         args.two_stage_decoder = bool(uses_validated_basis_profile)
-    if args.two_stage_rescore is None:
-        args.two_stage_rescore = not uses_validated_basis_profile
     if args.micro_coeff_anchors is None:
         args.micro_coeff_anchors = True
 
@@ -312,7 +293,6 @@ def stage_config(epoch, args):
             "name": "basis_warmup",
             "enable_refiner": False,
             "force_gt_proto": True,
-            "rank_weight": 0.0,
             "div_weight": 0.0,
             "rare_weight": 1.0,
         }
@@ -321,7 +301,6 @@ def stage_config(epoch, args):
             "name": "joint_no_refiner",
             "enable_refiner": False,
             "force_gt_proto": False,
-            "rank_weight": args.stage_b_rank_weight,
             "div_weight": args.stage_b_div_weight,
             "rare_weight": 1.0,
         }
@@ -332,7 +311,6 @@ def stage_config(epoch, args):
         "name": stage_name,
         "enable_refiner": True,
         "force_gt_proto": False,
-        "rank_weight": args.stage_c_rank_weight,
         "div_weight": args.stage_c_div_weight,
         "rare_weight": 1.5,
     }
@@ -413,7 +391,6 @@ def build_model(args, model_artifact):
         two_stage_decoder=bool(args.two_stage_decoder),
         two_stage_update_endpoint=not args.no_two_stage_update_endpoint,
         two_stage_update_coeff=not args.no_two_stage_update_coeff,
-        two_stage_rescore=bool(args.two_stage_rescore),
         dropout=args.dropout,
         proto_summary_5d=torch.tensor(model_artifact["summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(model_artifact["frequency"], dtype=torch.float32),
@@ -427,15 +404,7 @@ def build_model(args, model_artifact):
             ),
             dtype=torch.float32,
         ),
-        micro_endpoint_anchors=torch.tensor(
-            model_artifact.get(
-                "micro_endpoint_anchors",
-                np.zeros((args.n_proto, args.micro_per_proto, 3), dtype=np.float32),
-            ),
-            dtype=torch.float32,
-        ),
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
-        micro_endpoint_scale=args.micro_endpoint_scale,
         endpoint_conditioning=args.endpoint_conditioning,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
@@ -505,7 +474,6 @@ def checkpoint_payload(model, optimizer, epoch, global_step, best_records, model
         "prototype_mean_path": model_artifact["prototype_mean_path"],
         "local_basis_bank": model_artifact["local_basis_bank"],
         "micro_coeff_anchors": model_artifact.get("micro_coeff_anchors"),
-        "micro_endpoint_anchors": model_artifact.get("micro_endpoint_anchors"),
         "config": config,
         "meta": meta,
     }
@@ -735,11 +703,9 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"xyz={format_scalar(loss_stats['xyz'])}",
         f"fde={format_scalar(loss_stats['fde'])}",
         f"proto={format_scalar(loss_stats['proto'])}",
-        f"proto_soft={format_scalar(loss_stats['proto_soft'])}",
         f"res={format_scalar(loss_stats['res'])}",
         f"res_hit={format_scalar(loss_stats['res_hit_rate'])}",
         f"score={format_scalar(loss_stats['score'])}",
-        f"rank={format_scalar(loss_stats['rank'])}",
         f"div={format_scalar(loss_stats['div'])}",
         f"coeff={format_scalar(loss_stats['coeff'])}",
         f"smooth={format_scalar(loss_stats['smooth'])}",
@@ -819,16 +785,11 @@ def main():
         lambda_xyz=args.lambda_xyz,
         lambda_fde=args.lambda_fde,
         lambda_proto=args.lambda_proto,
-        lambda_proto_soft=args.lambda_proto_soft,
         lambda_res=args.lambda_res,
         lambda_score=args.lambda_score,
-        lambda_rank=args.lambda_rank,
         lambda_div=args.lambda_div,
         lambda_coeff=args.lambda_coeff,
         lambda_smooth=args.lambda_smooth,
-        proto_soft_topm=args.proto_soft_topm,
-        proto_soft_temperature=args.proto_soft_temperature,
-        proto_aux_stage=args.proto_aux_stage,
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,

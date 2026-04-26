@@ -465,7 +465,6 @@ def default_train_args() -> list[str]:
         "2",
         "--support_aware_local_basis",
         "--two_stage_decoder",
-        "--no_two_stage_rescore",
         "--endpoint_conditioning",
         "proto",
         "--endpoint_residual_supervision",

@@ -252,10 +252,9 @@ def _solve_basis_coefficients(future_local, basis_bank, pred_len):
     return coeff.T.astype(np.float32)
 
 
-def _fit_micro_anchors(
+def _fit_micro_coeff_anchors(
     future_local_bank,
     labels,
-    proto_centers,
     basis_bank,
     pred_len,
     n_proto,
@@ -265,13 +264,9 @@ def _fit_micro_anchors(
 ):
     basis_dim = int(basis_bank.shape[0])
     if micro_per_proto <= 0 or basis_dim <= 0:
-        return (
-            np.zeros((n_proto, max(int(micro_per_proto), 0), basis_dim), dtype=np.float32),
-            np.zeros((n_proto, max(int(micro_per_proto), 0), 3), dtype=np.float32),
-        )
+        return np.zeros((n_proto, max(int(micro_per_proto), 0), basis_dim), dtype=np.float32)
 
     coeff_anchors = np.zeros((n_proto, micro_per_proto, basis_dim), dtype=np.float32)
-    endpoint_anchors = np.zeros((n_proto, micro_per_proto, 3), dtype=np.float32)
     rng = np.random.default_rng(random_state)
     progress = tqdm(
         range(n_proto),
@@ -292,32 +287,20 @@ def _fit_micro_anchors(
             basis_bank,
             pred_len,
         )
-        endpoint_samples = proto_future[:, -1, :] - proto_centers[proto_id, :3][None, :]
         if coeff_samples.shape[0] >= micro_per_proto:
-            centers, micro_labels = _run_kmeans(
+            centers, _ = _run_kmeans(
                 coeff_samples,
                 n_clusters=micro_per_proto,
                 random_state=random_state + proto_id,
                 iters=30,
             )
             coeff_anchors[proto_id] = centers
-            endpoint_centers = np.zeros((micro_per_proto, 3), dtype=np.float32)
-            for micro_id in range(micro_per_proto):
-                mask = micro_labels == micro_id
-                if mask.any():
-                    endpoint_centers[micro_id] = endpoint_samples[mask].mean(axis=0)
-                else:
-                    endpoint_centers[micro_id] = endpoint_samples.mean(axis=0)
-            endpoint_anchors[proto_id] = endpoint_centers - endpoint_centers.mean(axis=0, keepdims=True)
         else:
             coeff_anchors[proto_id, : coeff_samples.shape[0]] = coeff_samples
             coeff_anchors[proto_id, coeff_samples.shape[0] :] = coeff_samples[-1]
-            endpoint_anchors[proto_id, : endpoint_samples.shape[0]] = endpoint_samples
-            endpoint_anchors[proto_id, endpoint_samples.shape[0] :] = endpoint_samples[-1]
-            endpoint_anchors[proto_id] -= endpoint_anchors[proto_id].mean(axis=0, keepdims=True)
         progress.set_postfix(proto=proto_id + 1, refresh=False)
     progress.close()
-    return coeff_anchors.astype(np.float32), endpoint_anchors.astype(np.float32)
+    return coeff_anchors.astype(np.float32)
 
 
 def _empty_sample_store(max_agents, pred_len):
@@ -371,7 +354,6 @@ class ProtoBasisArtifact:
     prototype_mean_path: np.ndarray
     local_basis_bank: np.ndarray
     micro_coeff_anchors: np.ndarray
-    micro_endpoint_anchors: np.ndarray
     n_proto: int
     basis_dim: int
     local_basis_dim: int
@@ -391,7 +373,6 @@ class ProtoBasisArtifact:
             "prototype_mean_path": self.prototype_mean_path,
             "local_basis_bank": self.local_basis_bank,
             "micro_coeff_anchors": self.micro_coeff_anchors,
-            "micro_endpoint_anchors": self.micro_endpoint_anchors,
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
             "local_basis_dim": self.local_basis_dim,
@@ -518,15 +499,10 @@ class ProtoBasisSceneDataset(Dataset):
         default_mean_path = np.zeros((self.n_proto, self.pred_len, 3), dtype=np.float32)
         default_local_basis = np.zeros((self.n_proto, self.local_basis_dim, self.pred_len, 3), dtype=np.float32)
         default_micro_coeff = np.zeros((self.n_proto, self.micro_per_proto, self.basis_dim), dtype=np.float32)
-        default_micro_endpoint = np.zeros((self.n_proto, self.micro_per_proto, 3), dtype=np.float32)
         self.prototype_mean_path = np.asarray(model_artifact.get("prototype_mean_path", default_mean_path), dtype=np.float32)
         self.local_basis_bank = np.asarray(model_artifact.get("local_basis_bank", default_local_basis), dtype=np.float32)
         self.micro_coeff_anchors = np.asarray(
             model_artifact.get("micro_coeff_anchors", default_micro_coeff),
-            dtype=np.float32,
-        )
-        self.micro_endpoint_anchors = np.asarray(
-            model_artifact.get("micro_endpoint_anchors", default_micro_endpoint),
             dtype=np.float32,
         )
         self._assign_prototypes()
@@ -702,10 +678,9 @@ class ProtoBasisSceneDataset(Dataset):
                 )
             progress.set_postfix(proto=proto_id + 1, refresh=False)
         progress.close()
-        micro_coeff_anchors, micro_endpoint_anchors = _fit_micro_anchors(
+        micro_coeff_anchors = _fit_micro_coeff_anchors(
             future_bank,
             labels,
-            centers,
             basis_bank,
             pred_len=self.pred_len,
             n_proto=self.n_proto,
@@ -719,7 +694,6 @@ class ProtoBasisSceneDataset(Dataset):
             prototype_mean_path=prototype_mean_path,
             local_basis_bank=local_basis_bank,
             micro_coeff_anchors=micro_coeff_anchors,
-            micro_endpoint_anchors=micro_endpoint_anchors,
             n_proto=self.n_proto,
             basis_dim=self.basis_dim,
             local_basis_dim=self.local_basis_dim,
@@ -767,7 +741,6 @@ class ProtoBasisSceneDataset(Dataset):
             "prototype_mean_path": self.prototype_mean_path.copy(),
             "local_basis_bank": self.local_basis_bank.copy(),
             "micro_coeff_anchors": self.micro_coeff_anchors.copy(),
-            "micro_endpoint_anchors": self.micro_endpoint_anchors.copy(),
             "n_proto": self.n_proto,
             "basis_dim": self.basis_dim,
             "local_basis_dim": self.local_basis_dim,

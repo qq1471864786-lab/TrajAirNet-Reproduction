@@ -46,9 +46,6 @@ def _load_artifact(checkpoint):
         "micro_coeff_anchors": _as_numpy(checkpoint.get("micro_coeff_anchors")).astype(np.float32)
         if checkpoint.get("micro_coeff_anchors") is not None
         else None,
-        "micro_endpoint_anchors": _as_numpy(checkpoint.get("micro_endpoint_anchors")).astype(np.float32)
-        if checkpoint.get("micro_endpoint_anchors") is not None
-        else None,
         "n_proto": checkpoint["config"]["n_proto"],
         "basis_dim": checkpoint["config"]["basis_dim"],
         "local_basis_dim": checkpoint["config"].get("local_basis_dim", 0),
@@ -64,10 +61,6 @@ def _load_artifact(checkpoint):
 
 
 def _build_model(config, checkpoint):
-    micro_endpoint_anchors = checkpoint.get("micro_endpoint_anchors")
-    micro_endpoint_scale = config.get("micro_endpoint_scale")
-    if micro_endpoint_scale is None:
-        micro_endpoint_scale = 1.0 if micro_endpoint_anchors is not None and config.get("micro_coeff_anchors", False) else 0.0
     model = ProtoBasisNet(
         obs_len=config["obs"],
         pred_len=config["preds"],
@@ -85,7 +78,6 @@ def _build_model(config, checkpoint):
         two_stage_decoder=bool(config.get("two_stage_decoder", False)),
         two_stage_update_endpoint=not config.get("no_two_stage_update_endpoint", False),
         two_stage_update_coeff=not config.get("no_two_stage_update_coeff", False),
-        two_stage_rescore=bool(config.get("two_stage_rescore", True)),
         dropout=config["dropout"],
         proto_summary_5d=torch.tensor(checkpoint["proto_summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(checkpoint["proto_freq"], dtype=torch.float32),
@@ -99,11 +91,7 @@ def _build_model(config, checkpoint):
         micro_coeff_anchors=torch.tensor(checkpoint.get("micro_coeff_anchors"), dtype=torch.float32)
         if checkpoint.get("micro_coeff_anchors") is not None
         else None,
-        micro_endpoint_anchors=torch.tensor(micro_endpoint_anchors, dtype=torch.float32)
-        if micro_endpoint_anchors is not None
-        else None,
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
-        micro_endpoint_scale=float(micro_endpoint_scale),
         endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
@@ -341,7 +329,6 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
         disable_router=model.disable_router,
     )
     micro_coeff_anchor = model.micro_coeff_anchors[top_proto_idx] if model.has_micro_coeff_anchors else None
-    micro_endpoint_anchor = model.micro_endpoint_anchors[top_proto_idx] if model.has_micro_endpoint_anchors else None
     query_feat, coeff, pred_score, difficulty_gate, coeff_delta = model.query_decoder(
         proto_token,
         endpoint_local,
@@ -351,12 +338,6 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
         micro_coeff_anchor=micro_coeff_anchor,
     )
     endpoint_mode_local = endpoint_local.repeat_interleave(model.n_micro, dim=1)
-    if micro_endpoint_anchor is not None and model.micro_endpoint_scale != 0.0:
-        endpoint_mode_local = endpoint_mode_local + model.micro_endpoint_scale * micro_endpoint_anchor.reshape(
-            endpoint_mode_local.size(0),
-            endpoint_mode_local.size(1),
-            3,
-        )
     anchor_local = build_anchor(endpoint_mode_local, model.anchor_alpha.to(endpoint_mode_local))
     coarse_local = model.basis_bank(anchor_local, coeff)
     active_query = query_feat
@@ -365,13 +346,10 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
         stage2_query = query_feat + model.stage2_proj(stage2_input)
         if model.two_stage_update_endpoint:
             endpoint_mode_local = endpoint_mode_local + model.stage2_endpoint_head(stage2_query)
-        if model.two_stage_update_coeff:
-            stage2_coeff_delta = model.stage2_coeff_head(stage2_query)
-            coeff = coeff + stage2_coeff_delta
-            coeff_delta = coeff_delta + stage2_coeff_delta
-        if model.two_stage_rescore:
-            pred_score = model.query_decoder.score_head(stage2_query).squeeze(-1)
-            difficulty_gate = torch.sigmoid(model.query_decoder.gate_head(stage2_query)).squeeze(-1)
+            if model.two_stage_update_coeff:
+                stage2_coeff_delta = model.stage2_coeff_head(stage2_query)
+                coeff = coeff + stage2_coeff_delta
+                coeff_delta = coeff_delta + stage2_coeff_delta
         anchor_local = build_anchor(endpoint_mode_local, model.anchor_alpha.to(endpoint_mode_local))
         coarse_local = model.basis_bank(anchor_local, coeff)
         active_query = stage2_query
