@@ -89,6 +89,7 @@ def build_model(config, checkpoint):
         else None,
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
         endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
+        candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),

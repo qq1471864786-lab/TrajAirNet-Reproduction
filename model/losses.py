@@ -72,13 +72,11 @@ def _prototype_loss(logits, targets, proto_frequency=None, focal_gamma=0.0, freq
 
 
 def _gt_proto_aligned_losses(pred_xyz, gt_xyz, top_proto_idx, gt_proto_id, ade):
-    topk_proto = top_proto_idx.size(1)
-    if topk_proto <= 0 or pred_xyz.size(1) % topk_proto != 0:
+    if top_proto_idx is None or top_proto_idx.size(1) != pred_xyz.size(1):
         zero = pred_xyz.sum() * 0.0
         return zero, zero, pred_xyz.new_tensor(0.0)
 
-    n_micro = pred_xyz.size(1) // topk_proto
-    match_mode = top_proto_idx.eq(gt_proto_id[:, None]).repeat_interleave(n_micro, dim=1)
+    match_mode = top_proto_idx.eq(gt_proto_id[:, None])
     hit_mask = match_mode.any(dim=1)
     if not hit_mask.any():
         zero = pred_xyz.sum() * 0.0
@@ -96,12 +94,10 @@ def _gt_proto_coeff_loss(coeff, gt_basis_coeff, top_proto_idx, gt_proto_id):
     if gt_basis_coeff is None or coeff.size(-1) != gt_basis_coeff.size(-1) or coeff.size(-1) == 0:
         return coeff.sum() * 0.0
 
-    topk_proto = top_proto_idx.size(1)
-    if topk_proto <= 0 or coeff.size(1) % topk_proto != 0:
+    if top_proto_idx is None or top_proto_idx.size(1) != coeff.size(1):
         return coeff.sum() * 0.0
 
-    n_micro = coeff.size(1) // topk_proto
-    match_mode = top_proto_idx.eq(gt_proto_id[:, None]).repeat_interleave(n_micro, dim=1)
+    match_mode = top_proto_idx.eq(gt_proto_id[:, None])
     hit_mask = match_mode.any(dim=1)
     if not hit_mask.any():
         return coeff.sum() * 0.0
@@ -131,8 +127,7 @@ def _anchor_reconstruction_loss(
     ):
         return gt_local.sum() * 0.0
 
-    topk_proto = top_proto_idx.size(1)
-    if topk_proto <= 0 or coarse_local.size(1) % topk_proto != 0 or endpoint_mode_local.shape[:2] != coarse_local.shape[:2]:
+    if top_proto_idx is None or top_proto_idx.size(1) != coarse_local.size(1) or endpoint_mode_local.shape[:2] != coarse_local.shape[:2]:
         return coarse_local.sum() * 0.0
 
     alpha = torch.linspace(0.0, 1.0, steps=gt_local.size(1), device=gt_local.device, dtype=gt_local.dtype)
@@ -145,8 +140,7 @@ def _anchor_reconstruction_loss(
     if mode == "all":
         return F.smooth_l1_loss(coarse_local, target_path.detach())
     if mode == "gt_proto":
-        n_micro = coarse_local.size(1) // topk_proto
-        match_mode = top_proto_idx.eq(gt_proto_id[:, None]).repeat_interleave(n_micro, dim=1)
+        match_mode = top_proto_idx.eq(gt_proto_id[:, None])
         if not match_mode.any():
             return coarse_local.sum() * 0.0
         return F.smooth_l1_loss(coarse_local[match_mode], target_path.detach()[match_mode])
@@ -209,6 +203,13 @@ class ProtoBasisLoss(nn.Module):
         proto_logits = outputs["proto_logits"]
         top_proto_idx = outputs["top_proto_idx"]
         aux = outputs["aux"]
+        candidate_proto_idx = aux.get("candidate_proto_idx")
+        if candidate_proto_idx is None:
+            topk_proto = top_proto_idx.size(1)
+            if topk_proto > 0 and pred_xyz.size(1) % topk_proto == 0:
+                candidate_proto_idx = top_proto_idx.repeat_interleave(pred_xyz.size(1) // topk_proto, dim=1)
+            else:
+                candidate_proto_idx = None
         gt_xyz = batch["fut_xyz"]
         gt_proto_id = batch["gt_proto_id"]
         gt_proto_residual = batch["gt_proto_residual"]
@@ -256,14 +257,14 @@ class ProtoBasisLoss(nn.Module):
         gt_proto_shape_loss, gt_proto_fde_loss, gt_proto_hit_rate = _gt_proto_aligned_losses(
             pred_xyz,
             gt_xyz,
-            top_proto_idx,
+            candidate_proto_idx,
             gt_proto_id,
             ade,
         )
         gt_proto_coeff_loss = _gt_proto_coeff_loss(
             aux["coeff"],
             gt_basis_coeff,
-            top_proto_idx,
+            candidate_proto_idx,
             gt_proto_id,
         )
         anchor_recon_loss = _anchor_reconstruction_loss(
@@ -272,7 +273,7 @@ class ProtoBasisLoss(nn.Module):
             batch["fut_local"],
             aux.get("basis_pinv"),
             aux.get("basis_matrix"),
-            top_proto_idx,
+            candidate_proto_idx,
             gt_proto_id,
             self.anchor_recon_supervision,
         )

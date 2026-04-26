@@ -89,6 +89,7 @@ def build_parser():
     parser.set_defaults(two_stage_decoder=None)
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
+    parser.add_argument("--candidate_dense_topk", type=int, default=None)
     parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
@@ -235,9 +236,11 @@ def apply_training_defaults(args):
     if args.n_proto is None:
         args.n_proto = 96 if is_unified and is_small_dataset else 64
     if args.topk_proto is None:
-        args.topk_proto = 10 if is_unified and is_main_dataset else 5
+        args.topk_proto = 15 if is_unified and is_main_dataset else 5
     if args.micro_per_proto is None:
         args.micro_per_proto = 2 if is_unified and is_main_dataset else 4
+    if args.candidate_dense_topk is None:
+        args.candidate_dense_topk = 5 if is_unified and is_main_dataset else 0
     if args.d_model is None:
         args.d_model = 128 if is_unified and is_main_dataset else 96
     if args.ff_dim is None:
@@ -439,6 +442,7 @@ def build_model(args, model_artifact):
         ),
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
         endpoint_conditioning=args.endpoint_conditioning,
+        candidate_dense_topk=args.candidate_dense_topk,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
@@ -870,6 +874,7 @@ def main():
         "n_proto": args.n_proto,
         "basis_dim": args.basis_dim,
         "endpoint_conditioning": args.endpoint_conditioning,
+        "candidate_dense_topk": args.candidate_dense_topk,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "anchor_recon_supervision": args.anchor_recon_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),

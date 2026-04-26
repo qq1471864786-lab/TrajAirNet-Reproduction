@@ -93,6 +93,7 @@ def _build_model(config, checkpoint):
         else None,
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
         endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
+        candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -359,22 +360,32 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
         anchor_local = build_anchor(endpoint_mode_local, model.anchor_alpha.to(endpoint_mode_local))
         coarse_local = model.basis_bank(anchor_local, coeff)
         active_query = stage2_query
+    candidate_proto_idx = top_proto_idx.repeat_interleave(model.n_micro, dim=1)
+    if getattr(model, "candidate_keep_indices", None) is not None and model.candidate_keep_indices.numel() > 0:
+        keep = model.candidate_keep_indices.to(device=coeff.device)
+        query_feat = query_feat.index_select(1, keep)
+        coeff = coeff.index_select(1, keep)
+        pred_score = pred_score.index_select(1, keep)
+        difficulty_gate = difficulty_gate.index_select(1, keep)
+        coeff_delta = coeff_delta.index_select(1, keep)
+        endpoint_mode_local = endpoint_mode_local.index_select(1, keep)
+        coarse_local = coarse_local.index_select(1, keep)
+        active_query = active_query.index_select(1, keep)
+        candidate_proto_idx = candidate_proto_idx.index_select(1, keep)
     if model.has_local_basis:
-        proto_mean_path = model.prototype_mean_path[top_proto_idx]
-        proto_mean_path = proto_mean_path.repeat_interleave(model.n_micro, dim=1)
+        proto_mean_path = model.prototype_mean_path[candidate_proto_idx]
         proto_mean_endpoint = proto_mean_path[:, :, -1, :]
         aligned_proto_mean = proto_mean_path + (endpoint_mode_local - proto_mean_endpoint)[:, :, None, :]
 
-        local_basis = model.local_basis_bank[top_proto_idx]
-        local_basis = local_basis.repeat_interleave(model.n_micro, dim=1)
+        local_basis = model.local_basis_bank[candidate_proto_idx]
         local_coeff = model.local_coeff_head(active_query)
         local_residual = torch.einsum("bkm,bkmtd->bktd", local_coeff, local_basis)
         local_path = aligned_proto_mean + local_residual
         local_gate = torch.sigmoid(model.local_mix_gate(active_query)).unsqueeze(-1)
         if model.support_aware_local_basis:
-            proto_support = model.proto_frequency[top_proto_idx]
+            proto_support = model.proto_frequency[candidate_proto_idx]
             support_scale = (proto_support / model.proto_frequency.max().clamp_min(1e-6)).clamp_min(1e-6).sqrt()
-            support_scale = support_scale.repeat_interleave(model.n_micro, dim=1).unsqueeze(-1).unsqueeze(-1)
+            support_scale = support_scale.unsqueeze(-1).unsqueeze(-1)
             local_gate = local_gate * support_scale
         coarse_local = coarse_local + local_gate * (local_path - coarse_local)
     use_refiner = enable_refiner and (not model.disable_refiner)
@@ -389,6 +400,7 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
             "coeff": coeff,
             "coeff_delta": coeff_delta,
             "endpoint_residual": endpoint_residual,
+            "candidate_proto_idx": candidate_proto_idx,
             "proto_summary_5d": model.proto_summary_5d,
         },
     }

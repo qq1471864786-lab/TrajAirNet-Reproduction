@@ -2,6 +2,32 @@
 
 Status: default baseline for the next `111_days` improvement round.
 
+Update 2026-04-26 late:
+
+`111_days` now promotes rank-adaptive candidate allocation as the next ADE-oriented default:
+
+- `topk_proto = 15`
+- `micro_per_proto = 2`
+- `candidate_dense_topk = 5`
+- Effective candidates remain 20: ranks 1-5 keep 2 micro variants each, ranks 6-15 keep 1 variant each.
+
+Short/medium validation with the same `limit_train_batches=120`, `limit_eval_batches=20`:
+
+| Run | Epochs | ADE@20 | FDE@20 | rare_FDE@20 | ADE@5 | GLeV@20 | Decision |
+|---|---:|---:|---:|---:|---:|---:|---|
+| previous default, e26 | 10/4/12 | 0.24345 | 0.32565 | 0.84922 | 0.41103 | 0.10705 | superseded |
+| alloc15 dense5, e26 | 10/4/12 | 0.23876 | 0.32157 | 0.85307 | 0.39139 | 0.09892 | positive ADE/FDE, rare slightly worse |
+| previous default control, e34 | 10/4/20 | 0.23994 | 0.31876 | 0.83969 | 0.40590 | 0.10493 | control |
+| alloc15 dense5, e34 | 10/4/20 | 0.23504 | 0.32109 | 0.84510 | 0.38768 | 0.09592 | promoted for ADE |
+
+Rationale:
+
+`topk=20,micro=1` previously improved endpoint/rare behavior but lost ADE because every prototype had only one micro variant. The promoted allocation keeps two micro variants for high-confidence prototypes while using single tail variants to improve prototype coverage. This targets router-miss without increasing the evaluated candidate budget.
+
+Trade-off:
+
+The new default improves ADE@20 and ADE@5 consistently, but FDE@20, rare_FDE@20, and GLeV@20 are slightly worse than the e34 control. Keep it as an ADE-oriented baseline; do not claim it improves every metric.
+
 Update 2026-04-26:
 
 `111_days` now promotes anchor-adaptive reconstruction distillation as the next default on top of the GT-prototype coefficient baseline:

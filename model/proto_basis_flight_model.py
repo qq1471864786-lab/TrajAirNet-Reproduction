@@ -373,6 +373,7 @@ class ProtoBasisNet(nn.Module):
         micro_coeff_anchors: Optional[torch.Tensor] = None,
         use_micro_coeff_anchors=False,
         endpoint_conditioning="rank",
+        candidate_dense_topk=0,
         disable_social=False,
         disable_router=False,
         disable_refiner=False,
@@ -390,6 +391,7 @@ class ProtoBasisNet(nn.Module):
         self.topk_proto = topk_proto
         self.n_micro = n_micro
         self.num_modes = topk_proto * n_micro
+        self.candidate_dense_topk = int(candidate_dense_topk or 0)
         self.disable_social = disable_social
         self.disable_router = disable_router
         self.disable_refiner = disable_refiner
@@ -492,6 +494,17 @@ class ProtoBasisNet(nn.Module):
             self.stage2_proj = None
             self.stage2_endpoint_head = None
             self.stage2_coeff_head = None
+        keep_indices = []
+        if 0 < self.candidate_dense_topk < self.topk_proto and self.n_micro > 1:
+            for proto_rank in range(self.topk_proto):
+                micro_count = self.n_micro if proto_rank < self.candidate_dense_topk else 1
+                for micro_rank in range(micro_count):
+                    keep_indices.append(proto_rank * self.n_micro + micro_rank)
+        if keep_indices and len(keep_indices) < self.topk_proto * self.n_micro:
+            keep_tensor = torch.tensor(keep_indices, dtype=torch.long)
+        else:
+            keep_tensor = torch.empty(0, dtype=torch.long)
+        self.register_buffer("candidate_keep_indices", keep_tensor, persistent=False)
 
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
@@ -539,22 +552,32 @@ class ProtoBasisNet(nn.Module):
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
             coarse_local = self.basis_bank(anchor_local, coeff)
             active_query = stage2_query
+        candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
+        if self.candidate_keep_indices.numel() > 0:
+            keep = self.candidate_keep_indices.to(device=coeff.device)
+            query_feat = query_feat.index_select(1, keep)
+            coeff = coeff.index_select(1, keep)
+            pred_score = pred_score.index_select(1, keep)
+            difficulty_gate = difficulty_gate.index_select(1, keep)
+            coeff_delta = coeff_delta.index_select(1, keep)
+            endpoint_mode_local = endpoint_mode_local.index_select(1, keep)
+            coarse_local = coarse_local.index_select(1, keep)
+            active_query = active_query.index_select(1, keep)
+            candidate_proto_idx = candidate_proto_idx.index_select(1, keep)
         if self.has_local_basis:
-            proto_mean_path = self.prototype_mean_path[top_proto_idx]
-            proto_mean_path = proto_mean_path.repeat_interleave(self.n_micro, dim=1)
+            proto_mean_path = self.prototype_mean_path[candidate_proto_idx]
             proto_mean_endpoint = proto_mean_path[:, :, -1, :]
             aligned_proto_mean = proto_mean_path + (endpoint_mode_local - proto_mean_endpoint)[:, :, None, :]
 
-            local_basis = self.local_basis_bank[top_proto_idx]
-            local_basis = local_basis.repeat_interleave(self.n_micro, dim=1)
+            local_basis = self.local_basis_bank[candidate_proto_idx]
             local_coeff = self.local_coeff_head(active_query)
             local_residual = torch.einsum("bkm,bkmtd->bktd", local_coeff, local_basis)
             local_path = aligned_proto_mean + local_residual
             local_gate = torch.sigmoid(self.local_mix_gate(active_query)).unsqueeze(-1)
             if self.support_aware_local_basis:
-                proto_support = self.proto_frequency[top_proto_idx]
+                proto_support = self.proto_frequency[candidate_proto_idx]
                 support_scale = (proto_support / self.proto_frequency.max().clamp_min(1e-6)).clamp_min(1e-6).sqrt()
-                support_scale = support_scale.repeat_interleave(self.n_micro, dim=1).unsqueeze(-1).unsqueeze(-1)
+                support_scale = support_scale.unsqueeze(-1).unsqueeze(-1)
                 local_gate = local_gate * support_scale
             coarse_local = coarse_local + local_gate * (local_path - coarse_local)
         use_refiner = enable_refiner and (not self.disable_refiner)
@@ -573,6 +596,7 @@ class ProtoBasisNet(nn.Module):
                 "endpoint_residual": endpoint_residual,
                 "endpoint_mode_local": endpoint_mode_local,
                 "coarse_local": coarse_local,
+                "candidate_proto_idx": candidate_proto_idx,
                 "basis_matrix": self.basis_matrix_flat,
                 "basis_pinv": self.basis_pinv,
                 "proto_frequency": self.proto_frequency,
