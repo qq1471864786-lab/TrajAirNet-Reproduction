@@ -428,6 +428,10 @@ def tracked_best_specs(args, run_dir):
         "best20": {
             "metric_key": "best20",
             "path": os.path.join(run_dir, f"best_best{secondary_k}.pt"),
+        },
+        "ade20": {
+            "metric_key": f"ADE@{secondary_k}",
+            "path": os.path.join(run_dir, f"best_ade{secondary_k}.pt"),
         }
     }
 
@@ -484,13 +488,17 @@ def save_checkpoint(path, payload):
     torch.save(payload, path)
 
 
-def remove_legacy_best_checkpoints(run_dir, keep_name):
+def remove_legacy_best_checkpoints(run_dir, keep_names):
     if not os.path.isdir(run_dir):
         return
+    if isinstance(keep_names, str):
+        keep_names = {keep_names}
+    else:
+        keep_names = set(keep_names)
     for file_name in os.listdir(run_dir):
         if not file_name.startswith("best_") or not file_name.endswith(".pt"):
             continue
-        if file_name == keep_name:
+        if file_name in keep_names:
             continue
         path = os.path.join(run_dir, file_name)
         if os.path.isfile(path):
@@ -629,7 +637,7 @@ def supports_color():
 
 
 def main_metric_keys(args):
-    return {"best20"}
+    return {"best20", "ADE@20", f"ADE@{args.eval_topk_secondary}"}
 
 
 def has_main_line_best_update(args, best_updates):
@@ -798,7 +806,9 @@ def main():
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
     os.makedirs(run_dir, exist_ok=True)
-    remove_legacy_best_checkpoints(run_dir, keep_name=f"best_best{args.eval_topk_secondary}.pt")
+    best_specs = tracked_best_specs(args, run_dir)
+    keep_best_names = [os.path.basename(spec["path"]) for spec in best_specs.values()]
+    remove_legacy_best_checkpoints(run_dir, keep_names=keep_best_names)
 
     start_epoch, global_step, best_records = load_resume_checkpoint(args, run_dir, model, optimizer, device)
 
@@ -837,7 +847,6 @@ def main():
         return
 
     last_path = os.path.join(run_dir, "last.pt")
-    best_specs = tracked_best_specs(args, run_dir)
 
     try:
         for epoch in range(start_epoch, args.epochs + 1):
@@ -925,14 +934,14 @@ def main():
             avg_loss_stats = average_loss_sums(epoch_loss_sums, seen_batches)
 
             best_updates = []
+            secondary_k = args.eval_topk_secondary
+            rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
             best_key = "best20"
             spec = best_specs[best_key]
             candidate_sort_key = unified_best20_sort_key(metrics, args)
             previous_sort_key = best_records[best_key].get("sort_key")
             if previous_sort_key is None or candidate_sort_key < tuple(previous_sort_key):
                 previous_value = best_records[best_key]["value"]
-                secondary_k = args.eval_topk_secondary
-                rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
                 best_records[best_key]["value"] = float(metrics[f"ADE@{secondary_k}"])
                 best_records[best_key]["epoch"] = epoch
                 best_records[best_key]["sort_key"] = candidate_sort_key
@@ -950,6 +959,33 @@ def main():
                     }
                 )
 
+            ade_key = "ade20"
+            spec = best_specs[ade_key]
+            ade_value = float(metrics[f"ADE@{secondary_k}"])
+            if ade_value < best_records[ade_key]["value"]:
+                previous_value = best_records[ade_key]["value"]
+                best_records[ade_key]["value"] = ade_value
+                best_records[ade_key]["epoch"] = epoch
+                best_records[ade_key]["sort_key"] = (
+                    ade_value,
+                    float(metrics[f"FDE@{secondary_k}"]),
+                    float(metrics[f"GLeV@{secondary_k}"]),
+                    float(metrics[f"rare_FDE@{rare_k}"]),
+                )
+                best_records[ade_key]["fde_value"] = float(metrics[f"FDE@{secondary_k}"])
+                best_records[ade_key]["glev_value"] = float(metrics[f"GLeV@{secondary_k}"])
+                best_records[ade_key]["rare_fde_value"] = float(metrics[f"rare_FDE@{rare_k}"])
+                best_records[ade_key]["selection_score"] = ade_value
+                best_updates.append(
+                    {
+                        "record_key": ade_key,
+                        "metric_key": spec["metric_key"],
+                        "previous_value": None if math.isinf(previous_value) else previous_value,
+                        "value": ade_value,
+                        "epoch": epoch,
+                    }
+                )
+
             epoch_meta = dict(meta)
             epoch_meta["eval_enable_refiner"] = cfg["enable_refiner"]
             ckpt = checkpoint_payload(
@@ -963,8 +999,8 @@ def main():
                 meta=epoch_meta,
             )
             save_checkpoint(last_path, ckpt)
-            if best_updates:
-                save_checkpoint(spec["path"], ckpt)
+            for update in best_updates:
+                save_checkpoint(best_specs[update["record_key"]]["path"], ckpt)
 
             progress.close()
             recorder.log_epoch(
@@ -1006,10 +1042,13 @@ def main():
 
             patience = max(int(args.early_stop_patience), 0)
             min_epoch = max(int(args.early_stop_min_epoch), 0)
-            best_epoch = int(best_records["best20"].get("epoch", 0))
+            best_epoch = max(
+                int(best_records["best20"].get("epoch", 0)),
+                int(best_records.get("ade20", {}).get("epoch", 0)),
+            )
             if patience > 0 and epoch >= min_epoch and best_epoch > 0 and epoch - best_epoch >= patience:
                 print(
-                    f"[EarlyStop] best20 has not improved for {epoch - best_epoch} epochs "
+                    f"[EarlyStop] tracked best metrics have not improved for {epoch - best_epoch} epochs "
                     f"(best epoch {best_epoch}); stopping at epoch {epoch}.",
                     flush=True,
                 )
