@@ -112,6 +112,47 @@ def _gt_proto_coeff_loss(coeff, gt_basis_coeff, top_proto_idx, gt_proto_id):
     return F.smooth_l1_loss(aligned_coeff[hit_mask], gt_basis_coeff[hit_mask])
 
 
+def _anchor_reconstruction_loss(
+    coarse_local,
+    endpoint_mode_local,
+    gt_local,
+    basis_pinv,
+    basis_matrix,
+    top_proto_idx,
+    gt_proto_id,
+    mode,
+):
+    if (
+        mode == "none"
+        or coarse_local is None
+        or endpoint_mode_local is None
+        or basis_pinv is None
+        or basis_matrix is None
+    ):
+        return gt_local.sum() * 0.0
+
+    topk_proto = top_proto_idx.size(1)
+    if topk_proto <= 0 or coarse_local.size(1) % topk_proto != 0 or endpoint_mode_local.shape[:2] != coarse_local.shape[:2]:
+        return coarse_local.sum() * 0.0
+
+    alpha = torch.linspace(0.0, 1.0, steps=gt_local.size(1), device=gt_local.device, dtype=gt_local.dtype)
+    anchor = alpha[None, None, :, None] * endpoint_mode_local[:, :, None, :]
+    residual = (gt_local[:, None, :, :] - anchor).reshape(-1, gt_local.size(1) * gt_local.size(2))
+    target_coeff = residual @ basis_pinv.to(device=gt_local.device, dtype=gt_local.dtype)
+    target_recon = target_coeff @ basis_matrix.to(device=gt_local.device, dtype=gt_local.dtype)
+    target_path = anchor + target_recon.reshape_as(coarse_local)
+
+    if mode == "all":
+        return F.smooth_l1_loss(coarse_local, target_path.detach())
+    if mode == "gt_proto":
+        n_micro = coarse_local.size(1) // topk_proto
+        match_mode = top_proto_idx.eq(gt_proto_id[:, None]).repeat_interleave(n_micro, dim=1)
+        if not match_mode.any():
+            return coarse_local.sum() * 0.0
+        return F.smooth_l1_loss(coarse_local[match_mode], target_path.detach()[match_mode])
+    raise ValueError(f"Unsupported anchor_recon_supervision: {mode}")
+
+
 class ProtoBasisLoss(nn.Module):
     def __init__(
         self,
@@ -133,10 +174,14 @@ class ProtoBasisLoss(nn.Module):
         proto_freq_weight_power=0.0,
         proto_freq_weight_max=5.0,
         endpoint_residual_supervision="all",
+        lambda_anchor_recon=0.0,
+        anchor_recon_supervision="none",
     ):
         super().__init__()
         if endpoint_residual_supervision not in {"all", "hit_only"}:
             raise ValueError(f"Unsupported endpoint_residual_supervision: {endpoint_residual_supervision}")
+        if anchor_recon_supervision not in {"none", "gt_proto", "all"}:
+            raise ValueError(f"Unsupported anchor_recon_supervision: {anchor_recon_supervision}")
         self.lambda_xyz = lambda_xyz
         self.lambda_fde = lambda_fde
         self.lambda_proto = lambda_proto
@@ -155,6 +200,8 @@ class ProtoBasisLoss(nn.Module):
         self.proto_freq_weight_power = proto_freq_weight_power
         self.proto_freq_weight_max = proto_freq_weight_max
         self.endpoint_residual_supervision = endpoint_residual_supervision
+        self.lambda_anchor_recon = lambda_anchor_recon
+        self.anchor_recon_supervision = anchor_recon_supervision
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -219,6 +266,16 @@ class ProtoBasisLoss(nn.Module):
             top_proto_idx,
             gt_proto_id,
         )
+        anchor_recon_loss = _anchor_reconstruction_loss(
+            aux.get("coarse_local"),
+            aux.get("endpoint_mode_local"),
+            batch["fut_local"],
+            aux.get("basis_pinv"),
+            aux.get("basis_matrix"),
+            top_proto_idx,
+            gt_proto_id,
+            self.anchor_recon_supervision,
+        )
 
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
@@ -231,6 +288,7 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_gt_proto_shape * gt_proto_shape_loss
         total = total + self.lambda_gt_proto_fde * gt_proto_fde_loss
         total = total + self.lambda_gt_proto_coeff * gt_proto_coeff_loss
+        total = total + self.lambda_anchor_recon * anchor_recon_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -244,6 +302,7 @@ class ProtoBasisLoss(nn.Module):
             "gt_proto_shape": float(gt_proto_shape_loss.detach().item()),
             "gt_proto_fde": float(gt_proto_fde_loss.detach().item()),
             "gt_proto_coeff": float(gt_proto_coeff_loss.detach().item()),
+            "anchor_recon": float(anchor_recon_loss.detach().item()),
             "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),

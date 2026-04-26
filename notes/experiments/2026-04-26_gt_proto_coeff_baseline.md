@@ -2,6 +2,32 @@
 
 Status: default baseline for the next `111_days` improvement round.
 
+Update 2026-04-26:
+
+`111_days` now promotes anchor-adaptive reconstruction distillation as the next default on top of the GT-prototype coefficient baseline:
+
+- `anchor_recon_supervision = gt_proto`
+- `lambda_anchor_recon = 0.10`
+
+Short validation (`10/4/12`, train/eval limits `120/20`):
+
+| Run | ADE@20 | FDE@20 | rare_FDE@20 | Decision |
+|---|---:|---:|---:|---|
+| prior promoted short baseline | 0.24466 | 0.33162 | 0.85771 | superseded |
+| anchor-recon GT-proto, lambda 0.10 | 0.24345 | 0.32565 | 0.84922 | promoted |
+
+Strong-checkpoint continuation evidence from `save_model_111days_topk10_m2`:
+
+| Run | ADE@20 | FDE@20 | rare_FDE@20 | Decision |
+|---|---:|---:|---:|---|
+| checkpoint eval, limit20 | 0.2195 | 0.3294 | 0.8326 | reference |
+| GT coeff continuation | 0.21646 | 0.31888 | 0.81501 | positive |
+| anchor-recon GT-proto continuation | 0.21596 | 0.31476 | 0.81170 | best continuation |
+
+Rationale:
+
+Diagnostics showed `pred_endpoint_plus_global_basis_ls` can reach about `0.043` ADE on the sampled subset, while the actual model is about `0.222`; this points to a coefficient/path target mismatch around predicted endpoint anchors. The promoted loss distills each GT-prototype-aligned candidate coarse path toward its least-squares reconstruction under that candidate's own endpoint anchor.
+
 Code commit:
 
 - `e1716bc Add GT-prototype coefficient supervision`

@@ -49,6 +49,7 @@ LOSS_STAT_KEYS = (
     "gt_proto_shape",
     "gt_proto_fde",
     "gt_proto_coeff",
+    "anchor_recon",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -104,7 +105,6 @@ def build_parser():
     parser.add_argument("--encoder_layers", type=int, default=None)
     parser.add_argument("--social_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.10)
-
     parser.add_argument("--batch_size", type=int, default=0)
     parser.add_argument("--eval_batch_size", type=int, default=0)
     parser.add_argument("--grad_accum", type=int, default=0)
@@ -146,6 +146,14 @@ def build_parser():
     parser.add_argument("--lambda_gt_proto_shape", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_fde", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_coeff", type=float, default=None)
+    parser.add_argument("--lambda_anchor_recon", type=float, default=None)
+    parser.add_argument(
+        "--anchor_recon_supervision",
+        type=str,
+        default=None,
+        choices=["none", "gt_proto", "all"],
+        help="Coarse-path distillation to the LS reconstruction around each predicted endpoint anchor.",
+    )
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
@@ -290,6 +298,10 @@ def apply_training_defaults(args):
         args.lambda_gt_proto_fde = 0.05 if is_unified and is_main_dataset else 0.0
     if args.lambda_gt_proto_coeff is None:
         args.lambda_gt_proto_coeff = 0.10 if is_unified and is_main_dataset else 0.0
+    if args.lambda_anchor_recon is None:
+        args.lambda_anchor_recon = 0.10 if is_unified and is_main_dataset else 0.0
+    if args.anchor_recon_supervision is None:
+        args.anchor_recon_supervision = "gt_proto" if is_unified and is_main_dataset else "none"
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -741,6 +753,7 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"gt_shape={format_scalar(loss_stats['gt_proto_shape'])}",
         f"gt_fde={format_scalar(loss_stats['gt_proto_fde'])}",
         f"gt_coeff={format_scalar(loss_stats['gt_proto_coeff'])}",
+        f"anchor_recon={format_scalar(loss_stats['anchor_recon'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -833,6 +846,8 @@ def main():
         proto_freq_weight_power=args.proto_freq_weight_power,
         proto_freq_weight_max=args.proto_freq_weight_max,
         endpoint_residual_supervision=args.endpoint_residual_supervision,
+        lambda_anchor_recon=args.lambda_anchor_recon,
+        anchor_recon_supervision=args.anchor_recon_supervision,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -856,10 +871,12 @@ def main():
         "basis_dim": args.basis_dim,
         "endpoint_conditioning": args.endpoint_conditioning,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
+        "anchor_recon_supervision": args.anchor_recon_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
         "lambda_gt_proto_coeff": args.lambda_gt_proto_coeff,
+        "lambda_anchor_recon": args.lambda_anchor_recon,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "amp_enabled": use_amp,

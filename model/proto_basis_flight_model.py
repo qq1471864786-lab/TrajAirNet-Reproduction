@@ -429,6 +429,13 @@ class ProtoBasisNet(nn.Module):
             dropout=dropout,
         )
         self.basis_bank = BasisBank(basis_bank)
+        basis_matrix = self.basis_bank.basis_bank.reshape(self.basis_bank.basis_bank.size(0), -1)
+        self.register_buffer("basis_matrix_flat", basis_matrix.float(), persistent=False)
+        if basis_matrix.numel() > 0:
+            basis_pinv = torch.linalg.pinv(basis_matrix)
+        else:
+            basis_pinv = torch.zeros(basis_matrix.size(1), 0, dtype=basis_matrix.dtype)
+        self.register_buffer("basis_pinv", basis_pinv.float(), persistent=False)
         self.refiner = TemporalResidualRefiner(d_model=d_model)
         self.local_basis_dim = int(local_basis_dim)
 
@@ -564,6 +571,10 @@ class ProtoBasisNet(nn.Module):
                 "coeff": coeff,
                 "coeff_delta": coeff_delta,
                 "endpoint_residual": endpoint_residual,
+                "endpoint_mode_local": endpoint_mode_local,
+                "coarse_local": coarse_local,
+                "basis_matrix": self.basis_matrix_flat,
+                "basis_pinv": self.basis_pinv,
                 "proto_frequency": self.proto_frequency,
                 "proto_summary_5d": self.proto_summary_5d,
             },
