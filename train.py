@@ -86,8 +86,8 @@ def build_parser():
     parser.add_argument("--no_two_stage_update_endpoint", action="store_true")
     parser.add_argument("--no_two_stage_update_coeff", action="store_true")
     parser.set_defaults(two_stage_decoder=None)
-    parser.add_argument("--topk_proto", type=int, default=5)
-    parser.add_argument("--micro_per_proto", type=int, default=4)
+    parser.add_argument("--topk_proto", type=int, default=None)
+    parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
@@ -226,6 +226,10 @@ def apply_training_defaults(args):
 
     if args.n_proto is None:
         args.n_proto = 96 if is_unified and is_small_dataset else 64
+    if args.topk_proto is None:
+        args.topk_proto = 10 if is_unified and is_main_dataset else 5
+    if args.micro_per_proto is None:
+        args.micro_per_proto = 2 if is_unified and is_main_dataset else 4
     if args.d_model is None:
         args.d_model = 128 if is_unified and is_main_dataset else 96
     if args.ff_dim is None:

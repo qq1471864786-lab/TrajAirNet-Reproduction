@@ -8,11 +8,14 @@ Code commit:
 
 Default behavior:
 
+- `111_days` under `trajair_40to120_best20` now defaults to:
+  - `topk_proto = 10`
+  - `micro_per_proto = 2`
 - `111_days` under `trajair_40to120_best20` now enables:
   - `lambda_gt_proto_shape = 0.15`
   - `lambda_gt_proto_fde = 0.05`
   - `lambda_gt_proto_coeff = 0.05`
-- `7days*` keeps these losses disabled by default.
+- `7days*` keeps the prior `topk_proto = 5`, `micro_per_proto = 4`, and these losses disabled by default.
 - `proto_focal_gamma` and `proto_freq_weight_power` remain disabled by default because the router-only ablation did not improve ADE.
 
 Short validation protocol:
