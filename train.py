@@ -289,7 +289,7 @@ def apply_training_defaults(args):
     if args.lambda_gt_proto_fde is None:
         args.lambda_gt_proto_fde = 0.05 if is_unified and is_main_dataset else 0.0
     if args.lambda_gt_proto_coeff is None:
-        args.lambda_gt_proto_coeff = 0.05 if is_unified and is_main_dataset else 0.0
+        args.lambda_gt_proto_coeff = 0.10 if is_unified and is_main_dataset else 0.0
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 

@@ -14,7 +14,7 @@ Default behavior:
 - `111_days` under `trajair_40to120_best20` now enables:
   - `lambda_gt_proto_shape = 0.15`
   - `lambda_gt_proto_fde = 0.05`
-  - `lambda_gt_proto_coeff = 0.05`
+  - `lambda_gt_proto_coeff = 0.10`
 - `7days*` keeps the prior `topk_proto = 5`, `micro_per_proto = 4`, and these losses disabled by default.
 - `proto_focal_gamma` and `proto_freq_weight_power` remain disabled by default because the router-only ablation did not improve ADE.
 
@@ -32,12 +32,14 @@ Server short-run evidence:
 |---|---:|---:|---:|---:|
 | baseline before change | 0.26344 | 0.34770 | 0.64611 | 0.90810 |
 | GT loss only | 0.24696 | 0.33369 | 0.64889 | 0.87086 |
+| GT loss only, stronger coeff | 0.24466 | 0.33162 | 0.63979 | 0.85771 |
 | GT loss + router focal/freq | 0.24892 | 0.33483 | 0.65155 | 0.86600 |
 | router focal/freq only | 0.26382 | 0.35333 | 0.65935 | 0.90691 |
 
 Decision:
 
-Use GT-prototype shape/FDE/coefficient supervision as the new default baseline. Do not promote router focal/frequency weighting for now.
+Use GT-prototype shape/FDE/coefficient supervision as the new default baseline, with `lambda_gt_proto_coeff = 0.10`.
+Do not promote router focal/frequency weighting for now.
 
 Known remaining bottleneck:
 
