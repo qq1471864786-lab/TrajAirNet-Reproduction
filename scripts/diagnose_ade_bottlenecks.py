@@ -94,6 +94,8 @@ def _build_model(config, checkpoint):
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
         endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
         candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
+        coupled_decoder=bool(config.get("coupled_decoder", False)),
+        coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -360,6 +362,17 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
         anchor_local = build_anchor(endpoint_mode_local, model.anchor_alpha.to(endpoint_mode_local))
         coarse_local = model.basis_bank(anchor_local, coeff)
         active_query = stage2_query
+    if getattr(model, "coupled_decoder", None) is not None:
+        coeff_before_coupled = coeff
+        active_query, endpoint_mode_local, coeff, coarse_local = model.coupled_decoder(
+            active_query,
+            endpoint_mode_local,
+            coeff,
+            coarse_local,
+            model.basis_bank,
+            model.anchor_alpha,
+        )
+        coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
     candidate_proto_idx = top_proto_idx.repeat_interleave(model.n_micro, dim=1)
     if getattr(model, "candidate_keep_indices", None) is not None and model.candidate_keep_indices.numel() > 0:
         keep = model.candidate_keep_indices.to(device=coeff.device)

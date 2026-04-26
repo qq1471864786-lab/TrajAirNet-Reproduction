@@ -158,12 +158,16 @@ def main():
                 outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=eval_enable_refiner)
             errors = topk_best_errors(outputs["pred_xyz"], batch["fut_xyz"], outputs["pred_score"], secondary_k)
             top_proto_idx = outputs["top_proto_idx"]
+            candidate_proto_idx = outputs.get("aux", {}).get("candidate_proto_idx")
             gt_proto_id = batch["gt_proto_id"]
             hit = top_proto_idx.eq(gt_proto_id[:, None]).any(dim=1)
             top1_hit = outputs["proto_logits"].argmax(dim=1).eq(gt_proto_id)
-            n_micro = max(outputs["pred_score"].size(1) // max(top_proto_idx.size(1), 1), 1)
-            best_proto_slot = (errors["best_global_idx"] // n_micro).clamp(max=top_proto_idx.size(1) - 1)
-            best_proto = top_proto_idx.gather(1, best_proto_slot[:, None]).squeeze(1)
+            if candidate_proto_idx is not None and candidate_proto_idx.shape[:2] == outputs["pred_score"].shape[:2]:
+                best_proto = candidate_proto_idx.gather(1, errors["best_global_idx"][:, None]).squeeze(1)
+            else:
+                n_micro = max(outputs["pred_score"].size(1) // max(top_proto_idx.size(1), 1), 1)
+                best_proto_slot = (errors["best_global_idx"] // n_micro).clamp(max=top_proto_idx.size(1) - 1)
+                best_proto = top_proto_idx.gather(1, best_proto_slot[:, None]).squeeze(1)
             best_proto_hit = best_proto.eq(gt_proto_id)
 
             for name in collected:

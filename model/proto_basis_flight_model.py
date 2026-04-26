@@ -341,6 +341,47 @@ class TemporalResidualRefiner(nn.Module):
         return coarse_local_xyz + gate[:, :, None, None] * update
 
 
+class CoupledEndpointCoeffDecoder(nn.Module):
+    def __init__(self, d_model=96, basis_dim=16, iters=1, dropout=0.1):
+        super().__init__()
+        self.iters = max(int(iters), 0)
+        update_in_dim = d_model + basis_dim + 12
+        self.update_blocks = nn.ModuleList()
+        self.endpoint_heads = nn.ModuleList()
+        self.coeff_heads = nn.ModuleList()
+        for _ in range(self.iters):
+            block = nn.Sequential(
+                nn.Linear(update_in_dim, d_model),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+            )
+            endpoint_head = nn.Linear(d_model, 3)
+            coeff_head = nn.Linear(d_model, basis_dim)
+            nn.init.zeros_(endpoint_head.weight)
+            nn.init.zeros_(endpoint_head.bias)
+            nn.init.zeros_(coeff_head.weight)
+            nn.init.zeros_(coeff_head.bias)
+            self.update_blocks.append(block)
+            self.endpoint_heads.append(endpoint_head)
+            self.coeff_heads.append(coeff_head)
+
+    def forward(self, query_feat, endpoint_local, coeff, coarse_local, basis_bank, anchor_alpha):
+        active_query = query_feat
+        for block, endpoint_head, coeff_head in zip(self.update_blocks, self.endpoint_heads, self.coeff_heads):
+            coarse_end = coarse_local[:, :, -1]
+            coarse_mean = coarse_local.mean(dim=2)
+            endpoint_gap = coarse_end - endpoint_local
+            update_input = torch.cat([active_query, endpoint_local, coarse_end, coarse_mean, endpoint_gap, coeff], dim=-1)
+            update = block(update_input)
+            endpoint_local = endpoint_local + endpoint_head(update)
+            coeff = coeff + coeff_head(update)
+            anchor_local = build_anchor(endpoint_local, anchor_alpha.to(endpoint_local))
+            coarse_local = basis_bank(anchor_local, coeff)
+        return active_query, endpoint_local, coeff, coarse_local
+
+
 def build_anchor(endpoint_local, alpha):
     return alpha[None, None, :, None] * endpoint_local[:, :, None, :]
 
@@ -374,6 +415,8 @@ class ProtoBasisNet(nn.Module):
         use_micro_coeff_anchors=False,
         endpoint_conditioning="rank",
         candidate_dense_topk=0,
+        coupled_decoder=False,
+        coupled_decoder_iters=0,
         disable_social=False,
         disable_router=False,
         disable_refiner=False,
@@ -400,6 +443,7 @@ class ProtoBasisNet(nn.Module):
         self.two_stage_update_endpoint = two_stage_update_endpoint
         self.two_stage_update_coeff = two_stage_update_coeff
         self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
+        self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
         self.pose_normalizer = PoseNormalizer()
         self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
@@ -494,6 +538,15 @@ class ProtoBasisNet(nn.Module):
             self.stage2_proj = None
             self.stage2_endpoint_head = None
             self.stage2_coeff_head = None
+        if self.coupled_decoder_enabled:
+            self.coupled_decoder = CoupledEndpointCoeffDecoder(
+                d_model=d_model,
+                basis_dim=basis_dim,
+                iters=int(coupled_decoder_iters),
+                dropout=dropout,
+            )
+        else:
+            self.coupled_decoder = None
         keep_indices = []
         if 0 < self.candidate_dense_topk < self.topk_proto and self.n_micro > 1:
             for proto_rank in range(self.topk_proto):
@@ -552,6 +605,17 @@ class ProtoBasisNet(nn.Module):
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
             coarse_local = self.basis_bank(anchor_local, coeff)
             active_query = stage2_query
+        if self.coupled_decoder is not None:
+            coeff_before_coupled = coeff
+            active_query, endpoint_mode_local, coeff, coarse_local = self.coupled_decoder(
+                active_query,
+                endpoint_mode_local,
+                coeff,
+                coarse_local,
+                self.basis_bank,
+                self.anchor_alpha,
+            )
+            coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
         candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
         if self.candidate_keep_indices.numel() > 0:
             keep = self.candidate_keep_indices.to(device=coeff.device)

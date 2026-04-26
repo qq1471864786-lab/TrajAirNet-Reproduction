@@ -50,6 +50,9 @@ LOSS_STAT_KEYS = (
     "gt_proto_fde",
     "gt_proto_coeff",
     "anchor_recon",
+    "projection_coeff",
+    "projection_path",
+    "projection_rate",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -87,6 +90,10 @@ def build_parser():
     parser.add_argument("--no_two_stage_update_endpoint", action="store_true")
     parser.add_argument("--no_two_stage_update_coeff", action="store_true")
     parser.set_defaults(two_stage_decoder=None)
+    parser.add_argument("--coupled_decoder", dest="coupled_decoder", action="store_true")
+    parser.add_argument("--no_coupled_decoder", dest="coupled_decoder", action="store_false")
+    parser.set_defaults(coupled_decoder=None)
+    parser.add_argument("--coupled_decoder_iters", type=int, default=None)
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
@@ -154,6 +161,15 @@ def build_parser():
         default=None,
         choices=["none", "gt_proto", "all"],
         help="Coarse-path distillation to the LS reconstruction around each predicted endpoint anchor.",
+    )
+    parser.add_argument("--lambda_projection_coeff", type=float, default=None)
+    parser.add_argument("--lambda_projection_path", type=float, default=None)
+    parser.add_argument(
+        "--projection_supervision",
+        type=str,
+        default=None,
+        choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
+        help="Supervise selected candidates toward the LS coeff/path under each predicted endpoint anchor.",
     )
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
@@ -253,6 +269,10 @@ def apply_training_defaults(args):
         args.support_aware_local_basis = bool(uses_validated_basis_profile and args.local_basis_dim > 0)
     if args.two_stage_decoder is None:
         args.two_stage_decoder = bool(uses_validated_basis_profile)
+    if args.coupled_decoder is None:
+        args.coupled_decoder = bool(uses_validated_basis_profile)
+    if args.coupled_decoder_iters is None:
+        args.coupled_decoder_iters = 2 if args.coupled_decoder else 0
     if args.micro_coeff_anchors is None:
         args.micro_coeff_anchors = True
 
@@ -305,6 +325,13 @@ def apply_training_defaults(args):
         args.lambda_anchor_recon = 0.10 if is_unified and is_main_dataset else 0.0
     if args.anchor_recon_supervision is None:
         args.anchor_recon_supervision = "gt_proto" if is_unified and is_main_dataset else "none"
+    use_projection_guidance = bool(is_unified and is_main_dataset and args.coupled_decoder)
+    if args.lambda_projection_coeff is None:
+        args.lambda_projection_coeff = 0.02 if use_projection_guidance else 0.0
+    if args.lambda_projection_path is None:
+        args.lambda_projection_path = 0.05 if use_projection_guidance else 0.0
+    if args.projection_supervision is None:
+        args.projection_supervision = "winner_gt_proto" if use_projection_guidance else "none"
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -443,6 +470,8 @@ def build_model(args, model_artifact):
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
         endpoint_conditioning=args.endpoint_conditioning,
         candidate_dense_topk=args.candidate_dense_topk,
+        coupled_decoder=bool(args.coupled_decoder),
+        coupled_decoder_iters=args.coupled_decoder_iters,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
@@ -758,6 +787,8 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"gt_fde={format_scalar(loss_stats['gt_proto_fde'])}",
         f"gt_coeff={format_scalar(loss_stats['gt_proto_coeff'])}",
         f"anchor_recon={format_scalar(loss_stats['anchor_recon'])}",
+        f"proj_coeff={format_scalar(loss_stats['projection_coeff'])}",
+        f"proj_path={format_scalar(loss_stats['projection_path'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -852,6 +883,9 @@ def main():
         endpoint_residual_supervision=args.endpoint_residual_supervision,
         lambda_anchor_recon=args.lambda_anchor_recon,
         anchor_recon_supervision=args.anchor_recon_supervision,
+        lambda_projection_coeff=args.lambda_projection_coeff,
+        lambda_projection_path=args.lambda_projection_path,
+        projection_supervision=args.projection_supervision,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -875,13 +909,18 @@ def main():
         "basis_dim": args.basis_dim,
         "endpoint_conditioning": args.endpoint_conditioning,
         "candidate_dense_topk": args.candidate_dense_topk,
+        "coupled_decoder": bool(args.coupled_decoder),
+        "coupled_decoder_iters": args.coupled_decoder_iters,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "anchor_recon_supervision": args.anchor_recon_supervision,
+        "projection_supervision": args.projection_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
         "lambda_gt_proto_coeff": args.lambda_gt_proto_coeff,
         "lambda_anchor_recon": args.lambda_anchor_recon,
+        "lambda_projection_coeff": args.lambda_projection_coeff,
+        "lambda_projection_path": args.lambda_projection_path,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "amp_enabled": use_amp,
