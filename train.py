@@ -46,6 +46,10 @@ LOSS_STAT_KEYS = (
     "div",
     "coeff",
     "smooth",
+    "gt_proto_shape",
+    "gt_proto_fde",
+    "gt_proto_coeff",
+    "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
     "res_miss_rate",
@@ -139,9 +143,15 @@ def build_parser():
     parser.add_argument("--lambda_div", type=float, default=0.05)
     parser.add_argument("--lambda_coeff", type=float, default=0.02)
     parser.add_argument("--lambda_smooth", type=float, default=0.10)
+    parser.add_argument("--lambda_gt_proto_shape", type=float, default=None)
+    parser.add_argument("--lambda_gt_proto_fde", type=float, default=None)
+    parser.add_argument("--lambda_gt_proto_coeff", type=float, default=None)
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
+    parser.add_argument("--proto_focal_gamma", type=float, default=0.0)
+    parser.add_argument("--proto_freq_weight_power", type=float, default=0.0)
+    parser.add_argument("--proto_freq_weight_max", type=float, default=5.0)
     parser.add_argument(
         "--endpoint_residual_supervision",
         type=str,
@@ -269,6 +279,13 @@ def apply_training_defaults(args):
         args.early_stop_patience = 24 if is_unified and is_main_dataset else 0
     if args.early_stop_min_epoch is None:
         args.early_stop_min_epoch = 35 if is_unified and is_main_dataset else 0
+
+    if args.lambda_gt_proto_shape is None:
+        args.lambda_gt_proto_shape = 0.15 if is_unified and is_main_dataset else 0.0
+    if args.lambda_gt_proto_fde is None:
+        args.lambda_gt_proto_fde = 0.05 if is_unified and is_main_dataset else 0.0
+    if args.lambda_gt_proto_coeff is None:
+        args.lambda_gt_proto_coeff = 0.05 if is_unified and is_main_dataset else 0.0
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -717,6 +734,10 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"div={format_scalar(loss_stats['div'])}",
         f"coeff={format_scalar(loss_stats['coeff'])}",
         f"smooth={format_scalar(loss_stats['smooth'])}",
+        f"gt_shape={format_scalar(loss_stats['gt_proto_shape'])}",
+        f"gt_fde={format_scalar(loss_stats['gt_proto_fde'])}",
+        f"gt_coeff={format_scalar(loss_stats['gt_proto_coeff'])}",
+        f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
     eval_main, eval_aux = _metric_lines(args, metrics)
@@ -798,9 +819,15 @@ def main():
         lambda_div=args.lambda_div,
         lambda_coeff=args.lambda_coeff,
         lambda_smooth=args.lambda_smooth,
+        lambda_gt_proto_shape=args.lambda_gt_proto_shape,
+        lambda_gt_proto_fde=args.lambda_gt_proto_fde,
+        lambda_gt_proto_coeff=args.lambda_gt_proto_coeff,
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,
+        proto_focal_gamma=args.proto_focal_gamma,
+        proto_freq_weight_power=args.proto_freq_weight_power,
+        proto_freq_weight_max=args.proto_freq_weight_max,
         endpoint_residual_supervision=args.endpoint_residual_supervision,
     )
 
@@ -826,6 +853,11 @@ def main():
         "endpoint_conditioning": args.endpoint_conditioning,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
+        "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
+        "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
+        "lambda_gt_proto_coeff": args.lambda_gt_proto_coeff,
+        "proto_focal_gamma": args.proto_focal_gamma,
+        "proto_freq_weight_power": args.proto_freq_weight_power,
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

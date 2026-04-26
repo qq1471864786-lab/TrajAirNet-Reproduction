@@ -49,6 +49,69 @@ def _score_quality_targets(ade, fde, fde_weight=0.75, temperature=0.35):
     return torch.softmax(-cost / max(temperature, 1e-3), dim=1)
 
 
+def _prototype_loss(logits, targets, proto_frequency=None, focal_gamma=0.0, freq_weight_power=0.0, freq_weight_max=5.0):
+    focal_gamma = max(float(focal_gamma), 0.0)
+    freq_weight_power = max(float(freq_weight_power), 0.0)
+    if focal_gamma <= 0.0 and freq_weight_power <= 0.0:
+        return F.cross_entropy(logits, targets)
+
+    log_prob = F.log_softmax(logits, dim=-1)
+    target_log_prob = log_prob.gather(1, targets[:, None]).squeeze(1)
+    loss = -target_log_prob
+    if focal_gamma > 0.0:
+        target_prob = target_log_prob.detach().exp()
+        loss = (1.0 - target_prob).pow(focal_gamma) * loss
+
+    if freq_weight_power > 0.0 and proto_frequency is not None:
+        frequency = proto_frequency.detach().to(logits.device).float().clamp_min(1e-6)
+        class_weight = (frequency.mean() / frequency).pow(freq_weight_power)
+        class_weight = class_weight.clamp(max=max(float(freq_weight_max), 1.0))
+        sample_weight = class_weight.gather(0, targets)
+        return (loss * sample_weight).sum() / sample_weight.sum().clamp_min(1e-6)
+    return loss.mean()
+
+
+def _gt_proto_aligned_losses(pred_xyz, gt_xyz, top_proto_idx, gt_proto_id, ade):
+    topk_proto = top_proto_idx.size(1)
+    if topk_proto <= 0 or pred_xyz.size(1) % topk_proto != 0:
+        zero = pred_xyz.sum() * 0.0
+        return zero, zero, pred_xyz.new_tensor(0.0)
+
+    n_micro = pred_xyz.size(1) // topk_proto
+    match_mode = top_proto_idx.eq(gt_proto_id[:, None]).repeat_interleave(n_micro, dim=1)
+    hit_mask = match_mode.any(dim=1)
+    if not hit_mask.any():
+        zero = pred_xyz.sum() * 0.0
+        return zero, zero, pred_xyz.new_tensor(0.0)
+
+    masked_ade = ade.masked_fill(~match_mode, float("inf"))
+    aligned_idx = masked_ade.argmin(dim=1)
+    aligned_xyz = _gather_candidates(pred_xyz, aligned_idx)
+    shape_loss = F.smooth_l1_loss(aligned_xyz[hit_mask], gt_xyz[hit_mask])
+    fde_loss = F.smooth_l1_loss(aligned_xyz[hit_mask, -1], gt_xyz[hit_mask, -1])
+    return shape_loss, fde_loss, hit_mask.float().mean()
+
+
+def _gt_proto_coeff_loss(coeff, gt_basis_coeff, top_proto_idx, gt_proto_id):
+    if gt_basis_coeff is None or coeff.size(-1) != gt_basis_coeff.size(-1) or coeff.size(-1) == 0:
+        return coeff.sum() * 0.0
+
+    topk_proto = top_proto_idx.size(1)
+    if topk_proto <= 0 or coeff.size(1) % topk_proto != 0:
+        return coeff.sum() * 0.0
+
+    n_micro = coeff.size(1) // topk_proto
+    match_mode = top_proto_idx.eq(gt_proto_id[:, None]).repeat_interleave(n_micro, dim=1)
+    hit_mask = match_mode.any(dim=1)
+    if not hit_mask.any():
+        return coeff.sum() * 0.0
+
+    coeff_distance = (coeff.detach() - gt_basis_coeff[:, None, :]).pow(2).mean(dim=-1)
+    aligned_idx = coeff_distance.masked_fill(~match_mode, float("inf")).argmin(dim=1)
+    aligned_coeff = _gather_candidates(coeff, aligned_idx)
+    return F.smooth_l1_loss(aligned_coeff[hit_mask], gt_basis_coeff[hit_mask])
+
+
 class ProtoBasisLoss(nn.Module):
     def __init__(
         self,
@@ -60,9 +123,15 @@ class ProtoBasisLoss(nn.Module):
         lambda_div=0.05,
         lambda_coeff=0.02,
         lambda_smooth=0.10,
+        lambda_gt_proto_shape=0.0,
+        lambda_gt_proto_fde=0.0,
+        lambda_gt_proto_coeff=0.0,
         score_hard_mix=0.25,
         score_fde_weight=0.75,
         score_soft_temperature=0.35,
+        proto_focal_gamma=0.0,
+        proto_freq_weight_power=0.0,
+        proto_freq_weight_max=5.0,
         endpoint_residual_supervision="all",
     ):
         super().__init__()
@@ -76,9 +145,15 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_div = lambda_div
         self.lambda_coeff = lambda_coeff
         self.lambda_smooth = lambda_smooth
+        self.lambda_gt_proto_shape = lambda_gt_proto_shape
+        self.lambda_gt_proto_fde = lambda_gt_proto_fde
+        self.lambda_gt_proto_coeff = lambda_gt_proto_coeff
         self.score_hard_mix = min(max(score_hard_mix, 0.0), 1.0)
         self.score_fde_weight = score_fde_weight
         self.score_soft_temperature = score_soft_temperature
+        self.proto_focal_gamma = proto_focal_gamma
+        self.proto_freq_weight_power = proto_freq_weight_power
+        self.proto_freq_weight_max = proto_freq_weight_max
         self.endpoint_residual_supervision = endpoint_residual_supervision
 
     def forward(self, outputs, batch, stage_cfg):
@@ -90,6 +165,7 @@ class ProtoBasisLoss(nn.Module):
         gt_xyz = batch["fut_xyz"]
         gt_proto_id = batch["gt_proto_id"]
         gt_proto_residual = batch["gt_proto_residual"]
+        gt_basis_coeff = batch.get("gt_basis_coeff")
 
         best_idx, ade, fde = _winner_indices(pred_xyz, gt_xyz)
         winner_xyz = _gather_candidates(pred_xyz, best_idx)
@@ -98,7 +174,14 @@ class ProtoBasisLoss(nn.Module):
 
         xyz_loss = F.smooth_l1_loss(winner_xyz, gt_xyz)
         fde_loss = F.smooth_l1_loss(winner_xyz[:, -1], gt_xyz[:, -1])
-        proto_loss = F.cross_entropy(proto_logits, gt_proto_id)
+        proto_loss = _prototype_loss(
+            proto_logits,
+            gt_proto_id,
+            proto_frequency=aux.get("proto_frequency"),
+            focal_gamma=self.proto_focal_gamma,
+            freq_weight_power=self.proto_freq_weight_power,
+            freq_weight_max=self.proto_freq_weight_max,
+        )
 
         match_mask = top_proto_idx.eq(gt_proto_id.unsqueeze(1))
         hit_mask = match_mask.any(dim=1)
@@ -123,6 +206,19 @@ class ProtoBasisLoss(nn.Module):
         div_loss = _diversity_repulsion(pred_xyz)
         coeff_loss = winner_coeff.pow(2).mean()
         smooth_loss = _trajectory_smoothness(winner_xyz)
+        gt_proto_shape_loss, gt_proto_fde_loss, gt_proto_hit_rate = _gt_proto_aligned_losses(
+            pred_xyz,
+            gt_xyz,
+            top_proto_idx,
+            gt_proto_id,
+            ade,
+        )
+        gt_proto_coeff_loss = _gt_proto_coeff_loss(
+            aux["coeff"],
+            gt_basis_coeff,
+            top_proto_idx,
+            gt_proto_id,
+        )
 
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
@@ -132,6 +228,9 @@ class ProtoBasisLoss(nn.Module):
         total = total + stage_cfg["div_weight"] * self.lambda_div * div_loss
         total = total + self.lambda_coeff * coeff_loss
         total = total + self.lambda_smooth * smooth_loss
+        total = total + self.lambda_gt_proto_shape * gt_proto_shape_loss
+        total = total + self.lambda_gt_proto_fde * gt_proto_fde_loss
+        total = total + self.lambda_gt_proto_coeff * gt_proto_coeff_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -142,6 +241,10 @@ class ProtoBasisLoss(nn.Module):
             "div": float(div_loss.detach().item()),
             "coeff": float(coeff_loss.detach().item()),
             "smooth": float(smooth_loss.detach().item()),
+            "gt_proto_shape": float(gt_proto_shape_loss.detach().item()),
+            "gt_proto_fde": float(gt_proto_fde_loss.detach().item()),
+            "gt_proto_coeff": float(gt_proto_coeff_loss.detach().item()),
+            "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),
             "res_miss_rate": float((~hit_mask).float().mean().detach().item()),
