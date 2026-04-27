@@ -718,10 +718,8 @@ def apply_freeze_policy(model, args):
     if args.freeze_backbone_except_basis_coeff_decoder or args.freeze_backbone_except_coeff_decoder_stack:
         trainable_modules = [getattr(model, "basis_coeff_decoder", None)]
         if args.freeze_backbone_except_coeff_decoder_stack:
-            prototype_router = getattr(model, "prototype_router", None)
             trainable_modules.extend(
                 [
-                    getattr(prototype_router, "endpoint_proto_head", None),
                     getattr(model, "query_decoder", None),
                     getattr(model, "micro_endpoint_head", None),
                     getattr(model, "endpoint_set_refiner", None),
