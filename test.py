@@ -93,6 +93,8 @@ def build_model(config, checkpoint):
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
+        control_shape_refiner=bool(config.get("control_shape_refiner", False)),
+        control_shape_points=int(config.get("control_shape_points", 16)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -167,7 +169,11 @@ def evaluate(
                 for key, value in raw_batch.items()
             }
             with autocast_context(device, use_amp):
-                outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
+                outputs = model(
+                    batch["obs_xyz"],
+                    batch["obs_mask"],
+                    enable_refiner=enable_refiner,
+                )
             metrics, batch_count, _ = summarize_batch_metrics(
                 outputs,
                 batch,
@@ -195,13 +201,21 @@ def measure_latency_ms(model, batch, enable_refiner=True, warmup=30, iters=100):
     starter = torch.cuda.Event(enable_timing=True)
     ender = torch.cuda.Event(enable_timing=True)
     for _ in range(warmup):
-        _ = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
+        _ = model(
+            batch["obs_xyz"],
+            batch["obs_mask"],
+            enable_refiner=enable_refiner,
+        )
     torch.cuda.synchronize()
 
     timings = []
     for _ in range(iters):
         starter.record()
-        _ = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=enable_refiner)
+        _ = model(
+            batch["obs_xyz"],
+            batch["obs_mask"],
+            enable_refiner=enable_refiner,
+        )
         ender.record()
         torch.cuda.synchronize()
         timings.append(starter.elapsed_time(ender))

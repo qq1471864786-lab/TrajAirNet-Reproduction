@@ -97,6 +97,8 @@ def _build_model(config, checkpoint):
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
+        control_shape_refiner=bool(config.get("control_shape_refiner", False)),
+        control_shape_points=int(config.get("control_shape_points", 16)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -318,7 +320,14 @@ def _evaluate_model(model, loader, device, config, variant, limit_batches=0, eva
     return averaged
 
 
-def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
+def _forward_with_local_state(
+    model,
+    obs_xyz,
+    obs_mask,
+    gt_proto_id=None,
+    force_gt_proto=False,
+    enable_refiner=True,
+):
     local_xyz, _, _, origin, rotation = model.pose_normalizer(obs_xyz)
     feats_local = build_local_features(local_xyz)
     feats_global = build_global_features(obs_xyz)
@@ -406,6 +415,8 @@ def _forward_with_local_state(model, obs_xyz, obs_mask, gt_proto_id=None, force_
     refined_local = model.refiner(coarse_local, active_query, difficulty_gate) if use_refiner else coarse_local
     if getattr(model, "endpoint_shape_refiner", None) is not None:
         refined_local = model.endpoint_shape_refiner(refined_local, active_query)
+    if getattr(model, "control_shape_refiner", None) is not None:
+        refined_local = model.control_shape_refiner(refined_local, active_query)
     pred_xyz = model.pose_normalizer.inverse(refined_local, origin, rotation)
     outputs = {
         "pred_xyz": pred_xyz,

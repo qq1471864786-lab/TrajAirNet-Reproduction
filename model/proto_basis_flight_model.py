@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -371,6 +372,54 @@ class EndpointPreservingShapeRefiner(nn.Module):
         return local_xyz + envelope[None, None, :, None] * update
 
 
+class EndpointPreservingControlPointRefiner(nn.Module):
+    def __init__(self, d_model=96, pred_len=120, num_control_points=16, hidden_dim=256, dropout=0.1):
+        super().__init__()
+        self.pred_len = int(pred_len)
+        self.num_control_points = int(num_control_points)
+        stats_dim = 24
+        input_dim = d_model + stats_dim
+        self.net = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.num_control_points * 3),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+        endpoint_envelope = 1.0 - torch.linspace(0.0, 1.0, steps=pred_len)
+        self.register_buffer("endpoint_envelope", endpoint_envelope, persistent=False)
+
+    def forward(self, local_xyz, query_feat):
+        velocity = local_xyz[:, :, 1:] - local_xyz[:, :, :-1]
+        start_velocity = velocity[:, :, 0]
+        end_velocity = velocity[:, :, -1]
+        mean_velocity = velocity.mean(dim=2)
+        stats = torch.cat(
+            [
+                local_xyz[:, :, 0],
+                local_xyz[:, :, local_xyz.size(2) // 3],
+                local_xyz[:, :, (2 * local_xyz.size(2)) // 3],
+                local_xyz[:, :, -1],
+                local_xyz.mean(dim=2),
+                start_velocity,
+                end_velocity,
+                mean_velocity,
+            ],
+            dim=-1,
+        )
+        control = self.net(torch.cat([query_feat, stats], dim=-1))
+        batch_size, num_modes = local_xyz.shape[:2]
+        control = control.reshape(batch_size * num_modes, self.num_control_points, 3).transpose(1, 2)
+        residual = F.interpolate(control, size=local_xyz.size(2), mode="linear", align_corners=True)
+        residual = residual.transpose(1, 2).reshape(batch_size, num_modes, local_xyz.size(2), 3)
+        envelope = self.endpoint_envelope.to(device=local_xyz.device, dtype=local_xyz.dtype)
+        return local_xyz + envelope[None, None, :, None] * residual
+
+
 class CoupledEndpointCoeffDecoder(nn.Module):
     def __init__(self, d_model=96, basis_dim=16, iters=1, dropout=0.1):
         super().__init__()
@@ -448,6 +497,8 @@ class ProtoBasisNet(nn.Module):
         coupled_decoder=False,
         coupled_decoder_iters=0,
         endpoint_shape_refiner=False,
+        control_shape_refiner=False,
+        control_shape_points=16,
         disable_social=False,
         disable_router=False,
         disable_refiner=False,
@@ -476,6 +527,7 @@ class ProtoBasisNet(nn.Module):
         self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
+        self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
         self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
@@ -583,6 +635,15 @@ class ProtoBasisNet(nn.Module):
             self.endpoint_shape_refiner = EndpointPreservingShapeRefiner(d_model=d_model, pred_len=pred_len)
         else:
             self.endpoint_shape_refiner = None
+        if self.control_shape_refiner_enabled:
+            self.control_shape_refiner = EndpointPreservingControlPointRefiner(
+                d_model=d_model,
+                pred_len=pred_len,
+                num_control_points=control_shape_points,
+                dropout=dropout,
+            )
+        else:
+            self.control_shape_refiner = None
         keep_indices = []
         if 0 < self.candidate_dense_topk < self.topk_proto and self.n_micro > 1:
             for proto_rank in range(self.topk_proto):
@@ -684,6 +745,8 @@ class ProtoBasisNet(nn.Module):
         refined_local = self.refiner(coarse_local, active_query, difficulty_gate) if use_refiner else coarse_local
         if self.endpoint_shape_refiner is not None:
             refined_local = self.endpoint_shape_refiner(refined_local, active_query)
+        if self.control_shape_refiner is not None:
+            refined_local = self.control_shape_refiner(refined_local, active_query)
 
         pred_xyz = self.pose_normalizer.inverse(refined_local, origin, rotation)
 

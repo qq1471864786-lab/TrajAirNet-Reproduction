@@ -189,6 +189,8 @@ def apply_tail_modules(model, state, coeff):
         local_pred = coarse_local
     if getattr(model, "endpoint_shape_refiner", None) is not None:
         local_pred = model.endpoint_shape_refiner(local_pred, active_query)
+    if getattr(model, "control_shape_refiner", None) is not None:
+        local_pred = model.control_shape_refiner(local_pred, active_query)
     return model.pose_normalizer.inverse(local_pred, state["origin"], state["rotation"])
 
 
@@ -273,7 +275,12 @@ def main():
                 for key, value in raw_batch.items()
             }
             with autocast_context(device, use_amp):
-                state = forward_pre_refiner_state(model, batch["obs_xyz"], batch["obs_mask"], eval_enable_refiner)
+                state = forward_pre_refiner_state(
+                    model,
+                    batch["obs_xyz"],
+                    batch["obs_mask"],
+                    enable_refiner=eval_enable_refiner,
+                )
 
             endpoint_mode_local = state["endpoint_mode_local"].float()
             coeff = state["coeff"].float()

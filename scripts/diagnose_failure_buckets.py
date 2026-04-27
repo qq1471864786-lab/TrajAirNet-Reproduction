@@ -155,7 +155,11 @@ def main():
                 for key, value in raw_batch.items()
             }
             with autocast_context(device, use_amp):
-                outputs = model(batch["obs_xyz"], batch["obs_mask"], enable_refiner=eval_enable_refiner)
+                outputs = model(
+                    batch["obs_xyz"],
+                    batch["obs_mask"],
+                    enable_refiner=eval_enable_refiner,
+                )
             errors = topk_best_errors(outputs["pred_xyz"], batch["fut_xyz"], outputs["pred_score"], secondary_k)
             top_proto_idx = outputs["top_proto_idx"]
             candidate_proto_idx = outputs.get("aux", {}).get("candidate_proto_idx")

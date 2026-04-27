@@ -85,6 +85,8 @@ def build_model(config, checkpoint):
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
+        control_shape_refiner=bool(config.get("control_shape_refiner", False)),
+        control_shape_points=int(config.get("control_shape_points", 16)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
