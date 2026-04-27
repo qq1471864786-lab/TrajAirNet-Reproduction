@@ -111,6 +111,10 @@ def build_parser():
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
+    parser.add_argument("--basis_coeff_decoder", dest="basis_coeff_decoder", action="store_true")
+    parser.add_argument("--no_basis_coeff_decoder", dest="basis_coeff_decoder", action="store_false")
+    parser.set_defaults(basis_coeff_decoder=None)
+    parser.add_argument("--basis_coeff_mode", type=str, default="residual", choices=["residual", "replace"])
     parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
@@ -231,6 +235,16 @@ def build_parser():
         help="Train only the basis bridge and coupled endpoint-coeff decoder after init_checkpoint.",
     )
     parser.add_argument(
+        "--freeze_backbone_except_basis_coeff_decoder",
+        action="store_true",
+        help="Train only the basis-aware coefficient decoder after init_checkpoint.",
+    )
+    parser.add_argument(
+        "--freeze_backbone_except_coeff_decoder_stack",
+        action="store_true",
+        help="Train the basis-aware coeff decoder plus query/two-stage/coupled decoder stack.",
+    )
+    parser.add_argument(
         "--freeze_backbone_except_coeff_correction",
         dest="freeze_backbone_except_new_heads",
         action="store_true",
@@ -303,6 +317,8 @@ def apply_training_defaults(args):
         args.micro_per_proto = 2 if is_unified and is_main_dataset else 4
     if args.candidate_dense_topk is None:
         args.candidate_dense_topk = 5 if is_unified and is_main_dataset else 0
+    if args.basis_coeff_decoder is None:
+        args.basis_coeff_decoder = False
     if args.d_model is None:
         args.d_model = 128 if is_unified and is_main_dataset else 96
     if args.ff_dim is None:
@@ -533,6 +549,8 @@ def build_model(args, model_artifact):
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
         endpoint_conditioning=args.endpoint_conditioning,
         candidate_dense_topk=args.candidate_dense_topk,
+        basis_coeff_decoder=bool(args.basis_coeff_decoder),
+        basis_coeff_mode=args.basis_coeff_mode,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
         basis_bridge_decoder=bool(args.basis_bridge_decoder),
@@ -568,6 +586,33 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
 
 
 def apply_freeze_policy(model, args):
+    if args.freeze_backbone_except_basis_coeff_decoder or args.freeze_backbone_except_coeff_decoder_stack:
+        trainable_modules = [getattr(model, "basis_coeff_decoder", None)]
+        if args.freeze_backbone_except_coeff_decoder_stack:
+            trainable_modules.extend(
+                [
+                    getattr(model, "query_decoder", None),
+                    getattr(model, "stage2_proj", None),
+                    getattr(model, "stage2_endpoint_head", None),
+                    getattr(model, "stage2_coeff_head", None),
+                    getattr(model, "coupled_decoder", None),
+                    getattr(model, "endpoint_shape_refiner", None),
+                    getattr(model, "control_shape_refiner", None),
+                ]
+            )
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_basis_coeff_decoder requires --basis_coeff_decoder.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
     if args.freeze_backbone_except_basis_bridge or args.freeze_backbone_except_basis_bridge_coupled:
         trainable_modules = [getattr(model, "basis_bridge_decoder", None)]
         if args.freeze_backbone_except_basis_bridge_coupled:
@@ -1060,6 +1105,8 @@ def main():
         "basis_dim": args.basis_dim,
         "endpoint_conditioning": args.endpoint_conditioning,
         "candidate_dense_topk": args.candidate_dense_topk,
+        "basis_coeff_decoder": bool(args.basis_coeff_decoder),
+        "basis_coeff_mode": args.basis_coeff_mode,
         "coupled_decoder": bool(args.coupled_decoder),
         "coupled_decoder_iters": args.coupled_decoder_iters,
         "basis_bridge_decoder": bool(args.basis_bridge_decoder),
@@ -1086,6 +1133,8 @@ def main():
         "freeze_backbone_except_new_heads": bool(args.freeze_backbone_except_new_heads),
         "freeze_backbone_except_basis_bridge": bool(args.freeze_backbone_except_basis_bridge),
         "freeze_backbone_except_basis_bridge_coupled": bool(args.freeze_backbone_except_basis_bridge_coupled),
+        "freeze_backbone_except_basis_coeff_decoder": bool(args.freeze_backbone_except_basis_coeff_decoder),
+        "freeze_backbone_except_coeff_decoder_stack": bool(args.freeze_backbone_except_coeff_decoder_stack),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

@@ -318,6 +318,71 @@ class BasisBank(nn.Module):
         return anchor + residual
 
 
+class BasisAwareCoeffDecoder(nn.Module):
+    def __init__(self, d_model=96, basis_dim=16, pred_len=120, nhead=4, ff_dim=256, dropout=0.1, mode="residual"):
+        super().__init__()
+        if mode not in {"residual", "replace"}:
+            raise ValueError(f"Unsupported basis-aware coeff mode: {mode}")
+        self.mode = mode
+        self.basis_dim = int(basis_dim)
+        self.basis_proj = nn.Linear(pred_len * 3, d_model)
+        self.basis_id = nn.Parameter(torch.randn(basis_dim, d_model) * 0.02)
+        self.endpoint_proj = nn.Linear(3, d_model)
+        self.coeff_proj = nn.Linear(basis_dim, d_model)
+        self.stats_proj = nn.Linear(12, d_model)
+        self.query_norm = nn.LayerNorm(d_model)
+        self.cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, d_model),
+        )
+        self.slot_norm = nn.LayerNorm(d_model)
+        self.prior_proj = nn.Linear(1, d_model)
+        self.slot_mlp = nn.Sequential(
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, ff_dim // 2),
+            nn.GELU(),
+            nn.Linear(ff_dim // 2, 1),
+        )
+        nn.init.zeros_(self.slot_mlp[-1].weight)
+        nn.init.zeros_(self.slot_mlp[-1].bias)
+
+    def forward(self, query_feat, endpoint_local, coeff, coarse_local, basis_bank):
+        coarse_end = coarse_local[:, :, -1]
+        coarse_mean = coarse_local.mean(dim=2)
+        endpoint_gap = coarse_end - endpoint_local
+        stats = torch.cat([endpoint_local, coarse_end, coarse_mean, endpoint_gap], dim=-1)
+        candidate_query = self.query_norm(
+            query_feat
+            + self.endpoint_proj(endpoint_local)
+            + self.coeff_proj(coeff)
+            + self.stats_proj(stats)
+        )
+        basis_flat = basis_bank.reshape(self.basis_dim, -1).to(device=coeff.device, dtype=coeff.dtype)
+        basis_tokens = self.basis_proj(basis_flat) + self.basis_id.to(device=coeff.device, dtype=coeff.dtype)
+        batch_size, num_modes = coeff.shape[:2]
+        query = candidate_query.reshape(batch_size * num_modes, 1, -1)
+        tokens = basis_tokens[None].expand(batch_size * num_modes, -1, -1)
+        attended, _ = self.cross_attn(query, tokens, tokens)
+        refined = query + attended
+        refined = refined + self.ffn(refined)
+        refined = refined.reshape(batch_size, num_modes, -1)
+        slot = (
+            refined[:, :, None, :]
+            + basis_tokens[None, None, :, :]
+            + self.prior_proj(coeff.unsqueeze(-1))
+        )
+        coeff_update = self.slot_mlp(self.slot_norm(slot)).squeeze(-1)
+        if self.mode == "replace":
+            return coeff_update
+        return coeff + coeff_update
+
+
 class TemporalResidualRefiner(nn.Module):
     def __init__(self, d_model=96):
         super().__init__()
@@ -561,6 +626,8 @@ class ProtoBasisNet(nn.Module):
         use_micro_coeff_anchors=False,
         endpoint_conditioning="rank",
         candidate_dense_topk=0,
+        basis_coeff_decoder=False,
+        basis_coeff_mode="residual",
         coupled_decoder=False,
         coupled_decoder_iters=0,
         basis_bridge_decoder=False,
@@ -594,6 +661,7 @@ class ProtoBasisNet(nn.Module):
         self.two_stage_update_endpoint = two_stage_update_endpoint
         self.two_stage_update_coeff = two_stage_update_coeff
         self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
+        self.basis_coeff_decoder_enabled = bool(basis_coeff_decoder)
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
         self.basis_bridge_decoder_enabled = bool(basis_bridge_decoder)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
@@ -666,6 +734,18 @@ class ProtoBasisNet(nn.Module):
         self.register_buffer("micro_coeff_anchors", micro_coeff_anchors, persistent=False)
         self.has_micro_coeff_anchors = self.use_micro_coeff_anchors and self.micro_coeff_anchors.numel() > 0
         self.has_local_basis = self.local_basis_dim > 0 and self.local_basis_bank.numel() > 0
+        if self.basis_coeff_decoder_enabled:
+            self.basis_coeff_decoder = BasisAwareCoeffDecoder(
+                d_model=d_model,
+                basis_dim=basis_dim,
+                pred_len=pred_len,
+                nhead=nhead,
+                ff_dim=ff_dim,
+                dropout=dropout,
+                mode=basis_coeff_mode,
+            )
+        else:
+            self.basis_coeff_decoder = None
         if self.has_local_basis:
             self.local_coeff_head = nn.Sequential(
                 nn.Linear(d_model, 128),
@@ -770,6 +850,19 @@ class ProtoBasisNet(nn.Module):
         anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
         coarse_local = self.basis_bank(anchor_local, coeff)
         active_query = query_feat
+        basis_coeff = None
+        if self.basis_coeff_decoder is not None:
+            coeff_before_basis = coeff
+            coeff = self.basis_coeff_decoder(
+                query_feat,
+                endpoint_mode_local,
+                coeff,
+                coarse_local,
+                self.basis_bank.basis_bank,
+            )
+            basis_coeff = coeff
+            coeff_delta = coeff_delta + (coeff - coeff_before_basis)
+            coarse_local = self.basis_bank(anchor_local, coeff)
         if self.two_stage_decoder:
             stage2_input = torch.cat([query_feat, coarse_local[:, :, -1], coarse_local.mean(dim=2)], dim=-1)
             stage2_query = query_feat + self.stage2_proj(stage2_input)
@@ -852,6 +945,7 @@ class ProtoBasisNet(nn.Module):
         aux = {
             "coeff": coeff,
             "coeff_delta": coeff_delta,
+            "basis_coeff": basis_coeff,
             "endpoint_residual": endpoint_residual,
             "endpoint_mode_local": endpoint_mode_local,
             "coarse_local": coarse_local,
