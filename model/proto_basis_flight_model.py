@@ -614,51 +614,6 @@ class EndpointPreservingControlPointRefiner(nn.Module):
         return local_xyz + envelope[None, None, :, None] * residual
 
 
-class EndpointSetRefiner(nn.Module):
-    def __init__(self, d_model=96, basis_dim=16, nhead=4, ff_dim=256, dropout=0.1, layers=2):
-        super().__init__()
-        self.endpoint_proj = nn.Linear(3, d_model)
-        self.coeff_proj = nn.Linear(basis_dim, d_model)
-        self.self_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
-        )
-        self.ffn = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(d_model, ff_dim),
-                    nn.GELU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(ff_dim, d_model),
-                )
-                for _ in range(layers)
-            ]
-        )
-        self.norm1 = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(layers)])
-        self.norm2 = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(layers)])
-        self.endpoint_delta = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, 3),
-        )
-        self.score_delta = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, 1))
-        nn.init.zeros_(self.endpoint_delta[-1].weight)
-        nn.init.zeros_(self.endpoint_delta[-1].bias)
-        nn.init.zeros_(self.score_delta[-1].weight)
-        nn.init.zeros_(self.score_delta[-1].bias)
-
-    def forward(self, query_feat, endpoint_local, coeff, score):
-        hidden = query_feat + self.endpoint_proj(endpoint_local) + self.coeff_proj(coeff)
-        for attn, ffn, norm1, norm2 in zip(self.self_attn, self.ffn, self.norm1, self.norm2):
-            attended, _ = attn(hidden, hidden, hidden)
-            hidden = norm1(hidden + attended)
-            hidden = norm2(hidden + ffn(hidden))
-        endpoint_delta = self.endpoint_delta(hidden)
-        score_delta = self.score_delta(hidden).squeeze(-1)
-        return endpoint_local + endpoint_delta, score + score_delta, endpoint_delta
-
-
 class BasisBridgeDecoder(nn.Module):
     def __init__(self, d_model=96, basis_dim=16, pred_len=120, num_control_points=16, hidden_dim=256, dropout=0.1):
         super().__init__()
@@ -1253,7 +1208,6 @@ class ProtoBasisNet(nn.Module):
         intention_modes=20,
         intention_decoder_layers=3,
         micro_endpoint_offsets=False,
-        endpoint_set_refiner=False,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -1292,7 +1246,6 @@ class ProtoBasisNet(nn.Module):
         self.anchor_set_decoder_enabled = bool(anchor_set_decoder)
         self.intention_trajectory_decoder_enabled = bool(intention_trajectory_decoder)
         self.micro_endpoint_offsets_enabled = bool(micro_endpoint_offsets)
-        self.endpoint_set_refiner_enabled = bool(endpoint_set_refiner)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -1411,16 +1364,6 @@ class ProtoBasisNet(nn.Module):
             nn.init.zeros_(self.micro_endpoint_head[-1].bias)
         else:
             self.micro_endpoint_head = None
-        if self.endpoint_set_refiner_enabled:
-            self.endpoint_set_refiner = EndpointSetRefiner(
-                d_model=d_model,
-                basis_dim=basis_dim,
-                nhead=nhead,
-                ff_dim=ff_dim,
-                dropout=dropout,
-            )
-        else:
-            self.endpoint_set_refiner = None
         if self.basis_coeff_decoder_enabled:
             self.basis_coeff_decoder = BasisAwareCoeffDecoder(
                 d_model=d_model,
@@ -1631,7 +1574,6 @@ class ProtoBasisNet(nn.Module):
         if self.anchor_set_decoder is not None:
             micro_endpoint_delta = None
         basis_coeff = None
-        endpoint_set_delta = None
         if self.basis_coeff_decoder is not None:
             coeff_before_basis = coeff
             coeff = self.basis_coeff_decoder(
@@ -1700,15 +1642,6 @@ class ProtoBasisNet(nn.Module):
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
             coarse_local = self.basis_bank(anchor_local, coeff)
             coeff_delta = coeff_delta + (coeff - coeff_before_soft)
-        if self.endpoint_set_refiner is not None:
-            endpoint_mode_local, pred_score, endpoint_set_delta = self.endpoint_set_refiner(
-                active_query,
-                endpoint_mode_local,
-                coeff,
-                pred_score,
-            )
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coarse_local = self.basis_bank(anchor_local, coeff)
         bridge_local = None
         bridge_control_local = None
         bridge_coeff = None
@@ -1808,8 +1741,6 @@ class ProtoBasisNet(nn.Module):
         }
         if micro_endpoint_delta is not None:
             aux["micro_endpoint_delta"] = micro_endpoint_delta
-        if endpoint_set_delta is not None:
-            aux["endpoint_set_delta"] = endpoint_set_delta
         if soft_proto_idx is not None:
             aux["soft_proto_idx"] = soft_proto_idx
         if bridge_local is not None:
