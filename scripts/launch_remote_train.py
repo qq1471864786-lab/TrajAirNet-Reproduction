@@ -5,7 +5,7 @@ import os
 import re
 import shlex
 import sys
-from typing import Any
+from typing import Any, List
 
 from remote_common import add_remote_conda_args, add_remote_project_root_arg, add_remote_target_args, run_target_command
 
@@ -96,7 +96,7 @@ def sanitize_name(value: str) -> str:
     return cleaned or "train"
 
 
-def extract_arg(args: list[str], key: str, default: str) -> str:
+def extract_arg(args: List[str], key: str, default: str) -> str:
     if key in args:
         idx = args.index(key)
         if idx + 1 < len(args):
