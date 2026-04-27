@@ -105,6 +105,10 @@ def build_parser():
     parser.add_argument("--no_temporal_dynamics_decoder", dest="temporal_dynamics_decoder", action="store_false")
     parser.set_defaults(temporal_dynamics_decoder=None)
     parser.add_argument("--dynamics_control_points", type=int, default=None)
+    parser.add_argument("--direct_dynamics_decoder", dest="direct_dynamics_decoder", action="store_true")
+    parser.add_argument("--no_direct_dynamics_decoder", dest="direct_dynamics_decoder", action="store_false")
+    parser.set_defaults(direct_dynamics_decoder=None)
+    parser.add_argument("--direct_dynamics_control_points", type=int, default=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -202,6 +206,14 @@ def build_parser():
         choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
         help="Supervise basis-bridge candidates toward the predicted-anchor LS coeff/path.",
     )
+    parser.add_argument("--lambda_direct_path", type=float, default=None)
+    parser.add_argument(
+        "--direct_dynamics_supervision",
+        type=str,
+        default=None,
+        choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
+        help="Supervise direct dynamics candidates toward the observed GT future path in local coordinates.",
+    )
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
@@ -252,6 +264,11 @@ def build_parser():
         "--freeze_backbone_except_temporal_dynamics_stack",
         action="store_true",
         help="Train temporal dynamics decoder plus query/two-stage/coupled/refiner stack.",
+    )
+    parser.add_argument(
+        "--freeze_backbone_except_direct_dynamics_stack",
+        action="store_true",
+        help="Train direct dynamics rollout decoder plus query/two-stage/coupled/refiner stack.",
     )
     parser.add_argument(
         "--freeze_backbone_except_coeff_correction",
@@ -352,6 +369,10 @@ def apply_training_defaults(args):
         args.temporal_dynamics_decoder = False
     if args.dynamics_control_points is None:
         args.dynamics_control_points = 24
+    if args.direct_dynamics_decoder is None:
+        args.direct_dynamics_decoder = False
+    if args.direct_dynamics_control_points is None:
+        args.direct_dynamics_control_points = 40
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
@@ -424,6 +445,11 @@ def apply_training_defaults(args):
         args.lambda_bridge_path = 0.05 if use_bridge_guidance else 0.0
     if args.basis_bridge_supervision is None:
         args.basis_bridge_supervision = "winner_gt_proto" if use_bridge_guidance else "none"
+    use_direct_guidance = bool(is_unified and is_main_dataset and args.direct_dynamics_decoder)
+    if args.lambda_direct_path is None:
+        args.lambda_direct_path = 0.10 if use_direct_guidance else 0.0
+    if args.direct_dynamics_supervision is None:
+        args.direct_dynamics_supervision = "winner_gt_proto" if use_direct_guidance else "none"
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -570,6 +596,8 @@ def build_model(args, model_artifact):
         bridge_control_points=args.bridge_control_points,
         temporal_dynamics_decoder=bool(args.temporal_dynamics_decoder),
         dynamics_control_points=args.dynamics_control_points,
+        direct_dynamics_decoder=bool(args.direct_dynamics_decoder),
+        direct_dynamics_control_points=args.direct_dynamics_control_points,
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
@@ -642,6 +670,30 @@ def apply_freeze_policy(model, args):
         trainable_modules = [module for module in trainable_modules if module is not None]
         if not trainable_modules:
             raise RuntimeError("--freeze_backbone_except_temporal_dynamics_stack requires --temporal_dynamics_decoder.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
+    if args.freeze_backbone_except_direct_dynamics_stack:
+        trainable_modules = [
+            getattr(model, "direct_dynamics_decoder", None),
+            getattr(model, "query_decoder", None),
+            getattr(model, "stage2_proj", None),
+            getattr(model, "stage2_endpoint_head", None),
+            getattr(model, "stage2_coeff_head", None),
+            getattr(model, "coupled_decoder", None),
+            getattr(model, "endpoint_shape_refiner", None),
+            getattr(model, "control_shape_refiner", None),
+        ]
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_direct_dynamics_stack requires --direct_dynamics_decoder.")
         for parameter in model.parameters():
             parameter.requires_grad = False
         for module in trainable_modules:
@@ -1121,6 +1173,8 @@ def main():
         lambda_bridge_coeff=args.lambda_bridge_coeff,
         lambda_bridge_path=args.lambda_bridge_path,
         basis_bridge_supervision=args.basis_bridge_supervision,
+        lambda_direct_path=args.lambda_direct_path,
+        direct_dynamics_supervision=args.direct_dynamics_supervision,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1152,6 +1206,8 @@ def main():
         "bridge_control_points": args.bridge_control_points,
         "temporal_dynamics_decoder": bool(args.temporal_dynamics_decoder),
         "dynamics_control_points": args.dynamics_control_points,
+        "direct_dynamics_decoder": bool(args.direct_dynamics_decoder),
+        "direct_dynamics_control_points": args.direct_dynamics_control_points,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
@@ -1159,6 +1215,7 @@ def main():
         "anchor_recon_supervision": args.anchor_recon_supervision,
         "projection_supervision": args.projection_supervision,
         "basis_bridge_supervision": args.basis_bridge_supervision,
+        "direct_dynamics_supervision": args.direct_dynamics_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
@@ -1168,6 +1225,7 @@ def main():
         "lambda_projection_path": args.lambda_projection_path,
         "lambda_bridge_coeff": args.lambda_bridge_coeff,
         "lambda_bridge_path": args.lambda_bridge_path,
+        "lambda_direct_path": args.lambda_direct_path,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
@@ -1177,6 +1235,7 @@ def main():
         "freeze_backbone_except_basis_coeff_decoder": bool(args.freeze_backbone_except_basis_coeff_decoder),
         "freeze_backbone_except_coeff_decoder_stack": bool(args.freeze_backbone_except_coeff_decoder_stack),
         "freeze_backbone_except_temporal_dynamics_stack": bool(args.freeze_backbone_except_temporal_dynamics_stack),
+        "freeze_backbone_except_direct_dynamics_stack": bool(args.freeze_backbone_except_direct_dynamics_stack),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

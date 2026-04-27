@@ -193,3 +193,70 @@ Conclusion:
 - Do not make `basis_bridge_decoder` default.
 - The failure suggests that merely predicting a low-resolution residual path and projecting it back to the fixed basis is not enough under frozen context/query features.
 - The next backup direction should be a more direct basis-aware coefficient inference mechanism, e.g. basis-token cross-attention or a stronger coeff decoder, rather than another endpoint-preserving post-hoc path control head.
+
+## 2026-04-27 Basis-Aware Coeff Decoder Short Test
+
+Purpose: test whether replacing the MLP-only coeff update with basis-token cross-attention can close the `predicted endpoint -> coeff` gap without changing the final basis trajectory formulation. This is off by default.
+
+Setup:
+
+- Init: `/3250604003/ProtoBasis-Net/save_model_probe_control_continue_e8_111_short/111_days/seed3407/best_best20.pt`
+- Dataset: `111_days`
+- Train: coeff decoder stack, 8 epochs, 80 train batches/epoch, batch size 512, no AMP
+- Eval: first 50 test batches, eval batch size 1024, no AMP
+- Run: `/3250604003/ProtoBasis-Net/save_model_basis_coeff_stack_e8_111_short/111_days/seed3407`
+
+Result:
+
+| Variant | ADE@20 | FDE@20 | Decision |
+| --- | ---: | ---: | --- |
+| current checkpoint baseline | 0.2137 | 0.3046 | reference |
+| basis-aware coeff, best epoch 6 | 0.2134 | 0.3046 | tiny gain only |
+| basis-aware coeff, epoch 8 | 0.2135 | 0.3056 | no meaningful gain |
+
+Conclusion:
+
+- This does not pass the short-test threshold.
+- Do not make `basis_coeff_decoder` default.
+- Basis-token attention alone is still trapped by the old endpoint/basis trajectory formulation.
+
+## 2026-04-27 Temporal Basis Dynamics Short Test
+
+Purpose: make a larger replacement inside the basis path: future control tokens attend to the target 40-step temporal sequence and agent tokens, predict an endpoint-preserving residual path, then project back to the fixed basis. This is off by default.
+
+Setup:
+
+- Init: `/3250604003/ProtoBasis-Net/save_model_probe_control_continue_e8_111_short/111_days/seed3407/best_best20.pt`
+- Dataset: `111_days`
+- Train: temporal dynamics stack, 8 epochs, 80 train batches/epoch, batch size 512, no AMP
+- Eval: first 50 test batches, eval batch size 1024, no AMP
+- Run: `/3250604003/ProtoBasis-Net/save_model_temporal_dynamics_stack_e8_111_short/111_days/seed3407`
+
+Result:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | GLeV@20 | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| current checkpoint baseline | 0.2137 | 0.3046 | 0.3848 | 0.0898 | reference |
+| temporal basis dynamics, best ADE epoch 8 | 0.2128 | 0.3046 | 0.3884 | 0.0890 | tiny gain only |
+
+Conclusion:
+
+- This also does not pass the short-test threshold.
+- Do not make `temporal_dynamics_decoder` default.
+- The important negative evidence is that even a stronger temporal/context decoder fails when its final output is projected back into the same fixed basis trajectory channel. The next valid test should let the dynamics decoder produce the final trajectory directly, with basis projection kept only as an auxiliary interpretation/regularization path.
+
+## 2026-04-27 Direct Dynamics Rollout Plan
+
+Next test: `direct_dynamics_decoder`.
+
+Design:
+
+- Keep router, candidate allocation, endpoint prediction, two-stage/coupled context, and current candidate scoring.
+- Replace the final trajectory generation channel after local-basis mixing: predict velocity residual controls from candidate query + endpoint + coeff + target temporal memory + agent memory.
+- Integrate velocities for 120 steps and correct the cumulative endpoint error analytically, so FDE is not destabilized.
+- Do not project the final path back into fixed basis space. Project only into `direct_dynamics_coeff` for aux/diagnostics, preserving interpretability without making basis coeff the bottleneck.
+
+Validation rule:
+
+- Run the same 111_days 8-epoch/80-batch/50-eval-batch short test.
+- Only keep as default if ADE@20 improves materially; tiny changes like `0.2137 -> 0.2128` are failures.

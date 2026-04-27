@@ -646,6 +646,150 @@ class TemporalBasisDynamicsDecoder(nn.Module):
         return dynamics_coeff, dynamics_local
 
 
+class PrototypeDynamicsRolloutDecoder(nn.Module):
+    def __init__(
+        self,
+        d_model=96,
+        basis_dim=16,
+        pred_len=120,
+        num_control_points=40,
+        nhead=4,
+        ff_dim=256,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.pred_len = int(pred_len)
+        self.num_control_points = int(num_control_points)
+        self.endpoint_proj = nn.Linear(3, d_model)
+        self.coeff_proj = nn.Linear(basis_dim, d_model)
+        self.stats_proj = nn.Linear(30, d_model)
+        self.control_tokens = nn.Parameter(torch.randn(self.num_control_points, d_model) * 0.02)
+        self.self_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
+        )
+        self.time_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
+        )
+        self.agent_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
+        )
+        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(8)])
+        self.ffn = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(d_model, ff_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(ff_dim, d_model),
+                )
+                for _ in range(2)
+            ]
+        )
+        self.velocity_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, 3),
+        )
+        self.gate_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, ff_dim // 2),
+            nn.GELU(),
+            nn.Linear(ff_dim // 2, 1),
+        )
+        nn.init.zeros_(self.velocity_head[-1].weight)
+        nn.init.zeros_(self.velocity_head[-1].bias)
+        nn.init.zeros_(self.gate_head[-1].weight)
+        nn.init.zeros_(self.gate_head[-1].bias)
+        alpha = torch.linspace(1.0 / pred_len, 1.0, steps=pred_len)
+        self.register_buffer("endpoint_alpha", alpha, persistent=False)
+
+    def forward(
+        self,
+        query_feat,
+        endpoint_local,
+        coeff,
+        coarse_local,
+        target_temporal_feat,
+        agent_feat,
+        obs_mask,
+        anchor_local,
+        basis_pinv,
+    ):
+        coarse_velocity = torch.cat(
+            [coarse_local[:, :, :1], coarse_local[:, :, 1:] - coarse_local[:, :, :-1]],
+            dim=2,
+        )
+        start_velocity = coarse_velocity[:, :, 0]
+        end_velocity = coarse_velocity[:, :, -1]
+        mean_velocity = coarse_velocity.mean(dim=2)
+        endpoint_gap = coarse_local[:, :, -1] - endpoint_local
+        stats = torch.cat(
+            [
+                endpoint_local,
+                coarse_local[:, :, 0],
+                coarse_local[:, :, self.pred_len // 3],
+                coarse_local[:, :, (2 * self.pred_len) // 3],
+                coarse_local[:, :, -1],
+                coarse_local.mean(dim=2),
+                start_velocity,
+                end_velocity,
+                mean_velocity,
+                endpoint_gap,
+            ],
+            dim=-1,
+        )
+        base_query = query_feat + self.endpoint_proj(endpoint_local) + self.coeff_proj(coeff) + self.stats_proj(stats)
+        batch_size, num_modes, hidden_dim = base_query.shape
+        hidden = base_query[:, :, None, :] + self.control_tokens.to(device=base_query.device, dtype=base_query.dtype)
+        hidden = hidden.reshape(batch_size * num_modes, self.num_control_points, hidden_dim)
+
+        time_memory = target_temporal_feat[:, None].expand(-1, num_modes, -1, -1)
+        time_memory = time_memory.reshape(batch_size * num_modes, target_temporal_feat.size(1), hidden_dim)
+        agent_memory = agent_feat[:, None].expand(-1, num_modes, -1, -1)
+        agent_memory = agent_memory.reshape(batch_size * num_modes, agent_feat.size(1), hidden_dim)
+        agent_mask = obs_mask[:, None].expand(-1, num_modes, -1).reshape(batch_size * num_modes, obs_mask.size(1))
+
+        norm_index = 0
+        for layer_index in range(2):
+            attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            attended, _ = self.time_attn[layer_index](hidden, time_memory, time_memory)
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            attended, _ = self.agent_attn[layer_index](
+                hidden,
+                agent_memory,
+                agent_memory,
+                key_padding_mask=~agent_mask,
+            )
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
+            norm_index += 1
+
+        velocity_control = self.velocity_head(hidden).transpose(1, 2)
+        velocity_delta = F.interpolate(velocity_control, size=self.pred_len, mode="linear", align_corners=True)
+        velocity_delta = velocity_delta.transpose(1, 2).reshape(batch_size, num_modes, self.pred_len, 3)
+        gate = 0.5 * torch.tanh(self.gate_head(base_query)).unsqueeze(-1)
+        velocity = coarse_velocity + gate * velocity_delta
+        direct_local = velocity.cumsum(dim=2)
+        alpha = self.endpoint_alpha.to(device=direct_local.device, dtype=direct_local.dtype)
+        endpoint_error = direct_local[:, :, -1] - endpoint_local
+        direct_local = direct_local - alpha[None, None, :, None] * endpoint_error[:, :, None, :]
+
+        residual = direct_local - anchor_local
+        flat_residual = residual.reshape(batch_size * num_modes, -1)
+        direct_coeff = flat_residual @ basis_pinv.to(device=direct_local.device, dtype=direct_local.dtype)
+        direct_coeff = direct_coeff.reshape(batch_size, num_modes, -1)
+        return direct_coeff, direct_local, gate.squeeze(-1).squeeze(-1)
+
+
 class CoupledEndpointCoeffDecoder(nn.Module):
     def __init__(self, d_model=96, basis_dim=16, iters=1, dropout=0.1):
         super().__init__()
@@ -728,6 +872,8 @@ class ProtoBasisNet(nn.Module):
         bridge_control_points=16,
         temporal_dynamics_decoder=False,
         dynamics_control_points=24,
+        direct_dynamics_decoder=False,
+        direct_dynamics_control_points=40,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -761,6 +907,7 @@ class ProtoBasisNet(nn.Module):
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
         self.basis_bridge_decoder_enabled = bool(basis_bridge_decoder)
         self.temporal_dynamics_decoder_enabled = bool(temporal_dynamics_decoder)
+        self.direct_dynamics_decoder_enabled = bool(direct_dynamics_decoder)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -900,6 +1047,18 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.temporal_dynamics_decoder = None
+        if self.direct_dynamics_decoder_enabled:
+            self.direct_dynamics_decoder = PrototypeDynamicsRolloutDecoder(
+                d_model=d_model,
+                basis_dim=basis_dim,
+                pred_len=pred_len,
+                num_control_points=direct_dynamics_control_points,
+                nhead=nhead,
+                ff_dim=ff_dim,
+                dropout=dropout,
+            )
+        else:
+            self.direct_dynamics_decoder = None
         if self.endpoint_shape_refiner_enabled:
             self.endpoint_shape_refiner = EndpointPreservingShapeRefiner(d_model=d_model, pred_len=pred_len)
         else:
@@ -1017,6 +1176,9 @@ class ProtoBasisNet(nn.Module):
         bridge_gate = None
         dynamics_local = None
         dynamics_coeff = None
+        direct_dynamics_local = None
+        direct_dynamics_coeff = None
+        direct_dynamics_gate = None
         if self.basis_bridge_decoder is not None:
             coeff_before_bridge = coeff
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
@@ -1066,6 +1228,23 @@ class ProtoBasisNet(nn.Module):
                 support_scale = support_scale.unsqueeze(-1).unsqueeze(-1)
                 local_gate = local_gate * support_scale
             coarse_local = coarse_local + local_gate * (local_path - coarse_local)
+        if self.direct_dynamics_decoder is not None:
+            coeff_before_direct = coeff
+            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+            coeff, coarse_local, direct_dynamics_gate = self.direct_dynamics_decoder(
+                active_query,
+                endpoint_mode_local,
+                coeff,
+                coarse_local,
+                target_temporal_feat,
+                agent_feat,
+                obs_mask,
+                anchor_local,
+                self.basis_pinv,
+            )
+            direct_dynamics_coeff = coeff
+            direct_dynamics_local = coarse_local
+            coeff_delta = coeff_delta + (coeff - coeff_before_direct)
         use_refiner = enable_refiner and (not self.disable_refiner)
         refined_local = self.refiner(coarse_local, active_query, difficulty_gate) if use_refiner else coarse_local
         if self.endpoint_shape_refiner is not None:
@@ -1102,6 +1281,14 @@ class ProtoBasisNet(nn.Module):
                 {
                     "dynamics_coeff": dynamics_coeff,
                     "dynamics_local": dynamics_local,
+                }
+            )
+        if direct_dynamics_local is not None:
+            aux.update(
+                {
+                    "direct_dynamics_coeff": direct_dynamics_coeff,
+                    "direct_dynamics_local": direct_dynamics_local,
+                    "direct_dynamics_gate": direct_dynamics_gate,
                 }
             )
 

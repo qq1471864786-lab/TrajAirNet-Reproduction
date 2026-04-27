@@ -98,6 +98,8 @@ def build_model(config, checkpoint):
         bridge_control_points=int(config.get("bridge_control_points", 16)),
         temporal_dynamics_decoder=bool(config.get("temporal_dynamics_decoder", False)),
         dynamics_control_points=int(config.get("dynamics_control_points", 24)),
+        direct_dynamics_decoder=bool(config.get("direct_dynamics_decoder", False)),
+        direct_dynamics_control_points=int(config.get("direct_dynamics_control_points", 40)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),
