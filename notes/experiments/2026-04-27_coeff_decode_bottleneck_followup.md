@@ -331,3 +331,45 @@ Validation:
 - Init from current best checkpoint with partial load.
 - Freeze encoder/social/router, train anchor-set decoder + coupled/refiner stack first.
 - Use winner-based projection guidance and best-of-20 ADE/FDE to see whether removing hard router candidate pruning can open a path toward 0.19.
+
+Short result:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | Decision |
+| --- | ---: | ---: | ---: | --- |
+| anchor-set smoke | 0.5183 | 0.6415 | 0.8539 | trainable but far |
+| anchor-set frozen stack, epoch 3 | 0.2924 | 0.4157 | 0.4498 | learns quickly |
+| anchor-set frozen stack, epoch 8 | 0.2694 | 0.3828 | 0.4183 | still far from 0.19 |
+
+Conclusion:
+
+- The chain is not dead: removing hard router candidates can learn from 0.52 to 0.27 in a short frozen-stack run.
+- It is not yet competitive with the default checkpoint. The next valid check is to unfreeze the full model from this anchor-set checkpoint and see whether joint adaptation can approach the baseline range.
+
+Unfrozen follow-up:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | GLeV@20 | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| anchor-set full unfreeze, epoch 12 | 0.2233 | 0.3227 | 0.3691 | 0.0895 | worse than current default |
+
+Conclusion:
+
+- Do not make `anchor_set_decoder` default.
+- Removing hard router selection alone did not create a path to 0.19. After full unfreeze it approached the default range but stayed clearly worse than the current checkpoint (`0.2137/0.3046` on the same 50-batch reference).
+- The remaining 0.19 attempt should now bypass the whole prototype/basis coefficient generation path, not keep adapting it.
+
+## 2026-04-27 Direct Intention Trajectory Decoder Plan
+
+Purpose: test whether the 0.19 gap is caused by the ProtoBasis candidate-generation path itself. This branch bypasses hard prototype top-k, basis coeff, basis projection, linear anchor, and post-hoc refiner as the main generator. It keeps only the temporal/social encoder and protocol-compatible outputs.
+
+Design:
+
+- Add `intention_trajectory_decoder`, default off.
+- Use 20 learned intention queries, cross-attention to target temporal history and all observed agents, and direct 120-step local trajectory output.
+- Use constant-velocity and endpoint-conditioned path priors only as initialization structure; the final path is not projected back into the fixed basis.
+- Keep router logits only for compatibility/reporting; set prototype/basis/router-aligned training losses to zero in validation runs.
+
+Validation:
+
+- Short 111_days run from current best checkpoint with partial load.
+- First freeze encoder/social/router and train only the direct intention decoder to test whether the decoder can exploit the existing representation.
+- If 50-batch ADE@20 does not approach or beat `0.2137` quickly, do not spend full training on it. If it beats baseline by at least `0.015`, unfreeze and expand.

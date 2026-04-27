@@ -1059,6 +1059,108 @@ class AnchorSetTrajectoryDecoder(nn.Module):
         return hidden, endpoint, coeff, score, gate
 
 
+class IntentionTrajectoryDecoder(nn.Module):
+    def __init__(
+        self,
+        d_model=96,
+        pred_len=120,
+        num_modes=20,
+        nhead=4,
+        ff_dim=256,
+        layers=3,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.pred_len = pred_len
+        self.num_modes = num_modes
+        self.mode_tokens = nn.Parameter(torch.randn(num_modes, d_model) * 0.02)
+        self.target_proj = nn.Linear(d_model, d_model)
+        self.scene_proj = nn.Linear(d_model, d_model)
+        self.velocity_proj = nn.Linear(3, d_model)
+        self.time_emb = nn.Embedding(pred_len, d_model)
+        self.register_buffer("time_ids", torch.arange(pred_len, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "step_ids",
+            torch.arange(1, pred_len + 1, dtype=torch.float32).view(1, 1, pred_len, 1),
+            persistent=False,
+        )
+        self.self_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
+        )
+        self.target_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
+        )
+        self.agent_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
+        )
+        self.ffn = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(d_model, ff_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(ff_dim, d_model),
+                )
+                for _ in range(layers)
+            ]
+        )
+        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(layers * 4)])
+        self.traj_norm = nn.LayerNorm(d_model)
+        self.path_head = nn.Sequential(
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, 3),
+        )
+        self.endpoint_head = nn.Sequential(
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, 3),
+        )
+        self.endpoint_blend = nn.Sequential(nn.Linear(d_model, 1), nn.Sigmoid())
+        self.score_head = nn.Linear(d_model, 1)
+
+    def forward(self, target_ctx, scene_ctx, target_temporal_feat, agent_feat, obs_mask, target_local_obs):
+        last_velocity = target_local_obs[:, -1] - target_local_obs[:, -2]
+        hidden = (
+            self.mode_tokens.to(device=target_ctx.device, dtype=target_ctx.dtype)[None]
+            + self.target_proj(target_ctx)[:, None, :]
+            + self.scene_proj(scene_ctx)[:, None, :]
+            + self.velocity_proj(last_velocity)[:, None, :]
+        )
+        norm_index = 0
+        for layer_index in range(len(self.self_attn)):
+            attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            attended, _ = self.target_attn[layer_index](hidden, target_temporal_feat, target_temporal_feat)
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            attended, _ = self.agent_attn[layer_index](hidden, agent_feat, agent_feat, key_padding_mask=~obs_mask)
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
+            norm_index += 1
+
+        time_feat = self.time_emb(self.time_ids[: self.pred_len]).to(dtype=hidden.dtype)
+        traj_hidden = self.traj_norm(hidden[:, :, None, :] + time_feat[None, None, :, :])
+        residual_path = self.path_head(traj_hidden)
+        velocity_path = self.step_ids.to(device=hidden.device, dtype=hidden.dtype) * last_velocity[:, None, None, :]
+        direct_path = velocity_path + residual_path
+
+        endpoint = self.endpoint_head(hidden) + self.pred_len * last_velocity[:, None, :]
+        alpha = torch.linspace(1.0 / self.pred_len, 1.0, steps=self.pred_len, device=hidden.device, dtype=hidden.dtype)
+        endpoint_path = alpha[None, None, :, None] * endpoint[:, :, None, :]
+        blend = self.endpoint_blend(hidden)[:, :, None, :]
+        direct_path = blend * endpoint_path + (1.0 - blend) * direct_path
+        score = self.score_head(hidden).squeeze(-1)
+        return hidden, direct_path, score, endpoint
+
+
 class ProtoBasisNet(nn.Module):
     def __init__(
         self,
@@ -1102,6 +1204,9 @@ class ProtoBasisNet(nn.Module):
         soft_proto_modes=20,
         anchor_set_decoder=False,
         anchor_set_modes=20,
+        intention_trajectory_decoder=False,
+        intention_modes=20,
+        intention_decoder_layers=3,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -1138,6 +1243,7 @@ class ProtoBasisNet(nn.Module):
         self.direct_dynamics_decoder_enabled = bool(direct_dynamics_decoder)
         self.soft_proto_decoder_enabled = bool(soft_proto_decoder)
         self.anchor_set_decoder_enabled = bool(anchor_set_decoder)
+        self.intention_trajectory_decoder_enabled = bool(intention_trajectory_decoder)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -1232,6 +1338,18 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.anchor_set_decoder = None
+        if self.intention_trajectory_decoder_enabled:
+            self.intention_trajectory_decoder = IntentionTrajectoryDecoder(
+                d_model=d_model,
+                pred_len=pred_len,
+                num_modes=int(intention_modes),
+                nhead=nhead,
+                ff_dim=ff_dim,
+                layers=int(intention_decoder_layers),
+                dropout=dropout,
+            )
+        else:
+            self.intention_trajectory_decoder = None
         if self.basis_coeff_decoder_enabled:
             self.basis_coeff_decoder = BasisAwareCoeffDecoder(
                 d_model=d_model,
@@ -1362,6 +1480,39 @@ class ProtoBasisNet(nn.Module):
             force_gt_proto=force_gt_proto,
             disable_router=self.disable_router,
         )
+
+        if self.intention_trajectory_decoder is not None:
+            active_query, direct_local, pred_score, endpoint_mode_local = self.intention_trajectory_decoder(
+                target_ctx,
+                scene_ctx,
+                target_temporal_feat,
+                agent_feat,
+                obs_mask,
+                local_xyz[:, 0],
+            )
+            batch_size, num_modes = direct_local.shape[:2]
+            coeff = direct_local.new_zeros(batch_size, num_modes, self.basis_bank.basis_bank.size(0))
+            pred_xyz = self.pose_normalizer.inverse(direct_local, origin, rotation)
+            aux = {
+                "coeff": coeff,
+                "coeff_delta": coeff,
+                "endpoint_residual": endpoint_residual,
+                "endpoint_mode_local": endpoint_mode_local,
+                "coarse_local": direct_local,
+                "direct_dynamics_local": direct_local,
+                "candidate_proto_idx": None,
+                "basis_matrix": self.basis_matrix_flat,
+                "basis_pinv": self.basis_pinv,
+                "proto_frequency": self.proto_frequency,
+                "proto_summary_5d": self.proto_summary_5d,
+            }
+            return {
+                "pred_xyz": pred_xyz,
+                "pred_score": pred_score,
+                "proto_logits": proto_logits,
+                "top_proto_idx": top_proto_idx,
+                "aux": aux,
+            }
 
         if self.anchor_set_decoder is not None:
             anchor_ids = self.anchor_set_ids.to(device=target_ctx.device)
