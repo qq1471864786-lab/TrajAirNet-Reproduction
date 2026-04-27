@@ -697,6 +697,7 @@ def apply_freeze_policy(model, args):
             trainable_modules.extend(
                 [
                     getattr(model, "query_decoder", None),
+                    getattr(model, "micro_endpoint_head", None),
                     getattr(model, "stage2_proj", None),
                     getattr(model, "stage2_endpoint_head", None),
                     getattr(model, "stage2_coeff_head", None),
