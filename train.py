@@ -172,7 +172,7 @@ def build_parser():
     parser.add_argument("--min_lr", type=float, default=1.5e-5)
     parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra refiner epochs.")
     parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
-    parser.add_argument("--stage_c_div_weight", type=float, default=2.0)
+    parser.add_argument("--stage_c_div_weight", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
@@ -474,6 +474,8 @@ def apply_training_defaults(args):
         args.early_stop_patience = 24 if is_unified and is_main_dataset else 0
     if args.early_stop_min_epoch is None:
         args.early_stop_min_epoch = 35 if is_unified and is_main_dataset else 0
+    if args.stage_c_div_weight is None:
+        args.stage_c_div_weight = 1.0 if is_unified and is_main_dataset else 2.0
 
     if args.lambda_gt_proto_shape is None:
         args.lambda_gt_proto_shape = 0.15 if is_unified and is_main_dataset else 0.0

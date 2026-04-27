@@ -437,3 +437,34 @@ Conclusion:
 - Promote `micro_endpoint_offsets` as the unified default for the next baseline because the gain survives a 100-batch check and improves ADE, FDE, Top1, and rare FDE.
 - This is not the 0.19 solution. It recovers about `0.004` ADE on the 100-batch check, so endpoint allocation is a real but insufficient bottleneck.
 - GLeV drops slightly, so future runs should monitor diversity before claiming a pure win.
+
+## 2026-04-27 Micro Endpoint Stack Continuation to 0.19
+
+Purpose: test whether the validated micro-endpoint chain can actually reach the 111_days `0.19` ADE target when trained through, before adding another architecture module.
+
+Setup:
+
+- Start checkpoint: `save_model_micro_endpoint_stack_continue2_e12_b512_111_mid/111_days/seed3407/best_best20.pt`.
+- Train only the coefficient / endpoint / coupled / shape-refiner stack (`--freeze_backbone_except_coeff_decoder_stack`).
+- Keep protocol `trajair_40to120_best20`, `K=20`, no weather or extra context.
+- Evaluate short/mid with 200 test batches, then confirm the best checkpoint with full 111_days test.
+
+Results:
+
+| Variant | Eval | ADE@20 | FDE@20 | ADE@5 | Top1_ADE | rare_FDE@20 | GLeV@20 | Decision |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| continue3, standard stack | 200 batch | 0.1925 | 0.2781 | n/a | 0.5735 | 0.6570 | 0.0778 | strong, full-test |
+| continue3, standard stack | full 111_days | 0.1908 | 0.2728 | 0.3594 | 0.5726 | 0.6394 | 0.0770 | near target |
+| 30-candidate internal expansion | 200 batch | 0.2090 | 0.3165 | 0.3821 | 0.5951 | 0.7598 | 0.1043 | stop; diversity up but ADE worse |
+| full unfreeze low LR | 200 batch | 0.2016 | 0.2934 | n/a | n/a | 0.6532 | 0.0802 | stop; not the short-term bottleneck |
+| continue4, low LR | 200 batch | 0.1914 | 0.2775 | n/a | 0.5737 | 0.6567 | 0.0769 | useful but weaker |
+| continue4, low diversity pressure | 200 batch | 0.1908 | 0.2749 | n/a | 0.5728 | 0.6539 | 0.0783 | full-test |
+| continue4, low diversity pressure | full 111_days | 0.1892 | 0.2697 | 0.3611 | 0.5720 | 0.6363 | 0.0776 | new best baseline |
+
+Conclusion:
+
+- The effective chain is not another large decoder: it is endpoint allocation (`micro_endpoint_offsets`) plus sustained training of the endpoint/coeff/coupled/refiner stack.
+- Lowering stage-C diversity pressure from `2.0` to `1.0` improves ADE and FDE in the continuation run while keeping GLeV close to the previous full result (`0.0776` vs `0.0770`).
+- The 30-candidate branch shows that simply adding more internal candidates increases endpoint spread/GLeV but hurts ADE/FDE, so the next architecture work should not be raw candidate expansion.
+- Full backbone/router unfreeze is not the immediate bottleneck; it stayed around `0.2016` on the same 200-batch check.
+- Promote the low-diversity micro-endpoint continuation as the current 111_days baseline: full `ADE@20=0.1892`, `FDE@20=0.2697`.
