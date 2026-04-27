@@ -314,3 +314,20 @@ Conclusion:
 - Do not make `soft_proto_decoder` default.
 - This is valid negative evidence for a medium/large upstream change: giving each hard candidate soft access to all prototype memories increased endpoint spread but did not improve ADE/FDE.
 - Together with the failed decoder replacements, the current short-test evidence says the remaining gap is not solved by adding stronger heads on top of the current observed-trajectory context. A future large redesign would need a different source of intent signal or a full candidate-generation retraining schedule, not another partial checkpoint add-on.
+
+## 2026-04-27 Anchor-Set Trajectory Decoder Plan
+
+Purpose: test a more radical candidate-generation chain that removes per-sample hard router selection from the evaluated candidates. This is a performance-first sacrificial branch: if it works, later work can decide how to reintroduce ProtoBasis interpretability.
+
+Design:
+
+- Select 20 global prototype anchors by frequency-aware farthest-point sampling over prototype endpoints.
+- Generate 20 candidates directly from those anchors, target/social context, and agent attention.
+- Initialize endpoint and coeff residual heads to zero so the run starts from meaningful global anchor trajectories, not collapsed random endpoints.
+- Keep the router logits only for reporting/prototype auxiliary compatibility; disable router-aligned losses for the short test.
+
+Validation:
+
+- Init from current best checkpoint with partial load.
+- Freeze encoder/social/router, train anchor-set decoder + coupled/refiner stack first.
+- Use winner-based projection guidance and best-of-20 ADE/FDE to see whether removing hard router candidate pruning can open a path toward 0.19.

@@ -102,6 +102,8 @@ def build_model(config, checkpoint):
         direct_dynamics_control_points=int(config.get("direct_dynamics_control_points", 40)),
         soft_proto_decoder=bool(config.get("soft_proto_decoder", False)),
         soft_proto_modes=int(config.get("soft_proto_modes", 20)),
+        anchor_set_decoder=bool(config.get("anchor_set_decoder", False)),
+        anchor_set_modes=int(config.get("anchor_set_modes", 20)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),

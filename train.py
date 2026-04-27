@@ -115,6 +115,10 @@ def build_parser():
     parser.add_argument("--no_soft_proto_decoder", dest="soft_proto_decoder", action="store_false")
     parser.set_defaults(soft_proto_decoder=None)
     parser.add_argument("--soft_proto_modes", type=int, default=None)
+    parser.add_argument("--anchor_set_decoder", dest="anchor_set_decoder", action="store_true")
+    parser.add_argument("--no_anchor_set_decoder", dest="anchor_set_decoder", action="store_false")
+    parser.set_defaults(anchor_set_decoder=None)
+    parser.add_argument("--anchor_set_modes", type=int, default=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -282,6 +286,11 @@ def build_parser():
         help="Train soft prototype-memory decoder plus coupled/refiner stack.",
     )
     parser.add_argument(
+        "--freeze_backbone_except_anchor_set_stack",
+        action="store_true",
+        help="Train global anchor-set decoder plus coupled/refiner stack.",
+    )
+    parser.add_argument(
         "--freeze_backbone_except_coeff_correction",
         dest="freeze_backbone_except_new_heads",
         action="store_true",
@@ -388,6 +397,10 @@ def apply_training_defaults(args):
         args.soft_proto_decoder = False
     if args.soft_proto_modes is None:
         args.soft_proto_modes = 20
+    if args.anchor_set_decoder is None:
+        args.anchor_set_decoder = False
+    if args.anchor_set_modes is None:
+        args.anchor_set_modes = 20
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
@@ -615,6 +628,8 @@ def build_model(args, model_artifact):
         direct_dynamics_control_points=args.direct_dynamics_control_points,
         soft_proto_decoder=bool(args.soft_proto_decoder),
         soft_proto_modes=args.soft_proto_modes,
+        anchor_set_decoder=bool(args.anchor_set_decoder),
+        anchor_set_modes=args.anchor_set_modes,
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
@@ -732,6 +747,27 @@ def apply_freeze_policy(model, args):
         trainable_modules = [module for module in trainable_modules if module is not None]
         if not trainable_modules:
             raise RuntimeError("--freeze_backbone_except_soft_proto_stack requires --soft_proto_decoder.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
+    if args.freeze_backbone_except_anchor_set_stack:
+        trainable_modules = [
+            getattr(model, "anchor_set_decoder", None),
+            getattr(model, "coupled_decoder", None),
+            getattr(model, "endpoint_shape_refiner", None),
+            getattr(model, "control_shape_refiner", None),
+            getattr(model, "refiner", None),
+        ]
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_anchor_set_stack requires --anchor_set_decoder.")
         for parameter in model.parameters():
             parameter.requires_grad = False
         for module in trainable_modules:
@@ -1249,6 +1285,8 @@ def main():
         "direct_dynamics_control_points": args.direct_dynamics_control_points,
         "soft_proto_decoder": bool(args.soft_proto_decoder),
         "soft_proto_modes": args.soft_proto_modes,
+        "anchor_set_decoder": bool(args.anchor_set_decoder),
+        "anchor_set_modes": args.anchor_set_modes,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
@@ -1278,6 +1316,7 @@ def main():
         "freeze_backbone_except_temporal_dynamics_stack": bool(args.freeze_backbone_except_temporal_dynamics_stack),
         "freeze_backbone_except_direct_dynamics_stack": bool(args.freeze_backbone_except_direct_dynamics_stack),
         "freeze_backbone_except_soft_proto_stack": bool(args.freeze_backbone_except_soft_proto_stack),
+        "freeze_backbone_except_anchor_set_stack": bool(args.freeze_backbone_except_anchor_set_stack),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

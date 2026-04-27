@@ -960,6 +960,105 @@ def build_anchor(endpoint_local, alpha):
     return alpha[None, None, :, None] * endpoint_local[:, :, None, :]
 
 
+def _select_diverse_anchor_ids(proto_summary_5d, proto_frequency, num_modes):
+    num_proto = int(proto_summary_5d.size(0))
+    if num_proto == 0 or num_modes <= 0:
+        return torch.empty(0, dtype=torch.long)
+    endpoints = proto_summary_5d[:, :3].float()
+    frequency = proto_frequency.float().clamp_min(1e-6)
+    selected = [int(frequency.argmax().item())]
+    min_dist = torch.cdist(endpoints[selected], endpoints).squeeze(0)
+    freq_scale = (frequency / frequency.max().clamp_min(1e-6)).sqrt()
+    while len(selected) < min(num_modes, num_proto):
+        score = min_dist * freq_scale
+        score[selected] = -1.0
+        next_idx = int(score.argmax().item())
+        selected.append(next_idx)
+        min_dist = torch.minimum(min_dist, torch.cdist(endpoints[next_idx : next_idx + 1], endpoints).squeeze(0))
+    while len(selected) < num_modes:
+        selected.append(selected[len(selected) % len(selected)])
+    return torch.tensor(selected, dtype=torch.long)
+
+
+class AnchorSetTrajectoryDecoder(nn.Module):
+    def __init__(self, d_model=96, basis_dim=16, num_modes=20, nhead=4, ff_dim=256, dropout=0.1):
+        super().__init__()
+        self.num_modes = int(num_modes)
+        self.mode_tokens = nn.Parameter(torch.randn(self.num_modes, d_model) * 0.02)
+        self.target_proj = nn.Linear(d_model, d_model)
+        self.scene_proj = nn.Linear(d_model, d_model)
+        self.anchor_summary_proj = nn.Linear(5, d_model)
+        self.anchor_coeff_proj = nn.Linear(basis_dim, d_model)
+        self.self_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
+        )
+        self.agent_attn = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
+        )
+        self.ffn = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(d_model, ff_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(ff_dim, d_model),
+                )
+                for _ in range(2)
+            ]
+        )
+        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(6)])
+        self.endpoint_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, 3),
+        )
+        self.coeff_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, basis_dim),
+        )
+        self.score_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
+        self.gate_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
+        nn.init.zeros_(self.endpoint_head[-1].weight)
+        nn.init.zeros_(self.endpoint_head[-1].bias)
+        nn.init.zeros_(self.coeff_head[-1].weight)
+        nn.init.zeros_(self.coeff_head[-1].bias)
+
+    def forward(self, target_ctx, scene_ctx, agent_feat, obs_mask, anchor_summary, anchor_coeff):
+        batch_size = target_ctx.size(0)
+        anchor_summary = anchor_summary.to(device=target_ctx.device, dtype=target_ctx.dtype)
+        anchor_coeff = anchor_coeff.to(device=target_ctx.device, dtype=target_ctx.dtype)
+        hidden = (
+            self.mode_tokens.to(device=target_ctx.device, dtype=target_ctx.dtype)[None]
+            + self.target_proj(target_ctx)[:, None, :]
+            + self.scene_proj(scene_ctx)[:, None, :]
+            + self.anchor_summary_proj(anchor_summary)[None]
+            + self.anchor_coeff_proj(anchor_coeff)[None]
+        )
+        norm_index = 0
+        for layer_index in range(2):
+            attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            attended, _ = self.agent_attn[layer_index](hidden, agent_feat, agent_feat, key_padding_mask=~obs_mask)
+            hidden = self.norms[norm_index](hidden + attended)
+            norm_index += 1
+
+            hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
+            norm_index += 1
+
+        endpoint = anchor_summary[None, :, :3] + self.endpoint_head(hidden)
+        coeff = anchor_coeff[None, :, :] + self.coeff_head(hidden)
+        score = self.score_head(hidden).squeeze(-1)
+        gate = torch.sigmoid(self.gate_head(hidden)).squeeze(-1)
+        return hidden, endpoint, coeff, score, gate
+
+
 class ProtoBasisNet(nn.Module):
     def __init__(
         self,
@@ -1001,6 +1100,8 @@ class ProtoBasisNet(nn.Module):
         direct_dynamics_control_points=40,
         soft_proto_decoder=False,
         soft_proto_modes=20,
+        anchor_set_decoder=False,
+        anchor_set_modes=20,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -1036,6 +1137,7 @@ class ProtoBasisNet(nn.Module):
         self.temporal_dynamics_decoder_enabled = bool(temporal_dynamics_decoder)
         self.direct_dynamics_decoder_enabled = bool(direct_dynamics_decoder)
         self.soft_proto_decoder_enabled = bool(soft_proto_decoder)
+        self.anchor_set_decoder_enabled = bool(anchor_set_decoder)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -1117,6 +1219,19 @@ class ProtoBasisNet(nn.Module):
         self.register_buffer("micro_coeff_anchors", micro_coeff_anchors, persistent=False)
         self.has_micro_coeff_anchors = self.use_micro_coeff_anchors and self.micro_coeff_anchors.numel() > 0
         self.has_local_basis = self.local_basis_dim > 0 and self.local_basis_bank.numel() > 0
+        anchor_set_ids = _select_diverse_anchor_ids(self.proto_summary_5d, self.proto_frequency, int(anchor_set_modes))
+        self.register_buffer("anchor_set_ids", anchor_set_ids, persistent=False)
+        if self.anchor_set_decoder_enabled:
+            self.anchor_set_decoder = AnchorSetTrajectoryDecoder(
+                d_model=d_model,
+                basis_dim=basis_dim,
+                num_modes=int(anchor_set_modes),
+                nhead=nhead,
+                ff_dim=ff_dim,
+                dropout=dropout,
+            )
+        else:
+            self.anchor_set_decoder = None
         if self.basis_coeff_decoder_enabled:
             self.basis_coeff_decoder = BasisAwareCoeffDecoder(
                 d_model=d_model,
@@ -1248,19 +1363,45 @@ class ProtoBasisNet(nn.Module):
             disable_router=self.disable_router,
         )
 
-        micro_coeff_anchor = self.micro_coeff_anchors[top_proto_idx] if self.has_micro_coeff_anchors else None
-        query_feat, coeff, pred_score, difficulty_gate, coeff_delta = self.query_decoder(
-            proto_token,
-            endpoint_local,
-            target_ctx,
-            agent_feat,
-            obs_mask,
-            micro_coeff_anchor=micro_coeff_anchor,
-        )
-        endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
-        anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-        coarse_local = self.basis_bank(anchor_local, coeff)
-        active_query = query_feat
+        if self.anchor_set_decoder is not None:
+            anchor_ids = self.anchor_set_ids.to(device=target_ctx.device)
+            anchor_summary = self.proto_summary_5d.index_select(0, anchor_ids)
+            if self.has_micro_coeff_anchors:
+                anchor_coeff = self.micro_coeff_anchors.index_select(0, anchor_ids)[:, 0]
+            else:
+                anchor_coeff = torch.zeros(
+                    anchor_ids.size(0),
+                    self.basis_bank.basis_bank.size(0),
+                    device=target_ctx.device,
+                    dtype=target_ctx.dtype,
+                )
+            query_feat, endpoint_mode_local, coeff, pred_score, difficulty_gate = self.anchor_set_decoder(
+                target_ctx,
+                scene_ctx,
+                agent_feat,
+                obs_mask,
+                anchor_summary,
+                anchor_coeff,
+            )
+            candidate_proto_idx = anchor_ids[None, :].expand(target_ctx.size(0), -1)
+            coeff_delta = coeff - anchor_coeff.to(device=coeff.device, dtype=coeff.dtype)[None]
+            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+            coarse_local = self.basis_bank(anchor_local, coeff)
+            active_query = query_feat
+        else:
+            micro_coeff_anchor = self.micro_coeff_anchors[top_proto_idx] if self.has_micro_coeff_anchors else None
+            query_feat, coeff, pred_score, difficulty_gate, coeff_delta = self.query_decoder(
+                proto_token,
+                endpoint_local,
+                target_ctx,
+                agent_feat,
+                obs_mask,
+                micro_coeff_anchor=micro_coeff_anchor,
+            )
+            endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
+            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+            coarse_local = self.basis_bank(anchor_local, coeff)
+            active_query = query_feat
         basis_coeff = None
         if self.basis_coeff_decoder is not None:
             coeff_before_basis = coeff
@@ -1297,8 +1438,9 @@ class ProtoBasisNet(nn.Module):
                 self.anchor_alpha,
             )
             coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
-        candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
-        if self.candidate_keep_indices.numel() > 0:
+        if self.anchor_set_decoder is None:
+            candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
+        if self.anchor_set_decoder is None and self.candidate_keep_indices.numel() > 0:
             keep = self.candidate_keep_indices.to(device=coeff.device)
             query_feat = query_feat.index_select(1, keep)
             coeff = coeff.index_select(1, keep)
