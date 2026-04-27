@@ -284,13 +284,14 @@ Conclusion:
 
 ## 2026-04-27 Soft Prototype-Memory Decoder Plan
 
-Purpose: test a larger upstream change against the router-miss bottleneck. Instead of selecting hard top-k prototypes and discarding the rest before decoding, generate the evaluated K candidates with learned candidate queries that cross-attend to all prototype memories.
+Purpose: test a larger upstream change against the router-miss bottleneck. Instead of letting hard top-k prototypes be the only information source after routing, let each evaluated candidate cross-attend to all prototype memories and learn endpoint/coeff/score residuals.
 
 Design:
 
 - Keep the temporal/social encoder and router logits for auxiliary prototype learning and reporting.
-- Replace hard top-k candidate generation with `soft_proto_decoder`: 20 candidate queries attend over all 64 prototype tokens plus prototype summary features.
-- Generate endpoint, basis coeff, score, and refiner gate directly for the 20 candidates.
+- Keep the current hard candidates as a strong initialization so the short test starts from the validated checkpoint behavior.
+- Apply `soft_proto_decoder` after candidate pruning: each of the 20 candidates attends over all 64 prototype tokens plus prototype summary features.
+- Generate residual updates to endpoint, basis coeff, score, and refiner gate for the 20 candidates.
 - Continue through existing basis reconstruction, coupled decoder, local-basis/refiner stack.
 - Use prototype attention argmax only as a diagnostic/alignment id; do not rely on GT-prototype-aligned losses for the first short run.
 

@@ -463,6 +463,9 @@ class SoftPrototypeSetDecoder(nn.Module):
         )
         self.score_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
         self.gate_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
+        for head in (self.endpoint_head, self.coeff_head, self.score_head, self.gate_head):
+            nn.init.zeros_(head[-1].weight)
+            nn.init.zeros_(head[-1].bias)
 
     def forward(
         self,
@@ -473,13 +476,18 @@ class SoftPrototypeSetDecoder(nn.Module):
         proto_summary_5d,
         proto_embedding_weight,
         proto_proj,
+        base_query=None,
+        base_endpoint=None,
+        base_coeff=None,
+        base_score=None,
+        base_gate=None,
     ):
         batch_size = target_ctx.size(0)
-        hidden = (
-            self.mode_tokens.to(device=target_ctx.device, dtype=target_ctx.dtype)[None]
-            + self.target_proj(target_ctx)[:, None, :]
-            + self.scene_proj(scene_ctx)[:, None, :]
-        )
+        context = self.target_proj(target_ctx)[:, None, :] + self.scene_proj(scene_ctx)[:, None, :]
+        if base_query is None:
+            hidden = self.mode_tokens.to(device=target_ctx.device, dtype=target_ctx.dtype)[None] + context
+        else:
+            hidden = base_query + context
         proto_memory = proto_embedding_weight + proto_proj(proto_summary_5d)
         proto_memory = proto_memory.to(device=target_ctx.device, dtype=target_ctx.dtype)
         proto_memory = proto_memory[None].expand(batch_size, -1, -1)
@@ -508,13 +516,24 @@ class SoftPrototypeSetDecoder(nn.Module):
                 (batch_size, self.num_modes, proto_summary.size(0)),
                 1.0 / max(proto_summary.size(0), 1),
             )
-        proto_anchor = proto_attn_weights @ proto_summary[:, :3]
-        endpoint_local = proto_anchor + self.endpoint_head(hidden)
-        coeff = self.coeff_head(hidden)
-        score = self.score_head(hidden).squeeze(-1)
-        gate = torch.sigmoid(self.gate_head(hidden)).squeeze(-1)
+        endpoint_update = self.endpoint_head(hidden)
+        coeff_update = self.coeff_head(hidden)
+        score_update = self.score_head(hidden).squeeze(-1)
+        gate_update = 0.25 * torch.tanh(self.gate_head(hidden)).squeeze(-1)
+        if base_endpoint is None:
+            proto_anchor = proto_attn_weights @ proto_summary[:, :3]
+            endpoint_local = proto_anchor + endpoint_update
+            coeff = coeff_update
+            score = score_update
+            gate = torch.sigmoid(self.gate_head(hidden)).squeeze(-1)
+        else:
+            endpoint_local = base_endpoint + endpoint_update
+            coeff = base_coeff + coeff_update
+            score = base_score + score_update
+            gate = (base_gate + gate_update).clamp(0.0, 1.0)
         candidate_proto_idx = proto_attn_weights.argmax(dim=-1)
-        return hidden, endpoint_local, coeff, score, gate, candidate_proto_idx
+        query_out = base_query if base_query is not None else hidden
+        return query_out, endpoint_local, coeff, score, gate, candidate_proto_idx
 
 
 class EndpointPreservingShapeRefiner(nn.Module):
@@ -1229,34 +1248,19 @@ class ProtoBasisNet(nn.Module):
             disable_router=self.disable_router,
         )
 
-        if self.soft_proto_decoder is not None:
-            query_feat, endpoint_mode_local, coeff, pred_score, difficulty_gate, candidate_proto_idx = self.soft_proto_decoder(
-                target_ctx,
-                scene_ctx,
-                agent_feat,
-                obs_mask,
-                self.proto_summary_5d,
-                self.prototype_router.proto_emb.weight,
-                self.prototype_router.proto_proj,
-            )
-            coeff_delta = coeff
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coarse_local = self.basis_bank(anchor_local, coeff)
-            active_query = query_feat
-        else:
-            micro_coeff_anchor = self.micro_coeff_anchors[top_proto_idx] if self.has_micro_coeff_anchors else None
-            query_feat, coeff, pred_score, difficulty_gate, coeff_delta = self.query_decoder(
-                proto_token,
-                endpoint_local,
-                target_ctx,
-                agent_feat,
-                obs_mask,
-                micro_coeff_anchor=micro_coeff_anchor,
-            )
-            endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coarse_local = self.basis_bank(anchor_local, coeff)
-            active_query = query_feat
+        micro_coeff_anchor = self.micro_coeff_anchors[top_proto_idx] if self.has_micro_coeff_anchors else None
+        query_feat, coeff, pred_score, difficulty_gate, coeff_delta = self.query_decoder(
+            proto_token,
+            endpoint_local,
+            target_ctx,
+            agent_feat,
+            obs_mask,
+            micro_coeff_anchor=micro_coeff_anchor,
+        )
+        endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
+        anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+        coarse_local = self.basis_bank(anchor_local, coeff)
+        active_query = query_feat
         basis_coeff = None
         if self.basis_coeff_decoder is not None:
             coeff_before_basis = coeff
@@ -1293,9 +1297,8 @@ class ProtoBasisNet(nn.Module):
                 self.anchor_alpha,
             )
             coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
-        if self.soft_proto_decoder is None:
-            candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
-        if self.soft_proto_decoder is None and self.candidate_keep_indices.numel() > 0:
+        candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
+        if self.candidate_keep_indices.numel() > 0:
             keep = self.candidate_keep_indices.to(device=coeff.device)
             query_feat = query_feat.index_select(1, keep)
             coeff = coeff.index_select(1, keep)
@@ -1306,6 +1309,26 @@ class ProtoBasisNet(nn.Module):
             coarse_local = coarse_local.index_select(1, keep)
             active_query = active_query.index_select(1, keep)
             candidate_proto_idx = candidate_proto_idx.index_select(1, keep)
+        soft_proto_idx = None
+        if self.soft_proto_decoder is not None:
+            coeff_before_soft = coeff
+            active_query, endpoint_mode_local, coeff, pred_score, difficulty_gate, soft_proto_idx = self.soft_proto_decoder(
+                target_ctx,
+                scene_ctx,
+                agent_feat,
+                obs_mask,
+                self.proto_summary_5d,
+                self.prototype_router.proto_emb.weight,
+                self.prototype_router.proto_proj,
+                base_query=active_query,
+                base_endpoint=endpoint_mode_local,
+                base_coeff=coeff,
+                base_score=pred_score,
+                base_gate=difficulty_gate,
+            )
+            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+            coarse_local = self.basis_bank(anchor_local, coeff)
+            coeff_delta = coeff_delta + (coeff - coeff_before_soft)
         bridge_local = None
         bridge_control_local = None
         bridge_coeff = None
@@ -1403,6 +1426,8 @@ class ProtoBasisNet(nn.Module):
             "proto_frequency": self.proto_frequency,
             "proto_summary_5d": self.proto_summary_5d,
         }
+        if soft_proto_idx is not None:
+            aux["soft_proto_idx"] = soft_proto_idx
         if bridge_local is not None:
             aux.update(
                 {
