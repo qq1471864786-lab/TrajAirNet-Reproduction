@@ -53,11 +53,6 @@ LOSS_STAT_KEYS = (
     "projection_coeff",
     "projection_path",
     "projection_rate",
-    "bridge_coeff",
-    "bridge_path",
-    "bridge_rate",
-    "direct_path",
-    "direct_rate",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -99,31 +94,6 @@ def build_parser():
     parser.add_argument("--no_coupled_decoder", dest="coupled_decoder", action="store_false")
     parser.set_defaults(coupled_decoder=None)
     parser.add_argument("--coupled_decoder_iters", type=int, default=None)
-    parser.add_argument("--basis_bridge_decoder", dest="basis_bridge_decoder", action="store_true")
-    parser.add_argument("--no_basis_bridge_decoder", dest="basis_bridge_decoder", action="store_false")
-    parser.set_defaults(basis_bridge_decoder=None)
-    parser.add_argument("--bridge_control_points", type=int, default=None)
-    parser.add_argument("--temporal_dynamics_decoder", dest="temporal_dynamics_decoder", action="store_true")
-    parser.add_argument("--no_temporal_dynamics_decoder", dest="temporal_dynamics_decoder", action="store_false")
-    parser.set_defaults(temporal_dynamics_decoder=None)
-    parser.add_argument("--dynamics_control_points", type=int, default=None)
-    parser.add_argument("--direct_dynamics_decoder", dest="direct_dynamics_decoder", action="store_true")
-    parser.add_argument("--no_direct_dynamics_decoder", dest="direct_dynamics_decoder", action="store_false")
-    parser.set_defaults(direct_dynamics_decoder=None)
-    parser.add_argument("--direct_dynamics_control_points", type=int, default=None)
-    parser.add_argument("--soft_proto_decoder", dest="soft_proto_decoder", action="store_true")
-    parser.add_argument("--no_soft_proto_decoder", dest="soft_proto_decoder", action="store_false")
-    parser.set_defaults(soft_proto_decoder=None)
-    parser.add_argument("--soft_proto_modes", type=int, default=None)
-    parser.add_argument("--anchor_set_decoder", dest="anchor_set_decoder", action="store_true")
-    parser.add_argument("--no_anchor_set_decoder", dest="anchor_set_decoder", action="store_false")
-    parser.set_defaults(anchor_set_decoder=None)
-    parser.add_argument("--anchor_set_modes", type=int, default=None)
-    parser.add_argument("--intention_trajectory_decoder", dest="intention_trajectory_decoder", action="store_true")
-    parser.add_argument("--no_intention_trajectory_decoder", dest="intention_trajectory_decoder", action="store_false")
-    parser.set_defaults(intention_trajectory_decoder=None)
-    parser.add_argument("--intention_modes", type=int, default=None)
-    parser.add_argument("--intention_decoder_layers", type=int, default=None)
     parser.add_argument("--micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_true")
     parser.add_argument("--no_micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_false")
     parser.set_defaults(micro_endpoint_offsets=None)
@@ -137,10 +107,6 @@ def build_parser():
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
-    parser.add_argument("--basis_coeff_decoder", dest="basis_coeff_decoder", action="store_true")
-    parser.add_argument("--no_basis_coeff_decoder", dest="basis_coeff_decoder", action="store_false")
-    parser.set_defaults(basis_coeff_decoder=None)
-    parser.add_argument("--basis_coeff_mode", type=str, default="residual", choices=["residual", "replace"])
     parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
@@ -215,23 +181,6 @@ def build_parser():
         choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
         help="Supervise selected candidates toward the LS coeff/path under each predicted endpoint anchor.",
     )
-    parser.add_argument("--lambda_bridge_coeff", type=float, default=None)
-    parser.add_argument("--lambda_bridge_path", type=float, default=None)
-    parser.add_argument(
-        "--basis_bridge_supervision",
-        type=str,
-        default=None,
-        choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
-        help="Supervise basis-bridge candidates toward the predicted-anchor LS coeff/path.",
-    )
-    parser.add_argument("--lambda_direct_path", type=float, default=None)
-    parser.add_argument(
-        "--direct_dynamics_supervision",
-        type=str,
-        default=None,
-        choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
-        help="Supervise direct dynamics candidates toward the observed GT future path in local coordinates.",
-    )
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
@@ -259,60 +208,9 @@ def build_parser():
         help="Train only newly added heads after init_checkpoint.",
     )
     parser.add_argument(
-        "--freeze_backbone_except_basis_bridge",
-        action="store_true",
-        help="Train only the endpoint-conditioned basis bridge after init_checkpoint.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_basis_bridge_coupled",
-        action="store_true",
-        help="Train only the basis bridge and coupled endpoint-coeff decoder after init_checkpoint.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_basis_coeff_decoder",
-        action="store_true",
-        help="Train only the basis-aware coefficient decoder after init_checkpoint.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_coeff_decoder_stack",
-        action="store_true",
-        help="Train the basis-aware coeff decoder plus query/two-stage/coupled decoder stack.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_temporal_dynamics_stack",
-        action="store_true",
-        help="Train temporal dynamics decoder plus query/two-stage/coupled/refiner stack.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_direct_dynamics_stack",
-        action="store_true",
-        help="Train direct dynamics rollout decoder plus query/two-stage/coupled/refiner stack.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_soft_proto_stack",
-        action="store_true",
-        help="Train soft prototype-memory decoder plus coupled/refiner stack.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_anchor_set_stack",
-        action="store_true",
-        help="Train global anchor-set decoder plus coupled/refiner stack.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_intention_decoder",
-        action="store_true",
-        help="Train only the direct learned-intention trajectory decoder.",
-    )
-    parser.add_argument(
         "--freeze_backbone_except_micro_endpoint_offsets",
         action="store_true",
         help="Train only the per-micro endpoint offset head.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_coeff_correction",
-        dest="freeze_backbone_except_new_heads",
-        action="store_true",
-        help=argparse.SUPPRESS,
     )
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
@@ -381,8 +279,6 @@ def apply_training_defaults(args):
         args.micro_per_proto = 2 if is_unified and is_main_dataset else 4
     if args.candidate_dense_topk is None:
         args.candidate_dense_topk = 5 if is_unified and is_main_dataset else 0
-    if args.basis_coeff_decoder is None:
-        args.basis_coeff_decoder = False
     if args.d_model is None:
         args.d_model = 128 if is_unified and is_main_dataset else 96
     if args.ff_dim is None:
@@ -399,32 +295,6 @@ def apply_training_defaults(args):
         args.coupled_decoder = bool(uses_validated_basis_profile)
     if args.coupled_decoder_iters is None:
         args.coupled_decoder_iters = 2 if args.coupled_decoder else 0
-    if args.basis_bridge_decoder is None:
-        args.basis_bridge_decoder = False
-    if args.bridge_control_points is None:
-        args.bridge_control_points = 16
-    if args.temporal_dynamics_decoder is None:
-        args.temporal_dynamics_decoder = False
-    if args.dynamics_control_points is None:
-        args.dynamics_control_points = 24
-    if args.direct_dynamics_decoder is None:
-        args.direct_dynamics_decoder = False
-    if args.direct_dynamics_control_points is None:
-        args.direct_dynamics_control_points = 40
-    if args.soft_proto_decoder is None:
-        args.soft_proto_decoder = False
-    if args.soft_proto_modes is None:
-        args.soft_proto_modes = 20
-    if args.anchor_set_decoder is None:
-        args.anchor_set_decoder = False
-    if args.anchor_set_modes is None:
-        args.anchor_set_modes = 20
-    if args.intention_trajectory_decoder is None:
-        args.intention_trajectory_decoder = False
-    if args.intention_modes is None:
-        args.intention_modes = 20
-    if args.intention_decoder_layers is None:
-        args.intention_decoder_layers = 3
     if args.micro_endpoint_offsets is None:
         args.micro_endpoint_offsets = bool(uses_validated_basis_profile)
     if args.endpoint_shape_refiner is None:
@@ -494,19 +364,6 @@ def apply_training_defaults(args):
         args.lambda_projection_path = 0.05 if use_projection_guidance else 0.0
     if args.projection_supervision is None:
         args.projection_supervision = "winner_gt_proto" if use_projection_guidance else "none"
-    use_bridge_guidance = bool(is_unified and is_main_dataset and args.basis_bridge_decoder)
-    if args.lambda_bridge_coeff is None:
-        args.lambda_bridge_coeff = 0.02 if use_bridge_guidance else 0.0
-    if args.lambda_bridge_path is None:
-        args.lambda_bridge_path = 0.05 if use_bridge_guidance else 0.0
-    if args.basis_bridge_supervision is None:
-        args.basis_bridge_supervision = "winner_gt_proto" if use_bridge_guidance else "none"
-    use_direct_guidance = bool(is_unified and is_main_dataset and args.direct_dynamics_decoder)
-    if args.lambda_direct_path is None:
-        args.lambda_direct_path = 0.10 if use_direct_guidance else 0.0
-    if args.direct_dynamics_supervision is None:
-        args.direct_dynamics_supervision = "winner_gt_proto" if use_direct_guidance else "none"
-
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
 
@@ -644,23 +501,8 @@ def build_model(args, model_artifact):
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
         endpoint_conditioning=args.endpoint_conditioning,
         candidate_dense_topk=args.candidate_dense_topk,
-        basis_coeff_decoder=bool(args.basis_coeff_decoder),
-        basis_coeff_mode=args.basis_coeff_mode,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
-        basis_bridge_decoder=bool(args.basis_bridge_decoder),
-        bridge_control_points=args.bridge_control_points,
-        temporal_dynamics_decoder=bool(args.temporal_dynamics_decoder),
-        dynamics_control_points=args.dynamics_control_points,
-        direct_dynamics_decoder=bool(args.direct_dynamics_decoder),
-        direct_dynamics_control_points=args.direct_dynamics_control_points,
-        soft_proto_decoder=bool(args.soft_proto_decoder),
-        soft_proto_modes=args.soft_proto_modes,
-        anchor_set_decoder=bool(args.anchor_set_decoder),
-        anchor_set_modes=args.anchor_set_modes,
-        intention_trajectory_decoder=bool(args.intention_trajectory_decoder),
-        intention_modes=args.intention_modes,
-        intention_decoder_layers=args.intention_decoder_layers,
         micro_endpoint_offsets=bool(args.micro_endpoint_offsets),
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
@@ -693,139 +535,6 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
 
 
 def apply_freeze_policy(model, args):
-    if args.freeze_backbone_except_basis_coeff_decoder or args.freeze_backbone_except_coeff_decoder_stack:
-        trainable_modules = [getattr(model, "basis_coeff_decoder", None)]
-        if args.freeze_backbone_except_coeff_decoder_stack:
-            trainable_modules.extend(
-                [
-                    getattr(model, "query_decoder", None),
-                    getattr(model, "micro_endpoint_head", None),
-                    getattr(model, "stage2_proj", None),
-                    getattr(model, "stage2_endpoint_head", None),
-                    getattr(model, "stage2_coeff_head", None),
-                    getattr(model, "coupled_decoder", None),
-                    getattr(model, "endpoint_shape_refiner", None),
-                    getattr(model, "control_shape_refiner", None),
-                ]
-            )
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_basis_coeff_decoder requires --basis_coeff_decoder.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
-    if args.freeze_backbone_except_temporal_dynamics_stack:
-        trainable_modules = [
-            getattr(model, "temporal_dynamics_decoder", None),
-            getattr(model, "query_decoder", None),
-            getattr(model, "stage2_proj", None),
-            getattr(model, "stage2_endpoint_head", None),
-            getattr(model, "stage2_coeff_head", None),
-            getattr(model, "coupled_decoder", None),
-            getattr(model, "endpoint_shape_refiner", None),
-            getattr(model, "control_shape_refiner", None),
-        ]
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_temporal_dynamics_stack requires --temporal_dynamics_decoder.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
-    if args.freeze_backbone_except_direct_dynamics_stack:
-        trainable_modules = [
-            getattr(model, "direct_dynamics_decoder", None),
-            getattr(model, "query_decoder", None),
-            getattr(model, "stage2_proj", None),
-            getattr(model, "stage2_endpoint_head", None),
-            getattr(model, "stage2_coeff_head", None),
-            getattr(model, "coupled_decoder", None),
-            getattr(model, "endpoint_shape_refiner", None),
-            getattr(model, "control_shape_refiner", None),
-        ]
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_direct_dynamics_stack requires --direct_dynamics_decoder.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
-    if args.freeze_backbone_except_soft_proto_stack:
-        trainable_modules = [
-            getattr(model, "soft_proto_decoder", None),
-            getattr(model, "coupled_decoder", None),
-            getattr(model, "endpoint_shape_refiner", None),
-            getattr(model, "control_shape_refiner", None),
-            getattr(model, "refiner", None),
-        ]
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_soft_proto_stack requires --soft_proto_decoder.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
-    if args.freeze_backbone_except_anchor_set_stack:
-        trainable_modules = [
-            getattr(model, "anchor_set_decoder", None),
-            getattr(model, "coupled_decoder", None),
-            getattr(model, "endpoint_shape_refiner", None),
-            getattr(model, "control_shape_refiner", None),
-            getattr(model, "refiner", None),
-        ]
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_anchor_set_stack requires --anchor_set_decoder.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
-    if args.freeze_backbone_except_intention_decoder:
-        trainable_modules = [getattr(model, "intention_trajectory_decoder", None)]
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_intention_decoder requires --intention_trajectory_decoder.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
     if args.freeze_backbone_except_micro_endpoint_offsets:
         trainable_modules = [getattr(model, "micro_endpoint_head", None)]
         trainable_modules = [module for module in trainable_modules if module is not None]
@@ -841,29 +550,12 @@ def apply_freeze_policy(model, args):
         print(f"[Freeze] trainable_params={trainable} total_params={total}")
         return
 
-    if args.freeze_backbone_except_basis_bridge or args.freeze_backbone_except_basis_bridge_coupled:
-        trainable_modules = [getattr(model, "basis_bridge_decoder", None)]
-        if args.freeze_backbone_except_basis_bridge_coupled:
-            trainable_modules.append(getattr(model, "coupled_decoder", None))
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_basis_bridge requires --basis_bridge_decoder.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
     if not args.freeze_backbone_except_new_heads:
         return
     trainable_modules = [
         module
         for module in (
-            getattr(model, "basis_bridge_decoder", None),
+            getattr(model, "micro_endpoint_head", None),
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
         )
@@ -871,7 +563,7 @@ def apply_freeze_policy(model, args):
     ]
     if not trainable_modules:
         raise RuntimeError(
-            "--freeze_backbone_except_new_heads requires at least one bridge/shape/control head."
+            "--freeze_backbone_except_new_heads requires at least one endpoint/shape/control head."
         )
     for parameter in model.parameters():
         parameter.requires_grad = False
@@ -1198,9 +890,6 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"anchor_recon={format_scalar(loss_stats['anchor_recon'])}",
         f"proj_coeff={format_scalar(loss_stats['projection_coeff'])}",
         f"proj_path={format_scalar(loss_stats['projection_path'])}",
-        f"bridge_coeff={format_scalar(loss_stats['bridge_coeff'])}",
-        f"bridge_path={format_scalar(loss_stats['bridge_path'])}",
-        f"direct_path={format_scalar(loss_stats['direct_path'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -1308,11 +997,6 @@ def main():
         lambda_projection_coeff=args.lambda_projection_coeff,
         lambda_projection_path=args.lambda_projection_path,
         projection_supervision=args.projection_supervision,
-        lambda_bridge_coeff=args.lambda_bridge_coeff,
-        lambda_bridge_path=args.lambda_bridge_path,
-        basis_bridge_supervision=args.basis_bridge_supervision,
-        lambda_direct_path=args.lambda_direct_path,
-        direct_dynamics_supervision=args.direct_dynamics_supervision,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1336,28 +1020,14 @@ def main():
         "basis_dim": args.basis_dim,
         "endpoint_conditioning": args.endpoint_conditioning,
         "candidate_dense_topk": args.candidate_dense_topk,
-        "basis_coeff_decoder": bool(args.basis_coeff_decoder),
-        "basis_coeff_mode": args.basis_coeff_mode,
         "coupled_decoder": bool(args.coupled_decoder),
         "coupled_decoder_iters": args.coupled_decoder_iters,
-        "basis_bridge_decoder": bool(args.basis_bridge_decoder),
-        "bridge_control_points": args.bridge_control_points,
-        "temporal_dynamics_decoder": bool(args.temporal_dynamics_decoder),
-        "dynamics_control_points": args.dynamics_control_points,
-        "direct_dynamics_decoder": bool(args.direct_dynamics_decoder),
-        "direct_dynamics_control_points": args.direct_dynamics_control_points,
-        "soft_proto_decoder": bool(args.soft_proto_decoder),
-        "soft_proto_modes": args.soft_proto_modes,
-        "anchor_set_decoder": bool(args.anchor_set_decoder),
-        "anchor_set_modes": args.anchor_set_modes,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "anchor_recon_supervision": args.anchor_recon_supervision,
         "projection_supervision": args.projection_supervision,
-        "basis_bridge_supervision": args.basis_bridge_supervision,
-        "direct_dynamics_supervision": args.direct_dynamics_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
@@ -1365,21 +1035,10 @@ def main():
         "lambda_anchor_recon": args.lambda_anchor_recon,
         "lambda_projection_coeff": args.lambda_projection_coeff,
         "lambda_projection_path": args.lambda_projection_path,
-        "lambda_bridge_coeff": args.lambda_bridge_coeff,
-        "lambda_bridge_path": args.lambda_bridge_path,
-        "lambda_direct_path": args.lambda_direct_path,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
         "freeze_backbone_except_new_heads": bool(args.freeze_backbone_except_new_heads),
-        "freeze_backbone_except_basis_bridge": bool(args.freeze_backbone_except_basis_bridge),
-        "freeze_backbone_except_basis_bridge_coupled": bool(args.freeze_backbone_except_basis_bridge_coupled),
-        "freeze_backbone_except_basis_coeff_decoder": bool(args.freeze_backbone_except_basis_coeff_decoder),
-        "freeze_backbone_except_coeff_decoder_stack": bool(args.freeze_backbone_except_coeff_decoder_stack),
-        "freeze_backbone_except_temporal_dynamics_stack": bool(args.freeze_backbone_except_temporal_dynamics_stack),
-        "freeze_backbone_except_direct_dynamics_stack": bool(args.freeze_backbone_except_direct_dynamics_stack),
-        "freeze_backbone_except_soft_proto_stack": bool(args.freeze_backbone_except_soft_proto_stack),
-        "freeze_backbone_except_anchor_set_stack": bool(args.freeze_backbone_except_anchor_set_stack),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

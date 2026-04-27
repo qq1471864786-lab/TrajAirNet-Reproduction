@@ -582,3 +582,26 @@ Conclusion:
 - Score-pooled rescue and endpoint-router rescue both increase false-positive rescue candidates and degrade `ADE@20/FDE@20`.
 - Do not keep these rescue modules as default. If the code is present only as an experiment switch, do not use it in paper tables.
 - Next FDE work should not be another late candidate swap. The stronger direction is to redesign endpoint generation itself, likely by predicting endpoint distributions/anchors jointly with the main decoder rather than trying to patch missed modes after the router has already committed.
+
+## 2026-04-28 Architecture Cleanup / Runtime Diagnosis
+
+Purpose: respond to the training-time and architecture-bloat issue after the failed large-branch tests.
+
+Findings:
+
+- The current strong 111_days checkpoints use the validated heavy default: `d_model=128`, `encoder_layers=4`, `topk_proto=15`, `micro_per_proto=2`, `candidate_dense_topk=5`, `batch_size=512`.
+- Parameter count is still small in absolute terms: current default is about `1.66M` parameters, while a 96/3-layer profile is about `0.98M`.
+- The failed experimental branches were default-off, so they did not materially slow active forward passes, but they made the code and paper story look patched together.
+- The manually launched full run used `limit_eval_batches=0`; the older best continuation used `limit_eval_batches=200`. Full evaluation every epoch adds overhead, but the larger active default and full 111_days train pass are the main reason epoch time is no longer close to the old short-run timing.
+
+Cleanup applied:
+
+- Removed failed default-off branches from code: `BasisBridgeDecoder`, `TemporalBasisDynamicsDecoder`, `PrototypeDynamicsRolloutDecoder`, `SoftPrototypeSetDecoder`, `AnchorSetTrajectoryDecoder`, `IntentionTrajectoryDecoder`, and `BasisAwareCoeffDecoder`.
+- Removed their CLI flags, freeze policies, loss terms, logging stats, and test-time construction compatibility.
+- Kept only the active validated chain: hard prototype router, micro endpoint offsets, query decoder, two-stage endpoint/coeff update, coupled endpoint-coeff update, local basis, temporal residual refiner, endpoint shape refiner, and control shape refiner.
+- Removed the unused target-temporal-sequence return path from `TemporalEncoder`; no active module consumes it after cleanup.
+
+Decision:
+
+- Do not immediately make the 96/3-layer compact profile default, because the best available 111_days result (`ADE@20=0.1830` on the current full run) comes from the 128/4-layer profile.
+- If training speed becomes the priority, the next fair short test should compare the current default against a compact command using `--d_model 96 --ff_dim 192 --encoder_layers 3 --topk_proto 10 --micro_per_proto 2 --candidate_dense_topk 0` under the same `limit_train_batches` and `limit_eval_batches`.

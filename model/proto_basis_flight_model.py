@@ -122,7 +122,7 @@ class TemporalEncoder(nn.Module):
         self.encoder = nn.TransformerEncoder(block, num_layers=layers)
         self.pool_proj = nn.Sequential(nn.Linear(d_model * 2, d_model), nn.LayerNorm(d_model))
 
-    def forward(self, feats_local, feats_global, return_target_sequence=False):
+    def forward(self, feats_local, feats_global):
         batch_size, num_agents, obs_len, _ = feats_local.shape
         local_h = self.local_proj(feats_local)
         global_h = self.global_proj(feats_global)
@@ -130,13 +130,10 @@ class TemporalEncoder(nn.Module):
         hidden = hidden + self.time_emb(self.time_ids[:obs_len])[None, None, :, :]
         hidden = hidden.view(batch_size * num_agents, obs_len, -1)
         hidden = self.encoder(hidden)
-        sequence_hidden = hidden.view(batch_size, num_agents, obs_len, -1)
         pooled = hidden.max(dim=1).values
         last = hidden[:, -1]
         out = self.pool_proj(torch.cat([pooled, last], dim=-1))
         agent_out = out.view(batch_size, num_agents, -1)
-        if return_target_sequence:
-            return agent_out, sequence_hidden[:, 0]
         return agent_out
 
 
@@ -322,71 +319,6 @@ class BasisBank(nn.Module):
         return anchor + residual
 
 
-class BasisAwareCoeffDecoder(nn.Module):
-    def __init__(self, d_model=96, basis_dim=16, pred_len=120, nhead=4, ff_dim=256, dropout=0.1, mode="residual"):
-        super().__init__()
-        if mode not in {"residual", "replace"}:
-            raise ValueError(f"Unsupported basis-aware coeff mode: {mode}")
-        self.mode = mode
-        self.basis_dim = int(basis_dim)
-        self.basis_proj = nn.Linear(pred_len * 3, d_model)
-        self.basis_id = nn.Parameter(torch.randn(basis_dim, d_model) * 0.02)
-        self.endpoint_proj = nn.Linear(3, d_model)
-        self.coeff_proj = nn.Linear(basis_dim, d_model)
-        self.stats_proj = nn.Linear(12, d_model)
-        self.query_norm = nn.LayerNorm(d_model)
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
-        self.ffn = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, d_model),
-        )
-        self.slot_norm = nn.LayerNorm(d_model)
-        self.prior_proj = nn.Linear(1, d_model)
-        self.slot_mlp = nn.Sequential(
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, ff_dim // 2),
-            nn.GELU(),
-            nn.Linear(ff_dim // 2, 1),
-        )
-        nn.init.zeros_(self.slot_mlp[-1].weight)
-        nn.init.zeros_(self.slot_mlp[-1].bias)
-
-    def forward(self, query_feat, endpoint_local, coeff, coarse_local, basis_bank):
-        coarse_end = coarse_local[:, :, -1]
-        coarse_mean = coarse_local.mean(dim=2)
-        endpoint_gap = coarse_end - endpoint_local
-        stats = torch.cat([endpoint_local, coarse_end, coarse_mean, endpoint_gap], dim=-1)
-        candidate_query = self.query_norm(
-            query_feat
-            + self.endpoint_proj(endpoint_local)
-            + self.coeff_proj(coeff)
-            + self.stats_proj(stats)
-        )
-        basis_flat = basis_bank.reshape(self.basis_dim, -1).to(device=coeff.device, dtype=coeff.dtype)
-        basis_tokens = self.basis_proj(basis_flat) + self.basis_id.to(device=coeff.device, dtype=coeff.dtype)
-        batch_size, num_modes = coeff.shape[:2]
-        query = candidate_query.reshape(batch_size * num_modes, 1, -1)
-        tokens = basis_tokens[None].expand(batch_size * num_modes, -1, -1)
-        attended, _ = self.cross_attn(query, tokens, tokens)
-        refined = query + attended
-        refined = refined + self.ffn(refined)
-        refined = refined.reshape(batch_size, num_modes, -1)
-        slot = (
-            refined[:, :, None, :]
-            + basis_tokens[None, None, :, :]
-            + self.prior_proj(coeff.unsqueeze(-1))
-        )
-        coeff_update = self.slot_mlp(self.slot_norm(slot)).squeeze(-1)
-        if self.mode == "replace":
-            return coeff_update
-        return coeff + coeff_update
-
-
 class TemporalResidualRefiner(nn.Module):
     def __init__(self, d_model=96):
         super().__init__()
@@ -409,131 +341,6 @@ class TemporalResidualRefiner(nn.Module):
         hidden = self.act(self.pointwise(hidden))
         update = self.out(hidden).transpose(1, 2).reshape(batch_size, num_modes, pred_len, 3)
         return coarse_local_xyz + gate[:, :, None, None] * update
-
-
-class SoftPrototypeSetDecoder(nn.Module):
-    def __init__(
-        self,
-        d_model=96,
-        basis_dim=16,
-        num_modes=20,
-        nhead=4,
-        ff_dim=256,
-        dropout=0.1,
-    ):
-        super().__init__()
-        self.num_modes = int(num_modes)
-        self.mode_tokens = nn.Parameter(torch.randn(self.num_modes, d_model) * 0.02)
-        self.target_proj = nn.Linear(d_model, d_model)
-        self.scene_proj = nn.Linear(d_model, d_model)
-        self.self_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.proto_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.agent_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.ffn = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(d_model, ff_dim),
-                    nn.GELU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(ff_dim, d_model),
-                )
-                for _ in range(2)
-            ]
-        )
-        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(8)])
-        self.endpoint_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, 3),
-        )
-        self.coeff_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, basis_dim),
-        )
-        self.score_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
-        self.gate_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
-        for head in (self.endpoint_head, self.coeff_head, self.score_head, self.gate_head):
-            nn.init.zeros_(head[-1].weight)
-            nn.init.zeros_(head[-1].bias)
-
-    def forward(
-        self,
-        target_ctx,
-        scene_ctx,
-        agent_feat,
-        obs_mask,
-        proto_summary_5d,
-        proto_embedding_weight,
-        proto_proj,
-        base_query=None,
-        base_endpoint=None,
-        base_coeff=None,
-        base_score=None,
-        base_gate=None,
-    ):
-        batch_size = target_ctx.size(0)
-        context = self.target_proj(target_ctx)[:, None, :] + self.scene_proj(scene_ctx)[:, None, :]
-        if base_query is None:
-            hidden = self.mode_tokens.to(device=target_ctx.device, dtype=target_ctx.dtype)[None] + context
-        else:
-            hidden = base_query + context
-        proto_memory = proto_embedding_weight + proto_proj(proto_summary_5d)
-        proto_memory = proto_memory.to(device=target_ctx.device, dtype=target_ctx.dtype)
-        proto_memory = proto_memory[None].expand(batch_size, -1, -1)
-        proto_summary = proto_summary_5d.to(device=target_ctx.device, dtype=target_ctx.dtype)
-        proto_attn_weights = None
-
-        norm_index = 0
-        for layer_index in range(2):
-            attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            attended, proto_attn_weights = self.proto_attn[layer_index](hidden, proto_memory, proto_memory)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            attended, _ = self.agent_attn[layer_index](hidden, agent_feat, agent_feat, key_padding_mask=~obs_mask)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
-            norm_index += 1
-
-        if proto_attn_weights is None:
-            proto_attn_weights = hidden.new_full(
-                (batch_size, self.num_modes, proto_summary.size(0)),
-                1.0 / max(proto_summary.size(0), 1),
-            )
-        endpoint_update = self.endpoint_head(hidden)
-        coeff_update = self.coeff_head(hidden)
-        score_update = self.score_head(hidden).squeeze(-1)
-        gate_update = 0.25 * torch.tanh(self.gate_head(hidden)).squeeze(-1)
-        if base_endpoint is None:
-            proto_anchor = proto_attn_weights @ proto_summary[:, :3]
-            endpoint_local = proto_anchor + endpoint_update
-            coeff = coeff_update
-            score = score_update
-            gate = torch.sigmoid(self.gate_head(hidden)).squeeze(-1)
-        else:
-            endpoint_local = base_endpoint + endpoint_update
-            coeff = base_coeff + coeff_update
-            score = base_score + score_update
-            gate = (base_gate + gate_update).clamp(0.0, 1.0)
-        candidate_proto_idx = proto_attn_weights.argmax(dim=-1)
-        query_out = base_query if base_query is not None else hidden
-        return query_out, endpoint_local, coeff, score, gate, candidate_proto_idx
 
 
 class EndpointPreservingShapeRefiner(nn.Module):
@@ -614,307 +421,6 @@ class EndpointPreservingControlPointRefiner(nn.Module):
         return local_xyz + envelope[None, None, :, None] * residual
 
 
-class BasisBridgeDecoder(nn.Module):
-    def __init__(self, d_model=96, basis_dim=16, pred_len=120, num_control_points=16, hidden_dim=256, dropout=0.1):
-        super().__init__()
-        self.pred_len = int(pred_len)
-        self.num_control_points = int(num_control_points)
-        stats_dim = 30
-        input_dim = d_model + basis_dim + stats_dim
-        self.control_head = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, self.num_control_points * 3),
-        )
-        self.gate_head = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Linear(hidden_dim // 2, 1),
-        )
-        nn.init.zeros_(self.control_head[-1].weight)
-        nn.init.zeros_(self.control_head[-1].bias)
-        nn.init.zeros_(self.gate_head[-1].weight)
-        nn.init.zeros_(self.gate_head[-1].bias)
-        endpoint_envelope = 1.0 - torch.linspace(0.0, 1.0, steps=pred_len)
-        self.register_buffer("endpoint_envelope", endpoint_envelope, persistent=False)
-
-    def forward(self, query_feat, endpoint_local, coeff, coarse_local, anchor_local, basis_pinv, basis_bank):
-        base_residual = coarse_local - anchor_local
-        velocity = coarse_local[:, :, 1:] - coarse_local[:, :, :-1]
-        start_velocity = velocity[:, :, 0]
-        end_velocity = velocity[:, :, -1]
-        mean_velocity = velocity.mean(dim=2)
-        stats = torch.cat(
-            [
-                endpoint_local,
-                coarse_local[:, :, 0],
-                coarse_local[:, :, coarse_local.size(2) // 3],
-                coarse_local[:, :, (2 * coarse_local.size(2)) // 3],
-                coarse_local[:, :, -1],
-                coarse_local.mean(dim=2),
-                start_velocity,
-                end_velocity,
-                mean_velocity,
-                base_residual.mean(dim=2),
-            ],
-            dim=-1,
-        )
-        bridge_input = torch.cat([query_feat, coeff, stats], dim=-1)
-        batch_size, num_modes = coeff.shape[:2]
-        control = self.control_head(bridge_input)
-        control = control.reshape(batch_size * num_modes, self.num_control_points, 3).transpose(1, 2)
-        residual_delta = F.interpolate(control, size=coarse_local.size(2), mode="linear", align_corners=True)
-        residual_delta = residual_delta.transpose(1, 2).reshape(batch_size, num_modes, coarse_local.size(2), 3)
-        envelope = self.endpoint_envelope.to(device=coarse_local.device, dtype=coarse_local.dtype)
-        gate = 1.0 + 0.25 * torch.tanh(self.gate_head(bridge_input)).unsqueeze(-1)
-        bridged_residual = base_residual + envelope[None, None, :, None] * gate * residual_delta
-        flat_residual = bridged_residual.reshape(batch_size * num_modes, -1)
-        bridge_coeff = flat_residual @ basis_pinv.to(device=coarse_local.device, dtype=coarse_local.dtype)
-        bridge_coeff = bridge_coeff.reshape(batch_size, num_modes, -1)
-        bridge_local = basis_bank(anchor_local, bridge_coeff)
-        bridge_control_local = anchor_local + bridged_residual
-        return bridge_coeff, bridge_local, bridge_control_local, gate.squeeze(-1).squeeze(-1)
-
-
-class TemporalBasisDynamicsDecoder(nn.Module):
-    def __init__(
-        self,
-        d_model=96,
-        basis_dim=16,
-        pred_len=120,
-        num_control_points=24,
-        nhead=4,
-        ff_dim=256,
-        dropout=0.1,
-    ):
-        super().__init__()
-        self.pred_len = int(pred_len)
-        self.num_control_points = int(num_control_points)
-        self.endpoint_proj = nn.Linear(3, d_model)
-        self.coeff_proj = nn.Linear(basis_dim, d_model)
-        self.stats_proj = nn.Linear(12, d_model)
-        self.control_tokens = nn.Parameter(torch.randn(self.num_control_points, d_model) * 0.02)
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
-        self.time_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
-        self.agent_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
-        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(4)])
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, d_model),
-        )
-        self.control_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, 3),
-        )
-        nn.init.zeros_(self.control_head[-1].weight)
-        nn.init.zeros_(self.control_head[-1].bias)
-        endpoint_envelope = 1.0 - torch.linspace(0.0, 1.0, steps=pred_len)
-        self.register_buffer("endpoint_envelope", endpoint_envelope, persistent=False)
-
-    def forward(
-        self,
-        query_feat,
-        endpoint_local,
-        coeff,
-        coarse_local,
-        target_temporal_feat,
-        agent_feat,
-        obs_mask,
-        anchor_local,
-        basis_pinv,
-        basis_bank,
-    ):
-        coarse_end = coarse_local[:, :, -1]
-        coarse_mean = coarse_local.mean(dim=2)
-        endpoint_gap = coarse_end - endpoint_local
-        stats = torch.cat([endpoint_local, coarse_end, coarse_mean, endpoint_gap], dim=-1)
-        base_query = query_feat + self.endpoint_proj(endpoint_local) + self.coeff_proj(coeff) + self.stats_proj(stats)
-
-        batch_size, num_modes, hidden_dim = base_query.shape
-        control = base_query[:, :, None, :] + self.control_tokens.to(device=base_query.device, dtype=base_query.dtype)
-        control = control.reshape(batch_size * num_modes, self.num_control_points, hidden_dim)
-
-        attended, _ = self.self_attn(control, control, control)
-        control = self.norms[0](control + attended)
-
-        time_memory = target_temporal_feat[:, None].expand(-1, num_modes, -1, -1)
-        time_memory = time_memory.reshape(batch_size * num_modes, target_temporal_feat.size(1), hidden_dim)
-        attended, _ = self.time_attn(control, time_memory, time_memory)
-        control = self.norms[1](control + attended)
-
-        agent_memory = agent_feat[:, None].expand(-1, num_modes, -1, -1)
-        agent_memory = agent_memory.reshape(batch_size * num_modes, agent_feat.size(1), hidden_dim)
-        agent_mask = obs_mask[:, None].expand(-1, num_modes, -1).reshape(batch_size * num_modes, obs_mask.size(1))
-        attended, _ = self.agent_attn(control, agent_memory, agent_memory, key_padding_mask=~agent_mask)
-        control = self.norms[2](control + attended)
-        control = self.norms[3](control + self.ffn(control))
-
-        control_delta = self.control_head(control).transpose(1, 2)
-        residual_delta = F.interpolate(control_delta, size=coarse_local.size(2), mode="linear", align_corners=True)
-        residual_delta = residual_delta.transpose(1, 2).reshape(batch_size, num_modes, coarse_local.size(2), 3)
-        envelope = self.endpoint_envelope.to(device=coarse_local.device, dtype=coarse_local.dtype)
-        residual = coarse_local - anchor_local + envelope[None, None, :, None] * residual_delta
-        flat_residual = residual.reshape(batch_size * num_modes, -1)
-        dynamics_coeff = flat_residual @ basis_pinv.to(device=coarse_local.device, dtype=coarse_local.dtype)
-        dynamics_coeff = dynamics_coeff.reshape(batch_size, num_modes, -1)
-        dynamics_local = basis_bank(anchor_local, dynamics_coeff)
-        return dynamics_coeff, dynamics_local
-
-
-class PrototypeDynamicsRolloutDecoder(nn.Module):
-    def __init__(
-        self,
-        d_model=96,
-        basis_dim=16,
-        pred_len=120,
-        num_control_points=40,
-        nhead=4,
-        ff_dim=256,
-        dropout=0.1,
-    ):
-        super().__init__()
-        self.pred_len = int(pred_len)
-        self.num_control_points = int(num_control_points)
-        self.endpoint_proj = nn.Linear(3, d_model)
-        self.coeff_proj = nn.Linear(basis_dim, d_model)
-        self.stats_proj = nn.Linear(30, d_model)
-        self.control_tokens = nn.Parameter(torch.randn(self.num_control_points, d_model) * 0.02)
-        self.self_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.time_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.agent_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(8)])
-        self.ffn = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(d_model, ff_dim),
-                    nn.GELU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(ff_dim, d_model),
-                )
-                for _ in range(2)
-            ]
-        )
-        self.velocity_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, 3),
-        )
-        self.gate_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim // 2),
-            nn.GELU(),
-            nn.Linear(ff_dim // 2, 1),
-        )
-        nn.init.zeros_(self.velocity_head[-1].weight)
-        nn.init.zeros_(self.velocity_head[-1].bias)
-        nn.init.zeros_(self.gate_head[-1].weight)
-        nn.init.zeros_(self.gate_head[-1].bias)
-        alpha = torch.linspace(1.0 / pred_len, 1.0, steps=pred_len)
-        self.register_buffer("endpoint_alpha", alpha, persistent=False)
-
-    def forward(
-        self,
-        query_feat,
-        endpoint_local,
-        coeff,
-        coarse_local,
-        target_temporal_feat,
-        agent_feat,
-        obs_mask,
-        anchor_local,
-        basis_pinv,
-    ):
-        coarse_velocity = torch.cat(
-            [coarse_local[:, :, :1], coarse_local[:, :, 1:] - coarse_local[:, :, :-1]],
-            dim=2,
-        )
-        start_velocity = coarse_velocity[:, :, 0]
-        end_velocity = coarse_velocity[:, :, -1]
-        mean_velocity = coarse_velocity.mean(dim=2)
-        endpoint_gap = coarse_local[:, :, -1] - endpoint_local
-        stats = torch.cat(
-            [
-                endpoint_local,
-                coarse_local[:, :, 0],
-                coarse_local[:, :, self.pred_len // 3],
-                coarse_local[:, :, (2 * self.pred_len) // 3],
-                coarse_local[:, :, -1],
-                coarse_local.mean(dim=2),
-                start_velocity,
-                end_velocity,
-                mean_velocity,
-                endpoint_gap,
-            ],
-            dim=-1,
-        )
-        base_query = query_feat + self.endpoint_proj(endpoint_local) + self.coeff_proj(coeff) + self.stats_proj(stats)
-        batch_size, num_modes, hidden_dim = base_query.shape
-        hidden = base_query[:, :, None, :] + self.control_tokens.to(device=base_query.device, dtype=base_query.dtype)
-        hidden = hidden.reshape(batch_size * num_modes, self.num_control_points, hidden_dim)
-
-        time_memory = target_temporal_feat[:, None].expand(-1, num_modes, -1, -1)
-        time_memory = time_memory.reshape(batch_size * num_modes, target_temporal_feat.size(1), hidden_dim)
-        agent_memory = agent_feat[:, None].expand(-1, num_modes, -1, -1)
-        agent_memory = agent_memory.reshape(batch_size * num_modes, agent_feat.size(1), hidden_dim)
-        agent_mask = obs_mask[:, None].expand(-1, num_modes, -1).reshape(batch_size * num_modes, obs_mask.size(1))
-
-        norm_index = 0
-        for layer_index in range(2):
-            attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            attended, _ = self.time_attn[layer_index](hidden, time_memory, time_memory)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            attended, _ = self.agent_attn[layer_index](
-                hidden,
-                agent_memory,
-                agent_memory,
-                key_padding_mask=~agent_mask,
-            )
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
-            norm_index += 1
-
-        velocity_control = self.velocity_head(hidden).transpose(1, 2)
-        velocity_delta = F.interpolate(velocity_control, size=self.pred_len, mode="linear", align_corners=True)
-        velocity_delta = velocity_delta.transpose(1, 2).reshape(batch_size, num_modes, self.pred_len, 3)
-        gate = (0.25 + 0.25 * torch.tanh(self.gate_head(base_query))).unsqueeze(-1)
-        velocity = coarse_velocity + gate * velocity_delta
-        direct_local = velocity.cumsum(dim=2)
-        alpha = self.endpoint_alpha.to(device=direct_local.device, dtype=direct_local.dtype)
-        endpoint_error = direct_local[:, :, -1] - endpoint_local
-        direct_local = direct_local - alpha[None, None, :, None] * endpoint_error[:, :, None, :]
-
-        residual = direct_local - anchor_local
-        flat_residual = residual.reshape(batch_size * num_modes, -1)
-        direct_coeff = flat_residual @ basis_pinv.to(device=direct_local.device, dtype=direct_local.dtype)
-        direct_coeff = direct_coeff.reshape(batch_size, num_modes, -1)
-        return direct_coeff, direct_local, gate.squeeze(-1).squeeze(-1)
-
-
 class CoupledEndpointCoeffDecoder(nn.Module):
     def __init__(self, d_model=96, basis_dim=16, iters=1, dropout=0.1):
         super().__init__()
@@ -960,207 +466,6 @@ def build_anchor(endpoint_local, alpha):
     return alpha[None, None, :, None] * endpoint_local[:, :, None, :]
 
 
-def _select_diverse_anchor_ids(proto_summary_5d, proto_frequency, num_modes):
-    num_proto = int(proto_summary_5d.size(0))
-    if num_proto == 0 or num_modes <= 0:
-        return torch.empty(0, dtype=torch.long)
-    endpoints = proto_summary_5d[:, :3].float()
-    frequency = proto_frequency.float().clamp_min(1e-6)
-    selected = [int(frequency.argmax().item())]
-    min_dist = torch.cdist(endpoints[selected], endpoints).squeeze(0)
-    freq_scale = (frequency / frequency.max().clamp_min(1e-6)).sqrt()
-    while len(selected) < min(num_modes, num_proto):
-        score = min_dist * freq_scale
-        score[selected] = -1.0
-        next_idx = int(score.argmax().item())
-        selected.append(next_idx)
-        min_dist = torch.minimum(min_dist, torch.cdist(endpoints[next_idx : next_idx + 1], endpoints).squeeze(0))
-    while len(selected) < num_modes:
-        selected.append(selected[len(selected) % len(selected)])
-    return torch.tensor(selected, dtype=torch.long)
-
-
-class AnchorSetTrajectoryDecoder(nn.Module):
-    def __init__(self, d_model=96, basis_dim=16, num_modes=20, nhead=4, ff_dim=256, dropout=0.1):
-        super().__init__()
-        self.num_modes = int(num_modes)
-        self.mode_tokens = nn.Parameter(torch.randn(self.num_modes, d_model) * 0.02)
-        self.target_proj = nn.Linear(d_model, d_model)
-        self.scene_proj = nn.Linear(d_model, d_model)
-        self.anchor_summary_proj = nn.Linear(5, d_model)
-        self.anchor_coeff_proj = nn.Linear(basis_dim, d_model)
-        self.self_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.agent_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(2)]
-        )
-        self.ffn = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(d_model, ff_dim),
-                    nn.GELU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(ff_dim, d_model),
-                )
-                for _ in range(2)
-            ]
-        )
-        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(6)])
-        self.endpoint_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, 3),
-        )
-        self.coeff_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, basis_dim),
-        )
-        self.score_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
-        self.gate_head = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, ff_dim // 2), nn.GELU(), nn.Linear(ff_dim // 2, 1))
-        nn.init.zeros_(self.endpoint_head[-1].weight)
-        nn.init.zeros_(self.endpoint_head[-1].bias)
-        nn.init.zeros_(self.coeff_head[-1].weight)
-        nn.init.zeros_(self.coeff_head[-1].bias)
-
-    def forward(self, target_ctx, scene_ctx, agent_feat, obs_mask, anchor_summary, anchor_coeff):
-        batch_size = target_ctx.size(0)
-        anchor_summary = anchor_summary.to(device=target_ctx.device, dtype=target_ctx.dtype)
-        anchor_coeff = anchor_coeff.to(device=target_ctx.device, dtype=target_ctx.dtype)
-        hidden = (
-            self.mode_tokens.to(device=target_ctx.device, dtype=target_ctx.dtype)[None]
-            + self.target_proj(target_ctx)[:, None, :]
-            + self.scene_proj(scene_ctx)[:, None, :]
-            + self.anchor_summary_proj(anchor_summary)[None]
-            + self.anchor_coeff_proj(anchor_coeff)[None]
-        )
-        norm_index = 0
-        for layer_index in range(2):
-            attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            attended, _ = self.agent_attn[layer_index](hidden, agent_feat, agent_feat, key_padding_mask=~obs_mask)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
-            norm_index += 1
-
-        endpoint = anchor_summary[None, :, :3] + self.endpoint_head(hidden)
-        coeff = anchor_coeff[None, :, :] + self.coeff_head(hidden)
-        score = self.score_head(hidden).squeeze(-1)
-        gate = torch.sigmoid(self.gate_head(hidden)).squeeze(-1)
-        return hidden, endpoint, coeff, score, gate
-
-
-class IntentionTrajectoryDecoder(nn.Module):
-    def __init__(
-        self,
-        d_model=96,
-        pred_len=120,
-        num_modes=20,
-        nhead=4,
-        ff_dim=256,
-        layers=3,
-        dropout=0.1,
-    ):
-        super().__init__()
-        self.pred_len = pred_len
-        self.num_modes = num_modes
-        self.mode_tokens = nn.Parameter(torch.randn(num_modes, d_model) * 0.02)
-        self.target_proj = nn.Linear(d_model, d_model)
-        self.scene_proj = nn.Linear(d_model, d_model)
-        self.velocity_proj = nn.Linear(3, d_model)
-        self.time_emb = nn.Embedding(pred_len, d_model)
-        self.register_buffer("time_ids", torch.arange(pred_len, dtype=torch.long), persistent=False)
-        self.register_buffer(
-            "step_ids",
-            torch.arange(1, pred_len + 1, dtype=torch.float32).view(1, 1, pred_len, 1),
-            persistent=False,
-        )
-        self.self_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
-        )
-        self.target_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
-        )
-        self.agent_attn = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
-        )
-        self.ffn = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(d_model, ff_dim),
-                    nn.GELU(),
-                    nn.Dropout(dropout),
-                    nn.Linear(ff_dim, d_model),
-                )
-                for _ in range(layers)
-            ]
-        )
-        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(layers * 4)])
-        self.traj_norm = nn.LayerNorm(d_model)
-        self.path_head = nn.Sequential(
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, 3),
-        )
-        self.endpoint_head = nn.Sequential(
-            nn.Linear(d_model, ff_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(ff_dim, 3),
-        )
-        self.endpoint_blend = nn.Sequential(nn.Linear(d_model, 1), nn.Sigmoid())
-        self.score_head = nn.Linear(d_model, 1)
-
-    def forward(self, target_ctx, scene_ctx, target_temporal_feat, agent_feat, obs_mask, target_local_obs):
-        last_velocity = target_local_obs[:, -1] - target_local_obs[:, -2]
-        hidden = (
-            self.mode_tokens.to(device=target_ctx.device, dtype=target_ctx.dtype)[None]
-            + self.target_proj(target_ctx)[:, None, :]
-            + self.scene_proj(scene_ctx)[:, None, :]
-            + self.velocity_proj(last_velocity)[:, None, :]
-        )
-        norm_index = 0
-        for layer_index in range(len(self.self_attn)):
-            attended, _ = self.self_attn[layer_index](hidden, hidden, hidden)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            attended, _ = self.target_attn[layer_index](hidden, target_temporal_feat, target_temporal_feat)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            attended, _ = self.agent_attn[layer_index](hidden, agent_feat, agent_feat, key_padding_mask=~obs_mask)
-            hidden = self.norms[norm_index](hidden + attended)
-            norm_index += 1
-
-            hidden = self.norms[norm_index](hidden + self.ffn[layer_index](hidden))
-            norm_index += 1
-
-        time_feat = self.time_emb(self.time_ids[: self.pred_len]).to(dtype=hidden.dtype)
-        traj_hidden = self.traj_norm(hidden[:, :, None, :] + time_feat[None, None, :, :])
-        residual_path = self.path_head(traj_hidden)
-        velocity_path = self.step_ids.to(device=hidden.device, dtype=hidden.dtype) * last_velocity[:, None, None, :]
-        direct_path = velocity_path + residual_path
-
-        endpoint = self.endpoint_head(hidden) + self.pred_len * last_velocity[:, None, :]
-        alpha = torch.linspace(1.0 / self.pred_len, 1.0, steps=self.pred_len, device=hidden.device, dtype=hidden.dtype)
-        endpoint_path = alpha[None, None, :, None] * endpoint[:, :, None, :]
-        blend = self.endpoint_blend(hidden)[:, :, None, :]
-        direct_path = blend * endpoint_path + (1.0 - blend) * direct_path
-        score = self.score_head(hidden).squeeze(-1)
-        return hidden, direct_path, score, endpoint
-
-
 class ProtoBasisNet(nn.Module):
     def __init__(
         self,
@@ -1190,23 +495,8 @@ class ProtoBasisNet(nn.Module):
         use_micro_coeff_anchors=False,
         endpoint_conditioning="rank",
         candidate_dense_topk=0,
-        basis_coeff_decoder=False,
-        basis_coeff_mode="residual",
         coupled_decoder=False,
         coupled_decoder_iters=0,
-        basis_bridge_decoder=False,
-        bridge_control_points=16,
-        temporal_dynamics_decoder=False,
-        dynamics_control_points=24,
-        direct_dynamics_decoder=False,
-        direct_dynamics_control_points=40,
-        soft_proto_decoder=False,
-        soft_proto_modes=20,
-        anchor_set_decoder=False,
-        anchor_set_modes=20,
-        intention_trajectory_decoder=False,
-        intention_modes=20,
-        intention_decoder_layers=3,
         micro_endpoint_offsets=False,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
@@ -1237,14 +527,7 @@ class ProtoBasisNet(nn.Module):
         self.two_stage_update_endpoint = two_stage_update_endpoint
         self.two_stage_update_coeff = two_stage_update_coeff
         self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
-        self.basis_coeff_decoder_enabled = bool(basis_coeff_decoder)
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
-        self.basis_bridge_decoder_enabled = bool(basis_bridge_decoder)
-        self.temporal_dynamics_decoder_enabled = bool(temporal_dynamics_decoder)
-        self.direct_dynamics_decoder_enabled = bool(direct_dynamics_decoder)
-        self.soft_proto_decoder_enabled = bool(soft_proto_decoder)
-        self.anchor_set_decoder_enabled = bool(anchor_set_decoder)
-        self.intention_trajectory_decoder_enabled = bool(intention_trajectory_decoder)
         self.micro_endpoint_offsets_enabled = bool(micro_endpoint_offsets)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
@@ -1278,17 +561,6 @@ class ProtoBasisNet(nn.Module):
             ff_dim=ff_dim,
             dropout=dropout,
         )
-        if self.soft_proto_decoder_enabled:
-            self.soft_proto_decoder = SoftPrototypeSetDecoder(
-                d_model=d_model,
-                basis_dim=basis_dim,
-                num_modes=soft_proto_modes,
-                nhead=nhead,
-                ff_dim=ff_dim,
-                dropout=dropout,
-            )
-        else:
-            self.soft_proto_decoder = None
         self.basis_bank = BasisBank(basis_bank)
         basis_matrix = self.basis_bank.basis_bank.reshape(self.basis_bank.basis_bank.size(0), -1)
         self.register_buffer("basis_matrix_flat", basis_matrix.float(), persistent=False)
@@ -1327,31 +599,6 @@ class ProtoBasisNet(nn.Module):
         self.register_buffer("micro_coeff_anchors", micro_coeff_anchors, persistent=False)
         self.has_micro_coeff_anchors = self.use_micro_coeff_anchors and self.micro_coeff_anchors.numel() > 0
         self.has_local_basis = self.local_basis_dim > 0 and self.local_basis_bank.numel() > 0
-        anchor_set_ids = _select_diverse_anchor_ids(self.proto_summary_5d, self.proto_frequency, int(anchor_set_modes))
-        self.register_buffer("anchor_set_ids", anchor_set_ids, persistent=False)
-        if self.anchor_set_decoder_enabled:
-            self.anchor_set_decoder = AnchorSetTrajectoryDecoder(
-                d_model=d_model,
-                basis_dim=basis_dim,
-                num_modes=int(anchor_set_modes),
-                nhead=nhead,
-                ff_dim=ff_dim,
-                dropout=dropout,
-            )
-        else:
-            self.anchor_set_decoder = None
-        if self.intention_trajectory_decoder_enabled:
-            self.intention_trajectory_decoder = IntentionTrajectoryDecoder(
-                d_model=d_model,
-                pred_len=pred_len,
-                num_modes=int(intention_modes),
-                nhead=nhead,
-                ff_dim=ff_dim,
-                layers=int(intention_decoder_layers),
-                dropout=dropout,
-            )
-        else:
-            self.intention_trajectory_decoder = None
         if self.micro_endpoint_offsets_enabled:
             self.micro_endpoint_head = nn.Sequential(
                 nn.LayerNorm(d_model),
@@ -1364,18 +611,6 @@ class ProtoBasisNet(nn.Module):
             nn.init.zeros_(self.micro_endpoint_head[-1].bias)
         else:
             self.micro_endpoint_head = None
-        if self.basis_coeff_decoder_enabled:
-            self.basis_coeff_decoder = BasisAwareCoeffDecoder(
-                d_model=d_model,
-                basis_dim=basis_dim,
-                pred_len=pred_len,
-                nhead=nhead,
-                ff_dim=ff_dim,
-                dropout=dropout,
-                mode=basis_coeff_mode,
-            )
-        else:
-            self.basis_coeff_decoder = None
         if self.has_local_basis:
             self.local_coeff_head = nn.Sequential(
                 nn.Linear(d_model, 128),
@@ -1411,40 +646,6 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.coupled_decoder = None
-        if self.basis_bridge_decoder_enabled:
-            self.basis_bridge_decoder = BasisBridgeDecoder(
-                d_model=d_model,
-                basis_dim=basis_dim,
-                pred_len=pred_len,
-                num_control_points=bridge_control_points,
-                dropout=dropout,
-            )
-        else:
-            self.basis_bridge_decoder = None
-        if self.temporal_dynamics_decoder_enabled:
-            self.temporal_dynamics_decoder = TemporalBasisDynamicsDecoder(
-                d_model=d_model,
-                basis_dim=basis_dim,
-                pred_len=pred_len,
-                num_control_points=dynamics_control_points,
-                nhead=nhead,
-                ff_dim=ff_dim,
-                dropout=dropout,
-            )
-        else:
-            self.temporal_dynamics_decoder = None
-        if self.direct_dynamics_decoder_enabled:
-            self.direct_dynamics_decoder = PrototypeDynamicsRolloutDecoder(
-                d_model=d_model,
-                basis_dim=basis_dim,
-                pred_len=pred_len,
-                num_control_points=direct_dynamics_control_points,
-                nhead=nhead,
-                ff_dim=ff_dim,
-                dropout=dropout,
-            )
-        else:
-            self.direct_dynamics_decoder = None
         if self.endpoint_shape_refiner_enabled:
             self.endpoint_shape_refiner = EndpointPreservingShapeRefiner(d_model=d_model, pred_len=pred_len)
         else:
@@ -1475,11 +676,7 @@ class ProtoBasisNet(nn.Module):
         feats_local = build_local_features(local_xyz)
         feats_global = build_global_features(obs_xyz)
 
-        agent_feat, target_temporal_feat = self.temporal_encoder(
-            feats_local,
-            feats_global,
-            return_target_sequence=True,
-        )
+        agent_feat = self.temporal_encoder(feats_local, feats_global)
         if self.disable_social:
             target_ctx = agent_feat[:, 0]
             scene_ctx = _masked_mean(agent_feat, obs_mask)
@@ -1495,97 +692,23 @@ class ProtoBasisNet(nn.Module):
             disable_router=self.disable_router,
         )
 
-        if self.intention_trajectory_decoder is not None:
-            active_query, direct_local, pred_score, endpoint_mode_local = self.intention_trajectory_decoder(
-                target_ctx,
-                scene_ctx,
-                target_temporal_feat,
-                agent_feat,
-                obs_mask,
-                local_xyz[:, 0],
-            )
-            batch_size, num_modes = direct_local.shape[:2]
-            coeff = direct_local.new_zeros(batch_size, num_modes, self.basis_bank.basis_bank.size(0))
-            pred_xyz = self.pose_normalizer.inverse(direct_local, origin, rotation)
-            aux = {
-                "coeff": coeff,
-                "coeff_delta": coeff,
-                "endpoint_residual": endpoint_residual,
-                "endpoint_mode_local": endpoint_mode_local,
-                "coarse_local": direct_local,
-                "direct_dynamics_local": direct_local,
-                "candidate_proto_idx": None,
-                "basis_matrix": self.basis_matrix_flat,
-                "basis_pinv": self.basis_pinv,
-                "proto_frequency": self.proto_frequency,
-                "proto_summary_5d": self.proto_summary_5d,
-            }
-            return {
-                "pred_xyz": pred_xyz,
-                "pred_score": pred_score,
-                "proto_logits": proto_logits,
-                "top_proto_idx": top_proto_idx,
-                "aux": aux,
-            }
-
-        if self.anchor_set_decoder is not None:
-            anchor_ids = self.anchor_set_ids.to(device=target_ctx.device)
-            anchor_summary = self.proto_summary_5d.index_select(0, anchor_ids)
-            if self.has_micro_coeff_anchors:
-                anchor_coeff = self.micro_coeff_anchors.index_select(0, anchor_ids)[:, 0]
-            else:
-                anchor_coeff = torch.zeros(
-                    anchor_ids.size(0),
-                    self.basis_bank.basis_bank.size(0),
-                    device=target_ctx.device,
-                    dtype=target_ctx.dtype,
-                )
-            query_feat, endpoint_mode_local, coeff, pred_score, difficulty_gate = self.anchor_set_decoder(
-                target_ctx,
-                scene_ctx,
-                agent_feat,
-                obs_mask,
-                anchor_summary,
-                anchor_coeff,
-            )
-            candidate_proto_idx = anchor_ids[None, :].expand(target_ctx.size(0), -1)
-            coeff_delta = coeff - anchor_coeff.to(device=coeff.device, dtype=coeff.dtype)[None]
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coarse_local = self.basis_bank(anchor_local, coeff)
-            active_query = query_feat
-        else:
-            micro_coeff_anchor = self.micro_coeff_anchors[top_proto_idx] if self.has_micro_coeff_anchors else None
-            query_feat, coeff, pred_score, difficulty_gate, coeff_delta = self.query_decoder(
-                proto_token,
-                endpoint_local,
-                target_ctx,
-                agent_feat,
-                obs_mask,
-                micro_coeff_anchor=micro_coeff_anchor,
-            )
-            endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
-            micro_endpoint_delta = None
-            if self.micro_endpoint_head is not None:
-                micro_endpoint_delta = self.micro_endpoint_head(query_feat)
-                endpoint_mode_local = endpoint_mode_local + micro_endpoint_delta
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coarse_local = self.basis_bank(anchor_local, coeff)
-            active_query = query_feat
-        if self.anchor_set_decoder is not None:
-            micro_endpoint_delta = None
-        basis_coeff = None
-        if self.basis_coeff_decoder is not None:
-            coeff_before_basis = coeff
-            coeff = self.basis_coeff_decoder(
-                query_feat,
-                endpoint_mode_local,
-                coeff,
-                coarse_local,
-                self.basis_bank.basis_bank,
-            )
-            basis_coeff = coeff
-            coeff_delta = coeff_delta + (coeff - coeff_before_basis)
-            coarse_local = self.basis_bank(anchor_local, coeff)
+        micro_coeff_anchor = self.micro_coeff_anchors[top_proto_idx] if self.has_micro_coeff_anchors else None
+        query_feat, coeff, pred_score, difficulty_gate, coeff_delta = self.query_decoder(
+            proto_token,
+            endpoint_local,
+            target_ctx,
+            agent_feat,
+            obs_mask,
+            micro_coeff_anchor=micro_coeff_anchor,
+        )
+        endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
+        micro_endpoint_delta = None
+        if self.micro_endpoint_head is not None:
+            micro_endpoint_delta = self.micro_endpoint_head(query_feat)
+            endpoint_mode_local = endpoint_mode_local + micro_endpoint_delta
+        anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+        coarse_local = self.basis_bank(anchor_local, coeff)
+        active_query = query_feat
         if self.two_stage_decoder:
             stage2_input = torch.cat([query_feat, coarse_local[:, :, -1], coarse_local.mean(dim=2)], dim=-1)
             stage2_query = query_feat + self.stage2_proj(stage2_input)
@@ -1609,9 +732,8 @@ class ProtoBasisNet(nn.Module):
                 self.anchor_alpha,
             )
             coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
-        if self.anchor_set_decoder is None:
-            candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
-        if self.anchor_set_decoder is None and self.candidate_keep_indices.numel() > 0:
+        candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
+        if self.candidate_keep_indices.numel() > 0:
             keep = self.candidate_keep_indices.to(device=coeff.device)
             query_feat = query_feat.index_select(1, keep)
             coeff = coeff.index_select(1, keep)
@@ -1622,68 +744,6 @@ class ProtoBasisNet(nn.Module):
             coarse_local = coarse_local.index_select(1, keep)
             active_query = active_query.index_select(1, keep)
             candidate_proto_idx = candidate_proto_idx.index_select(1, keep)
-        soft_proto_idx = None
-        if self.soft_proto_decoder is not None:
-            coeff_before_soft = coeff
-            active_query, endpoint_mode_local, coeff, pred_score, difficulty_gate, soft_proto_idx = self.soft_proto_decoder(
-                target_ctx,
-                scene_ctx,
-                agent_feat,
-                obs_mask,
-                self.proto_summary_5d,
-                self.prototype_router.proto_emb.weight,
-                self.prototype_router.proto_proj,
-                base_query=active_query,
-                base_endpoint=endpoint_mode_local,
-                base_coeff=coeff,
-                base_score=pred_score,
-                base_gate=difficulty_gate,
-            )
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coarse_local = self.basis_bank(anchor_local, coeff)
-            coeff_delta = coeff_delta + (coeff - coeff_before_soft)
-        bridge_local = None
-        bridge_control_local = None
-        bridge_coeff = None
-        bridge_gate = None
-        dynamics_local = None
-        dynamics_coeff = None
-        direct_dynamics_local = None
-        direct_dynamics_coeff = None
-        direct_dynamics_gate = None
-        if self.basis_bridge_decoder is not None:
-            coeff_before_bridge = coeff
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coeff, coarse_local, bridge_control_local, bridge_gate = self.basis_bridge_decoder(
-                active_query,
-                endpoint_mode_local,
-                coeff,
-                coarse_local,
-                anchor_local,
-                self.basis_pinv,
-                self.basis_bank,
-            )
-            bridge_coeff = coeff
-            bridge_local = coarse_local
-            coeff_delta = coeff_delta + (coeff - coeff_before_bridge)
-        if self.temporal_dynamics_decoder is not None:
-            coeff_before_dynamics = coeff
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coeff, coarse_local = self.temporal_dynamics_decoder(
-                active_query,
-                endpoint_mode_local,
-                coeff,
-                coarse_local,
-                target_temporal_feat,
-                agent_feat,
-                obs_mask,
-                anchor_local,
-                self.basis_pinv,
-                self.basis_bank,
-            )
-            dynamics_coeff = coeff
-            dynamics_local = coarse_local
-            coeff_delta = coeff_delta + (coeff - coeff_before_dynamics)
         if self.has_local_basis:
             proto_mean_path = self.prototype_mean_path[candidate_proto_idx]
             proto_mean_endpoint = proto_mean_path[:, :, -1, :]
@@ -1700,23 +760,6 @@ class ProtoBasisNet(nn.Module):
                 support_scale = support_scale.unsqueeze(-1).unsqueeze(-1)
                 local_gate = local_gate * support_scale
             coarse_local = coarse_local + local_gate * (local_path - coarse_local)
-        if self.direct_dynamics_decoder is not None:
-            coeff_before_direct = coeff
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coeff, coarse_local, direct_dynamics_gate = self.direct_dynamics_decoder(
-                active_query,
-                endpoint_mode_local,
-                coeff,
-                coarse_local,
-                target_temporal_feat,
-                agent_feat,
-                obs_mask,
-                anchor_local,
-                self.basis_pinv,
-            )
-            direct_dynamics_coeff = coeff
-            direct_dynamics_local = coarse_local
-            coeff_delta = coeff_delta + (coeff - coeff_before_direct)
         use_refiner = enable_refiner and (not self.disable_refiner)
         refined_local = self.refiner(coarse_local, active_query, difficulty_gate) if use_refiner else coarse_local
         if self.endpoint_shape_refiner is not None:
@@ -1729,7 +772,6 @@ class ProtoBasisNet(nn.Module):
         aux = {
             "coeff": coeff,
             "coeff_delta": coeff_delta,
-            "basis_coeff": basis_coeff,
             "endpoint_residual": endpoint_residual,
             "endpoint_mode_local": endpoint_mode_local,
             "coarse_local": coarse_local,
@@ -1741,32 +783,6 @@ class ProtoBasisNet(nn.Module):
         }
         if micro_endpoint_delta is not None:
             aux["micro_endpoint_delta"] = micro_endpoint_delta
-        if soft_proto_idx is not None:
-            aux["soft_proto_idx"] = soft_proto_idx
-        if bridge_local is not None:
-            aux.update(
-                {
-                    "bridge_coeff": bridge_coeff,
-                    "bridge_local": bridge_local,
-                    "bridge_control_local": bridge_control_local,
-                    "bridge_gate": bridge_gate,
-                }
-            )
-        if dynamics_local is not None:
-            aux.update(
-                {
-                    "dynamics_coeff": dynamics_coeff,
-                    "dynamics_local": dynamics_local,
-                }
-            )
-        if direct_dynamics_local is not None:
-            aux.update(
-                {
-                    "direct_dynamics_coeff": direct_dynamics_coeff,
-                    "direct_dynamics_local": direct_dynamics_local,
-                    "direct_dynamics_gate": direct_dynamics_gate,
-                }
-            )
 
         return {
             "pred_xyz": pred_xyz,
