@@ -300,3 +300,17 @@ Validation:
 - Init from current best checkpoint with partial load.
 - Train soft proto stack only, 8 epochs, short 111_days validation.
 - Disable GT-prototype coeff/shape/FDE losses for this run; use winner-based projection guidance so the soft candidates are not forced into hard-router labels.
+
+Result:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | GLeV@20 | endpoint_var | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| current checkpoint baseline | 0.2137 | 0.3046 | 0.3848 | 0.0898 | n/a | reference |
+| soft proto residual, best epoch 1 | 0.2160 | n/a | n/a | n/a | n/a | worse |
+| soft proto residual, epoch 8 | 0.2160 | 0.3082 | 0.3815 | 0.0896 | 4.6622 | worse |
+
+Conclusion:
+
+- Do not make `soft_proto_decoder` default.
+- This is valid negative evidence for a medium/large upstream change: giving each hard candidate soft access to all prototype memories increased endpoint spread but did not improve ADE/FDE.
+- Together with the failed decoder replacements, the current short-test evidence says the remaining gap is not solved by adding stronger heads on top of the current observed-trajectory context. A future large redesign would need a different source of intent signal or a full candidate-generation retraining schedule, not another partial checkpoint add-on.
