@@ -468,3 +468,30 @@ Conclusion:
 - The 30-candidate branch shows that simply adding more internal candidates increases endpoint spread/GLeV but hurts ADE/FDE, so the next architecture work should not be raw candidate expansion.
 - Full backbone/router unfreeze is not the immediate bottleneck; it stayed around `0.2016` on the same 200-batch check.
 - Promote the low-diversity micro-endpoint continuation as the current 111_days baseline: full `ADE@20=0.1892`, `FDE@20=0.2697`.
+
+## 2026-04-27 Endpoint Coverage / FDE Repair Attempts
+
+Purpose: after the 100-batch diagnostic showed that forcing GT prototype only improved ADE by about `0.0045`, test whether the remaining FDE gap can be repaired by endpoint candidate allocation rather than more coeff/path decoding.
+
+Same-window reference:
+
+| Variant | Eval | ADE@20 | FDE@20 | rare_FDE@20 | Decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| current best checkpoint | 50 batch | 0.2052 | 0.2964 | 0.7884 | reference |
+
+Tested variants:
+
+| Variant | Eval | ADE@20 | FDE@20 | rare_FDE@20 | Decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| endpoint set refiner, head only | 50 batch | 0.2050 | 0.2965 | 0.7878 | noise-level ADE, no FDE gain |
+| endpoint set refiner + endpoint/coeff stack, strong FDE-min loss | 50 batch | 0.2068 | 0.2965 | 0.7868 | worse ADE, no FDE gain |
+| motion-aware endpoint set head | 50 batch | 0.2050 | 0.2963 | 0.7868 | noise-level only |
+| existing endpoint/coeff stack + mild FDE-min loss | 50 batch | 0.2064 | 0.2988 | 0.7936 | worse |
+| proto-conditioned endpoint head + hit-only residual supervision | 50 batch | 0.2074 | 0.3015 | 0.7975 | worse |
+
+Conclusion:
+
+- Do not keep `endpoint_set_refiner`, endpoint coverage losses, or proto-conditioned endpoint as default.
+- Directly pulling the nearest candidate endpoint toward GT reduces training `endpoint_min_fde`, but it does not transfer to validation FDE in short checks. This suggests the remaining FDE gap is not solved by a late endpoint correction head or by a simple min-FDE loss.
+- The default rank-conditioned endpoint head is not obviously weak in practice; replacing it with prototype-conditioned endpoint generation disrupted the learned micro/coupled/refiner stack.
+- Next endpoint-side investigation should be diagnostic first: split FDE by route/turn/altitude-change regimes and compare constant-velocity, prototype endpoint, micro endpoint, and final refined endpoint errors before adding another module.
