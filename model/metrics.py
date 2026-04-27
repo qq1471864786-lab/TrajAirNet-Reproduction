@@ -60,8 +60,8 @@ def _glev_raw(pred_xyz, gt_xyz, pred_score, k, topn):
     near = torch.gather(endpoints, 1, near_idx[..., None].expand(-1, -1, 3))
     global_var = endpoints.var(dim=1, unbiased=False).sum(dim=-1) + 1e-6
     local_var = near.var(dim=1, unbiased=False).sum(dim=-1) + 1e-6
-    # Keep a single GooDFlight-table-compatible lower-is-better GLeV value
-    # in the public API for direct numeric comparison with reported results.
+    # GooDFlight-compatible GLeV: local endpoint variance around GT divided by
+    # global endpoint variance across all candidates. Higher is better.
     return local_var / global_var
 def rare_subset_fde(pred_xyz, gt_xyz, pred_score, is_rare, k):
     if is_rare.sum() == 0:

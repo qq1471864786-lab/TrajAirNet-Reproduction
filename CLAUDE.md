@@ -12,11 +12,11 @@ Language: English academic. Writing style: direct, precise, no overclaiming.
 - **Protocol**: 40s observation → 120s prediction, 1 Hz, K=20 candidates
 
 ## Core Innovations (never dilute or omit these)
-1. **Prototype Router**: 64 K-Means trajectory prototypes, top-5 routing, intent classification
-2. **SVD Basis Decomposition**: 16-dim basis vectors reconstruct trajectory shape (not point-by-point regression)
-3. **Micro-mode Expansion**: 4 micro-modes per prototype = 20 structured candidates
+1. **Prototype Router**: 64 K-Means trajectory prototypes, top-15 routing, intent classification
+2. **SVD Basis Decomposition**: 16-dim global basis plus 2-dim prototype-local basis reconstruct trajectory shape
+3. **Structured Candidate Expansion**: top-5 routed prototypes keep 2 micro candidates and the remaining routed prototypes keep 1, giving K=20
 4. **Social Aggregator**: cross-attention over neighboring aircraft (ASCENT has none)
-5. **Temporal Residual Refiner**: depth-wise conv + difficulty gating
+5. **Shape Refinement**: temporal residual refiner plus endpoint-preserving shape/control-point refiners
 
 ## Verified Numbers (do not change without re-running experiments)
 ### Main Table (111_days, K=20)
@@ -33,14 +33,18 @@ Numbers source: ASCENT Table II (for baselines), our seed3407 100-epoch run (for
 ### Generalization (7days1~4, K=20) — partially complete
 | Method | 7days1 | 7days2 | 7days3 | 7days4 |
 |--------|--------|--------|--------|--------|
-| GooDFlight | 0.27/— | 0.27/0.35 | 0.28/0.36 | 0.27/0.35 |
+| GooDFlight | 0.27/0.41 | 0.32/0.40 | 0.36/0.48 | 0.30/0.40 |
 | **Ours** | 0.326/0.509 | TBD | TBD | TBD |
+
+For ADE/FDE, lower values are better. Current 7days1 is still weaker than GooDFlight in both ADE and FDE, but the gap is smaller than the old incorrect notes implied.
 
 ### GLeV (diversity, 111_days, higher is better)
 | Method | GLeV@20 |
 |--------|---------|
 | GooDFlight | 0.0120 |
 | **Ours** | TBD (best seen: 0.058 at e27 on 7days1) |
+
+GLeV follows GooDFlight's `local_var/global_var` definition and is higher-is-better. Do not make strict numeric-scale claims until K, top-n, candidate filtering, and units are checked.
 
 ## Positioning
 - vs ASCENT: "competitive with ASCENT" — do NOT claim to beat it. ASCENT=0.19, ours=0.228.
@@ -50,8 +54,8 @@ Numbers source: ASCENT Table II (for baselines), our seed3407 100-epoch run (for
 - Key differentiator from EigenTrajectory: prototype-conditioned basis (not global fixed basis); aviation domain
 
 ## Similarity Risks (must cite, not hide)
-- Kinematic integration decoding (speed + sin/cos yaw/pitch → cumsum) is nearly identical to ASCENT → cite ASCENT and Deep Kinematic Models (Cui et al., ICRA 2020)
 - PoseNormalizer → cite ASCENT
+- Weather/context columns are not used in the current default input; do not claim weather-aware prediction.
 
 ## Paper Structure
 1. Introduction (~1 page)

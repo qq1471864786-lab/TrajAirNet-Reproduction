@@ -12,7 +12,7 @@ Priority metrics for the next refinement round:
 - `FDE@20`
 - `Top1_ADE/FDE`
 - `rare_FDE@20`
-- `GLeV_report@20`
+- `GLeV@20`
 
 ## Evidence From The 65-Epoch Main Run
 
@@ -148,7 +148,7 @@ Result (`epoch 26`, after refinement):
 - `rare_FDE@20 = 1.4607`
 - `Top1_ADE = 0.7454`
 - `Top1_FDE = 1.4258`
-- `GLeV_report@20 = 0.1743`
+- `GLeV@20 = 0.1743`
 - `score_entropy = 2.7254`
 
 Direct comparison versus the before-change proxy:
@@ -160,7 +160,7 @@ Direct comparison versus the before-change proxy:
 - `rare_FDE@20`: `2.1215 -> 1.4607` (`-0.6608`)
 - `Top1_ADE`: `0.7272 -> 0.7454` (`+0.0182`, worse)
 - `Top1_FDE`: `1.4193 -> 1.4258` (`+0.0066`, worse)
-- `GLeV_report@20`: `0.1459 -> 0.1743` (`+0.0284`, worse if lower is better)
+- `GLeV@20`: `0.1459 -> 0.1743` (`+0.0284`, better under the GooDFlight higher-is-better definition)
 - `score_entropy`: `1.8140 -> 2.7254` (`+0.9114`)
 
 ## Interim Decision
@@ -178,7 +178,7 @@ What clearly improved:
 What did not improve enough:
 
 - `Top1_ADE/FDE`
-- `GLeV_report@20`
+- `GLeV@20`
 
 Interpretation:
 
@@ -219,7 +219,7 @@ Result (`epoch 26`):
 - `rare_FDE@20 = 1.3157`
 - `Top1_ADE = 0.8118`
 - `Top1_FDE = 1.5151`
-- `GLeV_report@20 = 0.2140`
+- `GLeV@20 = 0.2140`
 
 Decision:
 
@@ -249,11 +249,11 @@ Result (`epoch 26`):
 - `rare_FDE@20 = 1.5024`
 - `Top1_ADE = 0.7457`
 - `Top1_FDE = 1.4054`
-- `GLeV_report@20 = 0.1643`
+- `GLeV@20 = 0.1643`
 
 Decision:
 
-- `Top1_FDE` and `GLeV_report@20` improved slightly
+- `Top1_FDE` and `GLeV@20` improved slightly
 - but `ADE@5/ADE@20/FDE@20/rare_FDE@20` all regressed relative to the validated base
 - this direction is also rejected as a new default
 
@@ -277,19 +277,19 @@ Current full-run status snapshot (`111_days`, unified `40/120`, main run still i
   - `ADE@20`
   - `FDE@20`
   - `rare_FDE@20`
-  - `GLeV_report@20`
+  - `GLeV@20`
 - latest bests observed during the current run:
   - `ADE@20 = 0.2471 @ e56`
   - `FDE@20 = 0.3395 @ e54`
   - `rare_FDE@20 = 0.7896 @ e54`
-  - `GLeV_report@20 = 0.0694 @ e54`
+  - `GLeV@20 = 0.0694 @ e54`
   - `ADE@5 = 0.3981 @ e46`
 
 Deep read of the late-stage behavior:
 
 - `joint_refiner` remains the phase that actually produces the paper-facing gains
 - `epoch 54-56` still produced new best updates, so the run had not fully saturated by `65 epochs`
-- `ADE@20/FDE@20/rare_FDE@20/GLeV_report@20` are still the dimensions with the most meaningful late-stage movement
+- `ADE@20/FDE@20/rare_FDE@20/GLeV@20` are still the dimensions with the most meaningful late-stage movement
 - `ADE@5` and especially `Top1_ADE/FDE` remain the relatively weaker side
 - `score_entropy` collapses again late in training, so simply extending training is not expected to fully solve `Top1`
 
@@ -309,7 +309,7 @@ Why this is the preferred change:
 
 Expected benefit:
 
-- most likely further small gains in `ADE@20`, `FDE@20`, `rare_FDE@20`, and `GLeV_report@20`
+- most likely further small gains in `ADE@20`, `FDE@20`, `rare_FDE@20`, and `GLeV@20`
 
 Expected limitation:
 
@@ -344,7 +344,7 @@ Baseline result (`epoch 26`, before micro endpoint residual):
 - `rare_FDE@20 = 1.4299`
 - `Top1_ADE = 0.7537`
 - `Top1_FDE = 1.4496`
-- `GLeV_report@20 = 0.1801`
+- `GLeV@20 = 0.1801`
 - `score_entropy = 2.7279`
 - `endpoint_var = 2.1957`
 
@@ -357,7 +357,7 @@ Micro-endpoint result (`epoch 26`, after the structural change):
 - `rare_FDE@20 = 1.3953`
 - `Top1_ADE = 0.7627`
 - `Top1_FDE = 1.4141`
-- `GLeV_report@20 = 0.2052`
+- `GLeV@20 = 0.2052`
 - `score_entropy = 2.5577`
 - `endpoint_var = 2.3391`
 
@@ -372,7 +372,7 @@ Decision:
   - `ADE@20`
   - `FDE@20`
   - `Top1_ADE`
-  - `GLeV_report@20`
+  - `GLeV@20`
 
 Interpretation:
 
@@ -495,7 +495,6 @@ Method:
   - `device = cuda:1`
 - search only `Stage C` loss balance:
   - `lambda_score`
-  - `stage_c_rank_weight`
   - `stage_c_div_weight`
 
 Baseline on full `111_days`:
@@ -516,7 +515,6 @@ Best precision-oriented candidate found:
 
 - config:
   - `--lambda_score 0.0`
-  - `--stage_c_rank_weight 0.0`
   - `--stage_c_div_weight 2.0`
 - result:
   - `ADE@20 = 0.36312`
@@ -528,7 +526,6 @@ Best balance candidate found:
 
 - config:
   - `--lambda_score 0.03`
-  - `--stage_c_rank_weight 0.0`
   - `--stage_c_div_weight 2.0`
 - result:
   - `ADE@20 = 0.36332`
@@ -564,7 +561,7 @@ Decision:
 - next formal run should use:
 
 ```bash
-python train.py 111_days --device cuda:1 --lambda_score 0.03 --stage_c_rank_weight 0.0 --stage_c_div_weight 2.0
+python train.py 111_days --device cuda:1
 ```
 
 ## 2026-04-22: 7days1 small-dataset default search
@@ -578,7 +575,6 @@ Key findings:
 
 - keeping the current weight recipe is more stable than changing it:
   - `--lambda_score 0.03`
-  - `--stage_c_rank_weight 0.0`
   - `--stage_c_div_weight 2.0`
 - `7days1` does not benefit from copying `111_days` batch sizes:
   - `batch_size=512 / eval_batch_size=1024` looked good only in a batch-limited shortcut
@@ -607,7 +603,6 @@ Full-data confirmation:
   - `phase_a / phase_b / phase_c / extra = 10 / 4 / 20 / 0`
   - `batch_size / eval_batch_size = 48 / 96`
   - `lambda_score = 0.03`
-  - `stage_c_rank_weight = 0.0`
   - `stage_c_div_weight = 2.0`
 - result:
   - `ADE@20 = 0.3247`

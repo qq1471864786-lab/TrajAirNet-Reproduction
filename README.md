@@ -12,10 +12,18 @@ Current default protocol:
 - `obs = 40`
 - `preds = 120`
 - `max_agents = 7`
-- `topk_proto = 5`
-- `micro_per_proto = 4`
+- `n_proto = 64`
+- `topk_proto = 15`
+- `micro_per_proto = 2`
+- `candidate_dense_topk = 5`
 - `basis_dim = 16`
+- `local_basis_dim = 2`
+- `endpoint_shape_refiner = true`
+- `control_shape_refiner = true`
+- `control_shape_points = 32`
 - `best@5 / best@20`
+
+The effective candidate budget is still K=20: the top 5 routed prototypes keep 2 micro candidates each, and the remaining 10 routed prototypes keep 1 candidate each.
 
 Current default training command:
 
@@ -41,10 +49,8 @@ Primary reported metrics:
 - `FDE@5`
 - `ADE@20`
 - `FDE@20`
-- `GLeV_report@5`
-- `GLeV_report@20`
-- `GLeV_raw@5`
-- `GLeV_raw@20`
+- `GLeV@5`
+- `GLeV@20`
 - `rare_FDE@20`
 
 Ablation switches:
@@ -61,6 +67,7 @@ Protocol scaffolding:
 Project note:
 
 - old ACT / HAINet / kinematic query decoder lines are no longer the active workflow
+- weather / context columns are not part of the current default input
 - this repository is now reserved for ProtoBasis-Net only
 - roadmap is recorded in `notes/PROTOBASIS_EXECUTION_ROADMAP.md`
 

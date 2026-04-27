@@ -1,7 +1,7 @@
 # ProtoBasis-Net 论文写作准备文档
 
 > 本文档为论文写作的完整前期准备，供后续 AI 会话直接读取使用。
-> 最后更新：2026-04-22（第二版，实验方案定稿）
+> 最后更新：2026-04-27（清扫版，统一当前默认架构与公平对照口径）
 
 ---
 
@@ -10,10 +10,10 @@
 **方法名称**: ProtoBasis-Net — 基于原型路由与SVD基分解的飞机轨迹预测
 
 **核心创新点**:
-- 原型路由（Prototype Routing）：64个聚类原型中选top-5，条件化生成
-- SVD基分解（Basis Decomposition）：16维基向量重建轨迹形状，替代逐点回归
-- 微模式扩展（Micro-mode Expansion）：每个原型4个微模式，共20条候选轨迹
-- 时序残差精炼器（Temporal Residual Refiner）：深度可分离卷积 + 难度门控
+- 原型路由（Prototype Routing）：64个聚类原型中选 top-15，条件化生成
+- SVD基分解（Basis Decomposition）：16维全局基 + 2维原型局部基重建轨迹形状
+- 结构化候选扩展（Structured Candidate Expansion）：top-5 原型保留2个 micro 候选，其余路由原型保留1个候选，共20条轨迹
+- 形状精炼器（Shape Refinement）：时序残差精炼 + endpoint-preserving shape/control-point refiners
 
 **目标期刊**（按优先级）:
 1. Scientific Reports (Q2, IF~4.6) — 概率 60-70%
@@ -92,6 +92,8 @@ GLeV 单独列或单独小表（只有 GooDFlight 报了 GLeV）：
 | GooDFlight | 0.0120 | GooDFlight Tab.III |
 | **ProtoBasis-Net (Ours)** | **待填** | — |
 
+GLeV 按 GooDFlight 定义为 `local_var / global_var`，方向为 higher-is-better。当前项目公式方向与 GooDFlight 一致，但本项目 `GLeV@20` 的量级可能与 GooDFlight Table III 相差较大；写论文主结论前必须核对 K、top-n nearest endpoints、候选筛选和单位。
+
 注意：GooDFlight 自报 ADE=0.27/FDE=0.35，ASCENT 复现报 0.29/0.39。
 论文中统一引 ASCENT 的数字（因为主表其他 baseline 也来自 ASCENT），
 但需脚注说明 GooDFlight 自报值略低。
@@ -103,10 +105,9 @@ GLeV 单独列或单独小表（只有 GooDFlight 报了 GLeV）：
 
 | Method | 7days1 | 7days2 | 7days3 | 7days4 | 来源 |
 |---|---|---|---|---|---|
-| TrajAirNet | 0.67/1.47 | 0.72/1.56 | 0.73/1.60 | 0.72/1.57 | GooDFlight Tab.II |
-| Social-PatteRNN | 0.56/0.65 | 0.62/0.72 | 0.63/0.73 | 0.62/0.72 | GooDFlight Tab.II |
-| MID | 0.53/0.63 | 0.59/0.70 | 0.60/0.71 | 0.59/0.70 | GooDFlight Tab.II |
-| GooDFlight | 0.24/0.31 | 0.27/0.35 | 0.28/0.36 | 0.27/0.35 | GooDFlight Tab.II |
+| TrajAirNet | 0.72/1.45 | 0.80/1.59 | 0.88/1.67 | 0.70/1.44 | GooDFlight Tab.II |
+| Social-PatteRNN-ATT | 0.61/1.42 | 0.76/1.67 | 0.75/1.65 | 0.67/1.51 | GooDFlight Tab.II |
+| GooDFlight | 0.27/0.41 | 0.32/0.40 | 0.36/0.48 | 0.30/0.40 | GooDFlight Tab.II |
 | **Ours** | **待填** | **待填** | **待填** | **待填** | — |
 
 注意：ASCENT 没有在 7days 上用 K=20 协议，所以此表无 ASCENT。
@@ -120,7 +121,7 @@ GLeV 单独列或单独小表（只有 GooDFlight 报了 GLeV）：
 | Full model | 待填 | 待填 | 待填 |
 | w/o Prototype Router (--disable_router) | 待填 | 待填 | 待填 |
 | w/o SVD Basis Bank | 待填 | 待填 | 待填 |
-| w/o Micro-endpoint (--disable_micro_endpoint_prior) | 待填 | 待填 | 待填 |
+| w/o Micro expansion (`--topk_proto 20 --micro_per_proto 1 --candidate_dense_topk 0`) | 待填 | 待填 | 待填 |
 | w/o Temporal Refiner (--disable_refiner) | 待填 | 待填 | 待填 |
 | w/o Social Aggregator (--disable_social) | 待填 | 待填 | 待填 |
 
@@ -139,8 +140,8 @@ GLeV 单独列或单独小表（只有 GooDFlight 报了 GLeV）：
 
 | 实验 | 数据集 | 状态 | 最佳成绩 |
 |---|---|---|---|
-| 主实验 seed3407 | 111_days | ✅ 已完成 (100 epoch) | ADE@20=0.228, FDE@20=0.329 |
-| 泛化实验 | 7days1 | 🔄 训练中 (epoch 73/100) | ADE@20=0.326, FDE@20=0.509 |
+| 主实验 seed3407 | 111_days | ✅ 已完成，需用当前默认重新确认 | ADE@20=0.228, FDE@20=0.329 |
+| 泛化实验 | 7days1 | ✅ 已有旧结果，需用统一默认重新确认 | ADE@20=0.326, FDE@20=0.509 |
 | 泛化实验 | 7days2 | ⏳ 未开始 | — |
 | 泛化实验 | 7days3 | ⏳ 未开始 | — |
 | 泛化实验 | 7days4 | ⏳ 未开始 | — |
@@ -164,10 +165,10 @@ GLeV 单独列或单独小表（只有 GooDFlight 报了 GLeV）：
 
 | Method | ADE@20 | FDE@20 |
 |---|---|---|
-| GooDFlight | 0.24 | 0.31 |
+| GooDFlight | 0.27 | 0.41 |
 | ProtoBasis-Net (当前) | 0.326 | 0.509 |
 
-7days1 差距较大，需要优化（scoring head、lambda_score 等）。
+7days1 仍弱于 GooDFlight，但旧 notes 高估了差距：ADE 差距为 0.056，FDE 差距为 0.099（ADE/FDE 越低越好）。需要继续优化 scoring head、lambda_score 等。
 
 ---
 
@@ -303,27 +304,24 @@ Method → Experiments → Related Work → Introduction → Abstract
 ### 当前最优超参
 ```bash
 python train.py 111_days \
-  --device cuda:1 \
-  --lambda_score 0.03 \
-  --stage_c_rank_weight 0.0 \
-  --stage_c_div_weight 2.0
+  --device cuda:1
 ```
 
 ### 训练阶段
 - Stage A (10 epochs): GT proto warmup, no refiner
 - Stage B (4 epochs): Learn routing, no refiner
 - Stage C (51 epochs): Full model, refiner + diversity loss
-- Extra tail (35 epochs): Extended refiner, lr=4e-5
-- Total: 100 epochs
+- Extra tail: 0 by current default
+- Total: 65 epochs
 
 ### 损失权重
 - lambda_xyz=1.0, lambda_fde=1.0, lambda_proto=0.35
-- lambda_res=0.2, lambda_score=0.03 (Stage C)
-- lambda_rank=0.1 (×0.0 in Stage C), lambda_div=0.05 (×2.0 in Stage C)
+- lambda_res=0.2, lambda_score=0.03
+- lambda_div=0.05, stage_c_div_weight=2.0
 - lambda_coeff=0.02, lambda_smooth=0.10
 
 ### 7days 注意事项
-- 7days1 当前 lambda_score=0.03，可能需要提高到 0.1~0.3
+- 7days1 当前仍弱于 GooDFlight，不应单独改小数据集架构；小数据集只允许不同超参数
 - batch_size: 111_days=512, 7days=48（硬编码在 apply_training_defaults）
 - 7days 数据量只有 111_days 的 1/7.5，原型/基向量质量受影响
 
@@ -336,8 +334,10 @@ python train.py 111_days \
 - 应对：报 GLeV（ASCENT 没报），强调结构化多样性和可解释性
 - 用 "competitive with" 而非 "state-of-the-art"
 
-### 9.2 7days1 差距较大
-- 我们 0.326 vs GooDFlight 0.24
+### 9.2 7days1 仍未超过 GooDFlight
+- 我们 0.326/0.509 vs GooDFlight 0.27/0.41（GooDFlight Table II）
+- 旧 notes 使用了错误的 GooDFlight 7days1~4 数字，导致差距判断偏大
+- 当前结论：ADE/FDE 均仍弱于 GooDFlight，但 FDE 差距比旧表判断小
 - 可能原因：数据量不足、scoring head 弱、lambda_score 太低
 - 需要调参优化后再定论
 

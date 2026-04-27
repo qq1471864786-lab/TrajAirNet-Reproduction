@@ -28,10 +28,10 @@ ProtoBasis-Net 是面向 TrajAir 非塔台终端空域的多模态 3D 航迹预�
    目标飞机作为 query，所有飞机作为 key/value 做 cross-attention；同时保留场景级 masked mean。这个模块是和 ASCENT 的重要差异点之一。
 
 4. `PrototypeRouter`
-   对训练集未来轨迹的 5 维摘要做 K-Means，默认 64 个原型。摘要为局部终点 xyz、累计 yaw 变化、累计 pitch 变化。推理时从 64 个原型中选 top-5，并预测终点残差。
+   对训练集未来轨迹的 5 维摘要做 K-Means，默认 64 个原型。摘要为局部终点 xyz、累计 yaw 变化、累计 pitch 变化。`111_days` 默认从 64 个原型中选 top-15，并预测终点残差。
 
 5. `PrototypeConditionedQueryDecoder`
-   每个原型扩展 4 个 micro modes，形成 20 条候选。query 由原型 token、终点 token、micro embedding、目标上下文以及可选 micro coefficient anchor 组成。输出 basis coefficient、score、difficulty gate。
+   `111_days` 默认每个路由原型生成 2 个 micro modes，再用 `candidate_dense_topk=5` 保留 20 条候选。query 由原型 token、终点 token、micro embedding、目标上下文以及可选 micro coefficient anchor 组成。输出 basis coefficient、score、difficulty gate。
 
 6. `BasisBank`
    对训练集 future local trajectory 减去线性 endpoint anchor 后做 SVD，默认取 16 维基。候选轨迹为 endpoint anchor 加 basis residual。
@@ -51,8 +51,9 @@ ProtoBasis-Net 是面向 TrajAir 非塔台终端空域的多模态 3D 航迹预�
 - `obs_stride=1`
 - `pred_stride=1`
 - `K=20`
-- `topk_proto=5`
-- `micro_per_proto=4`
+- `topk_proto=15`
+- `micro_per_proto=2`
+- `candidate_dense_topk=5`
 - `max_agents=7`
 
 本地数据文件数量：
@@ -81,7 +82,7 @@ ProtoBasis-Net 是面向 TrajAir 非塔台终端空域的多模态 3D 航迹预�
 当前推荐正式主实验命令来自 notes：
 
 ```bash
-python train.py 111_days --device cuda:1 --lambda_score 0.03 --stage_c_rank_weight 0.0 --stage_c_div_weight 2.0
+python train.py 111_days --device cuda:1
 ```
 
 损失项包括：
@@ -91,7 +92,6 @@ python train.py 111_days --device cuda:1 --lambda_score 0.03 --stage_c_rank_weig
 - prototype classification CE
 - endpoint residual loss
 - quality-aware soft score loss + hard winner mix
-- score ranking margin
 - endpoint diversity repulsion
 - coefficient regularization
 - trajectory smoothness loss
@@ -205,19 +205,17 @@ MTR 用 learnable motion query pairs 同时做 global intention localization 和
 
 ## 8. 必须修正/核实的风险点
 
-### GLeV 定义方向不一致
+### GLeV 定义方向已确认
 
-当前 notes 中有“GLeV higher is better”的说法，但 `model/metrics.py` 注释写的是 GooDFlight-table-compatible `lower-is-better`，实现为：
+GLeV 按 GooDFlight 原文定义为：
 
 ```python
 local_var / global_var
 ```
 
-这会直接影响论文表格方向、结论和与 GooDFlight 的对比。写 GLeV 前必须重新核对 GooDFlight 原文公式和本项目实现，决定最终使用：
+其中 `local_var` 是靠近 ground-truth endpoint 的候选终点方差，`global_var` 是所有候选终点方差。该比值越大表示 ground-truth 附近仍保留更高局部多样性，因此 **higher-is-better**。`model/metrics.py` 的公式方向正确，旧错误注释已删除。
 
-- `GLeV_raw`
-- `GLeV_report`
-- 或者显式重命名为 `local/global endpoint variance ratio`
+仍需单独核对的是数值量级：本项目当前 `GLeV@20` 常在 `0.06-0.21`，而 GooDFlight Table III 约为 `0.0024-0.012`。写 Experiments 时需要确认 K、top-n nearest endpoint、候选筛选和单位是否完全一致；在核对前不要把 GLeV 数值当作严格可比的主结论。
 
 ### Method 草稿和代码默认组件有漂移
 
