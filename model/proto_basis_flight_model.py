@@ -420,6 +420,73 @@ class EndpointPreservingControlPointRefiner(nn.Module):
         return local_xyz + envelope[None, None, :, None] * residual
 
 
+class BasisBridgeDecoder(nn.Module):
+    def __init__(self, d_model=96, basis_dim=16, pred_len=120, num_control_points=16, hidden_dim=256, dropout=0.1):
+        super().__init__()
+        self.pred_len = int(pred_len)
+        self.num_control_points = int(num_control_points)
+        stats_dim = 30
+        input_dim = d_model + basis_dim + stats_dim
+        self.control_head = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.num_control_points * 3),
+        )
+        self.gate_head = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+        nn.init.zeros_(self.control_head[-1].weight)
+        nn.init.zeros_(self.control_head[-1].bias)
+        nn.init.zeros_(self.gate_head[-1].weight)
+        nn.init.zeros_(self.gate_head[-1].bias)
+        endpoint_envelope = 1.0 - torch.linspace(0.0, 1.0, steps=pred_len)
+        self.register_buffer("endpoint_envelope", endpoint_envelope, persistent=False)
+
+    def forward(self, query_feat, endpoint_local, coeff, coarse_local, anchor_local, basis_pinv, basis_bank):
+        base_residual = coarse_local - anchor_local
+        velocity = coarse_local[:, :, 1:] - coarse_local[:, :, :-1]
+        start_velocity = velocity[:, :, 0]
+        end_velocity = velocity[:, :, -1]
+        mean_velocity = velocity.mean(dim=2)
+        stats = torch.cat(
+            [
+                endpoint_local,
+                coarse_local[:, :, 0],
+                coarse_local[:, :, coarse_local.size(2) // 3],
+                coarse_local[:, :, (2 * coarse_local.size(2)) // 3],
+                coarse_local[:, :, -1],
+                coarse_local.mean(dim=2),
+                start_velocity,
+                end_velocity,
+                mean_velocity,
+                base_residual.mean(dim=2),
+            ],
+            dim=-1,
+        )
+        bridge_input = torch.cat([query_feat, coeff, stats], dim=-1)
+        batch_size, num_modes = coeff.shape[:2]
+        control = self.control_head(bridge_input)
+        control = control.reshape(batch_size * num_modes, self.num_control_points, 3).transpose(1, 2)
+        residual_delta = F.interpolate(control, size=coarse_local.size(2), mode="linear", align_corners=True)
+        residual_delta = residual_delta.transpose(1, 2).reshape(batch_size, num_modes, coarse_local.size(2), 3)
+        envelope = self.endpoint_envelope.to(device=coarse_local.device, dtype=coarse_local.dtype)
+        gate = 1.0 + 0.25 * torch.tanh(self.gate_head(bridge_input)).unsqueeze(-1)
+        bridged_residual = base_residual + envelope[None, None, :, None] * gate * residual_delta
+        flat_residual = bridged_residual.reshape(batch_size * num_modes, -1)
+        bridge_coeff = flat_residual @ basis_pinv.to(device=coarse_local.device, dtype=coarse_local.dtype)
+        bridge_coeff = bridge_coeff.reshape(batch_size, num_modes, -1)
+        bridge_local = basis_bank(anchor_local, bridge_coeff)
+        bridge_control_local = anchor_local + bridged_residual
+        return bridge_coeff, bridge_local, bridge_control_local, gate.squeeze(-1).squeeze(-1)
+
+
 class CoupledEndpointCoeffDecoder(nn.Module):
     def __init__(self, d_model=96, basis_dim=16, iters=1, dropout=0.1):
         super().__init__()
@@ -496,6 +563,8 @@ class ProtoBasisNet(nn.Module):
         candidate_dense_topk=0,
         coupled_decoder=False,
         coupled_decoder_iters=0,
+        basis_bridge_decoder=False,
+        bridge_control_points=16,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -526,6 +595,7 @@ class ProtoBasisNet(nn.Module):
         self.two_stage_update_coeff = two_stage_update_coeff
         self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
+        self.basis_bridge_decoder_enabled = bool(basis_bridge_decoder)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -631,6 +701,16 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.coupled_decoder = None
+        if self.basis_bridge_decoder_enabled:
+            self.basis_bridge_decoder = BasisBridgeDecoder(
+                d_model=d_model,
+                basis_dim=basis_dim,
+                pred_len=pred_len,
+                num_control_points=bridge_control_points,
+                dropout=dropout,
+            )
+        else:
+            self.basis_bridge_decoder = None
         if self.endpoint_shape_refiner_enabled:
             self.endpoint_shape_refiner = EndpointPreservingShapeRefiner(d_model=d_model, pred_len=pred_len)
         else:
@@ -725,6 +805,25 @@ class ProtoBasisNet(nn.Module):
             coarse_local = coarse_local.index_select(1, keep)
             active_query = active_query.index_select(1, keep)
             candidate_proto_idx = candidate_proto_idx.index_select(1, keep)
+        bridge_local = None
+        bridge_control_local = None
+        bridge_coeff = None
+        bridge_gate = None
+        if self.basis_bridge_decoder is not None:
+            coeff_before_bridge = coeff
+            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+            coeff, coarse_local, bridge_control_local, bridge_gate = self.basis_bridge_decoder(
+                active_query,
+                endpoint_mode_local,
+                coeff,
+                coarse_local,
+                anchor_local,
+                self.basis_pinv,
+                self.basis_bank,
+            )
+            bridge_coeff = coeff
+            bridge_local = coarse_local
+            coeff_delta = coeff_delta + (coeff - coeff_before_bridge)
         if self.has_local_basis:
             proto_mean_path = self.prototype_mean_path[candidate_proto_idx]
             proto_mean_endpoint = proto_mean_path[:, :, -1, :]
@@ -750,23 +849,34 @@ class ProtoBasisNet(nn.Module):
 
         pred_xyz = self.pose_normalizer.inverse(refined_local, origin, rotation)
 
+        aux = {
+            "coeff": coeff,
+            "coeff_delta": coeff_delta,
+            "endpoint_residual": endpoint_residual,
+            "endpoint_mode_local": endpoint_mode_local,
+            "coarse_local": coarse_local,
+            "candidate_proto_idx": candidate_proto_idx,
+            "basis_matrix": self.basis_matrix_flat,
+            "basis_pinv": self.basis_pinv,
+            "proto_frequency": self.proto_frequency,
+            "proto_summary_5d": self.proto_summary_5d,
+        }
+        if bridge_local is not None:
+            aux.update(
+                {
+                    "bridge_coeff": bridge_coeff,
+                    "bridge_local": bridge_local,
+                    "bridge_control_local": bridge_control_local,
+                    "bridge_gate": bridge_gate,
+                }
+            )
+
         return {
             "pred_xyz": pred_xyz,
             "pred_score": pred_score,
             "proto_logits": proto_logits,
             "top_proto_idx": top_proto_idx,
-            "aux": {
-                "coeff": coeff,
-                "coeff_delta": coeff_delta,
-                "endpoint_residual": endpoint_residual,
-                "endpoint_mode_local": endpoint_mode_local,
-                "coarse_local": coarse_local,
-                "candidate_proto_idx": candidate_proto_idx,
-                "basis_matrix": self.basis_matrix_flat,
-                "basis_pinv": self.basis_pinv,
-                "proto_frequency": self.proto_frequency,
-                "proto_summary_5d": self.proto_summary_5d,
-            },
+            "aux": aux,
         }
 
 

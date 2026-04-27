@@ -206,6 +206,65 @@ def _projection_guided_losses(
     return coeff_loss, path_loss, select_mask.float().mean()
 
 
+def _basis_bridge_guided_losses(
+    bridge_coeff,
+    bridge_local,
+    endpoint_mode_local,
+    gt_local,
+    basis_pinv,
+    basis_matrix,
+    candidate_proto_idx,
+    gt_proto_id,
+    best_idx,
+    mode,
+):
+    if (
+        mode == "none"
+        or bridge_coeff is None
+        or bridge_local is None
+        or endpoint_mode_local is None
+        or basis_pinv is None
+        or basis_matrix is None
+    ):
+        zero = gt_local.sum() * 0.0
+        return zero, zero, gt_local.new_tensor(0.0)
+
+    if endpoint_mode_local.shape[:2] != bridge_coeff.shape[:2] or bridge_local.shape[:2] != bridge_coeff.shape[:2]:
+        zero = bridge_coeff.sum() * 0.0
+        return zero, zero, bridge_coeff.new_tensor(0.0)
+
+    batch_size, num_modes, basis_dim = bridge_coeff.shape
+    select_mask = torch.zeros(batch_size, num_modes, dtype=torch.bool, device=bridge_coeff.device)
+    if mode in {"winner", "winner_gt_proto"}:
+        select_mask.scatter_(1, best_idx[:, None], True)
+    if mode in {"gt_proto", "winner_gt_proto"}:
+        if candidate_proto_idx is None or candidate_proto_idx.shape[:2] != bridge_coeff.shape[:2]:
+            if mode == "gt_proto":
+                zero = bridge_coeff.sum() * 0.0
+                return zero, zero, bridge_coeff.new_tensor(0.0)
+        else:
+            select_mask = select_mask | candidate_proto_idx.eq(gt_proto_id[:, None])
+    if mode == "all":
+        select_mask.fill_(True)
+    if mode not in {"winner", "gt_proto", "winner_gt_proto", "all"}:
+        raise ValueError(f"Unsupported basis_bridge_supervision: {mode}")
+    if not select_mask.any():
+        zero = bridge_coeff.sum() * 0.0
+        return zero, zero, bridge_coeff.new_tensor(0.0)
+
+    alpha = torch.linspace(0.0, 1.0, steps=gt_local.size(1), device=gt_local.device, dtype=gt_local.dtype)
+    anchor = alpha[None, None, :, None] * endpoint_mode_local[:, :, None, :]
+    residual = (gt_local[:, None, :, :] - anchor).reshape(-1, gt_local.size(1) * gt_local.size(2))
+    target_coeff = residual @ basis_pinv.to(device=gt_local.device, dtype=gt_local.dtype)
+    target_coeff = target_coeff.reshape(batch_size, num_modes, basis_dim)
+    target_recon = target_coeff.reshape(-1, basis_dim) @ basis_matrix.to(device=gt_local.device, dtype=gt_local.dtype)
+    target_path = anchor + target_recon.reshape_as(bridge_local)
+
+    coeff_loss = F.smooth_l1_loss(bridge_coeff[select_mask], target_coeff.detach()[select_mask])
+    path_loss = F.smooth_l1_loss(bridge_local[select_mask], target_path.detach()[select_mask])
+    return coeff_loss, path_loss, select_mask.float().mean()
+
+
 class ProtoBasisLoss(nn.Module):
     def __init__(
         self,
@@ -232,6 +291,9 @@ class ProtoBasisLoss(nn.Module):
         lambda_projection_coeff=0.0,
         lambda_projection_path=0.0,
         projection_supervision="none",
+        lambda_bridge_coeff=0.0,
+        lambda_bridge_path=0.0,
+        basis_bridge_supervision="none",
     ):
         super().__init__()
         if endpoint_residual_supervision not in {"all", "hit_only"}:
@@ -240,6 +302,8 @@ class ProtoBasisLoss(nn.Module):
             raise ValueError(f"Unsupported anchor_recon_supervision: {anchor_recon_supervision}")
         if projection_supervision not in {"none", "winner", "gt_proto", "winner_gt_proto", "all"}:
             raise ValueError(f"Unsupported projection_supervision: {projection_supervision}")
+        if basis_bridge_supervision not in {"none", "winner", "gt_proto", "winner_gt_proto", "all"}:
+            raise ValueError(f"Unsupported basis_bridge_supervision: {basis_bridge_supervision}")
         self.lambda_xyz = lambda_xyz
         self.lambda_fde = lambda_fde
         self.lambda_proto = lambda_proto
@@ -263,6 +327,9 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_projection_coeff = lambda_projection_coeff
         self.lambda_projection_path = lambda_projection_path
         self.projection_supervision = projection_supervision
+        self.lambda_bridge_coeff = lambda_bridge_coeff
+        self.lambda_bridge_path = lambda_bridge_path
+        self.basis_bridge_supervision = basis_bridge_supervision
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -356,6 +423,18 @@ class ProtoBasisLoss(nn.Module):
             best_idx,
             self.projection_supervision,
         )
+        bridge_coeff_loss, bridge_path_loss, bridge_rate = _basis_bridge_guided_losses(
+            aux.get("bridge_coeff"),
+            aux.get("bridge_local"),
+            aux.get("endpoint_mode_local"),
+            batch["fut_local"],
+            aux.get("basis_pinv"),
+            aux.get("basis_matrix"),
+            candidate_proto_idx,
+            gt_proto_id,
+            best_idx,
+            self.basis_bridge_supervision,
+        )
 
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
@@ -371,6 +450,8 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_anchor_recon * anchor_recon_loss
         total = total + self.lambda_projection_coeff * projection_coeff_loss
         total = total + self.lambda_projection_path * projection_path_loss
+        total = total + self.lambda_bridge_coeff * bridge_coeff_loss
+        total = total + self.lambda_bridge_path * bridge_path_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -388,6 +469,9 @@ class ProtoBasisLoss(nn.Module):
             "projection_coeff": float(projection_coeff_loss.detach().item()),
             "projection_path": float(projection_path_loss.detach().item()),
             "projection_rate": float(projection_rate.detach().item()),
+            "bridge_coeff": float(bridge_coeff_loss.detach().item()),
+            "bridge_path": float(bridge_path_loss.detach().item()),
+            "bridge_rate": float(bridge_rate.detach().item()),
             "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),

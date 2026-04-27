@@ -53,6 +53,9 @@ LOSS_STAT_KEYS = (
     "projection_coeff",
     "projection_path",
     "projection_rate",
+    "bridge_coeff",
+    "bridge_path",
+    "bridge_rate",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -94,6 +97,10 @@ def build_parser():
     parser.add_argument("--no_coupled_decoder", dest="coupled_decoder", action="store_false")
     parser.set_defaults(coupled_decoder=None)
     parser.add_argument("--coupled_decoder_iters", type=int, default=None)
+    parser.add_argument("--basis_bridge_decoder", dest="basis_bridge_decoder", action="store_true")
+    parser.add_argument("--no_basis_bridge_decoder", dest="basis_bridge_decoder", action="store_false")
+    parser.set_defaults(basis_bridge_decoder=None)
+    parser.add_argument("--bridge_control_points", type=int, default=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -178,6 +185,15 @@ def build_parser():
         choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
         help="Supervise selected candidates toward the LS coeff/path under each predicted endpoint anchor.",
     )
+    parser.add_argument("--lambda_bridge_coeff", type=float, default=None)
+    parser.add_argument("--lambda_bridge_path", type=float, default=None)
+    parser.add_argument(
+        "--basis_bridge_supervision",
+        type=str,
+        default=None,
+        choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
+        help="Supervise basis-bridge candidates toward the predicted-anchor LS coeff/path.",
+    )
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
@@ -203,6 +219,16 @@ def build_parser():
         "--freeze_backbone_except_new_heads",
         action="store_true",
         help="Train only newly added heads after init_checkpoint.",
+    )
+    parser.add_argument(
+        "--freeze_backbone_except_basis_bridge",
+        action="store_true",
+        help="Train only the endpoint-conditioned basis bridge after init_checkpoint.",
+    )
+    parser.add_argument(
+        "--freeze_backbone_except_basis_bridge_coupled",
+        action="store_true",
+        help="Train only the basis bridge and coupled endpoint-coeff decoder after init_checkpoint.",
     )
     parser.add_argument(
         "--freeze_backbone_except_coeff_correction",
@@ -293,6 +319,10 @@ def apply_training_defaults(args):
         args.coupled_decoder = bool(uses_validated_basis_profile)
     if args.coupled_decoder_iters is None:
         args.coupled_decoder_iters = 2 if args.coupled_decoder else 0
+    if args.basis_bridge_decoder is None:
+        args.basis_bridge_decoder = False
+    if args.bridge_control_points is None:
+        args.bridge_control_points = 16
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
@@ -358,6 +388,13 @@ def apply_training_defaults(args):
         args.lambda_projection_path = 0.05 if use_projection_guidance else 0.0
     if args.projection_supervision is None:
         args.projection_supervision = "winner_gt_proto" if use_projection_guidance else "none"
+    use_bridge_guidance = bool(is_unified and is_main_dataset and args.basis_bridge_decoder)
+    if args.lambda_bridge_coeff is None:
+        args.lambda_bridge_coeff = 0.02 if use_bridge_guidance else 0.0
+    if args.lambda_bridge_path is None:
+        args.lambda_bridge_path = 0.05 if use_bridge_guidance else 0.0
+    if args.basis_bridge_supervision is None:
+        args.basis_bridge_supervision = "winner_gt_proto" if use_bridge_guidance else "none"
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -498,6 +535,8 @@ def build_model(args, model_artifact):
         candidate_dense_topk=args.candidate_dense_topk,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
+        basis_bridge_decoder=bool(args.basis_bridge_decoder),
+        bridge_control_points=args.bridge_control_points,
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
@@ -529,11 +568,29 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
 
 
 def apply_freeze_policy(model, args):
+    if args.freeze_backbone_except_basis_bridge or args.freeze_backbone_except_basis_bridge_coupled:
+        trainable_modules = [getattr(model, "basis_bridge_decoder", None)]
+        if args.freeze_backbone_except_basis_bridge_coupled:
+            trainable_modules.append(getattr(model, "coupled_decoder", None))
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_basis_bridge requires --basis_bridge_decoder.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
     if not args.freeze_backbone_except_new_heads:
         return
     trainable_modules = [
         module
         for module in (
+            getattr(model, "basis_bridge_decoder", None),
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
         )
@@ -541,7 +598,7 @@ def apply_freeze_policy(model, args):
     ]
     if not trainable_modules:
         raise RuntimeError(
-            "--freeze_backbone_except_new_heads requires at least one shape/control refiner head."
+            "--freeze_backbone_except_new_heads requires at least one bridge/shape/control head."
         )
     for parameter in model.parameters():
         parameter.requires_grad = False
@@ -868,6 +925,8 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"anchor_recon={format_scalar(loss_stats['anchor_recon'])}",
         f"proj_coeff={format_scalar(loss_stats['projection_coeff'])}",
         f"proj_path={format_scalar(loss_stats['projection_path'])}",
+        f"bridge_coeff={format_scalar(loss_stats['bridge_coeff'])}",
+        f"bridge_path={format_scalar(loss_stats['bridge_path'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -975,6 +1034,9 @@ def main():
         lambda_projection_coeff=args.lambda_projection_coeff,
         lambda_projection_path=args.lambda_projection_path,
         projection_supervision=args.projection_supervision,
+        lambda_bridge_coeff=args.lambda_bridge_coeff,
+        lambda_bridge_path=args.lambda_bridge_path,
+        basis_bridge_supervision=args.basis_bridge_supervision,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1000,12 +1062,15 @@ def main():
         "candidate_dense_topk": args.candidate_dense_topk,
         "coupled_decoder": bool(args.coupled_decoder),
         "coupled_decoder_iters": args.coupled_decoder_iters,
+        "basis_bridge_decoder": bool(args.basis_bridge_decoder),
+        "bridge_control_points": args.bridge_control_points,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "anchor_recon_supervision": args.anchor_recon_supervision,
         "projection_supervision": args.projection_supervision,
+        "basis_bridge_supervision": args.basis_bridge_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
@@ -1013,10 +1078,14 @@ def main():
         "lambda_anchor_recon": args.lambda_anchor_recon,
         "lambda_projection_coeff": args.lambda_projection_coeff,
         "lambda_projection_path": args.lambda_projection_path,
+        "lambda_bridge_coeff": args.lambda_bridge_coeff,
+        "lambda_bridge_path": args.lambda_bridge_path,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
         "freeze_backbone_except_new_heads": bool(args.freeze_backbone_except_new_heads),
+        "freeze_backbone_except_basis_bridge": bool(args.freeze_backbone_except_basis_bridge),
+        "freeze_backbone_except_basis_bridge_coupled": bool(args.freeze_backbone_except_basis_bridge_coupled),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(
