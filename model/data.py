@@ -130,6 +130,65 @@ def _artifact_path(
     )
 
 
+def _update_digest_with_array(hasher, name, value):
+    array = np.ascontiguousarray(np.asarray(value))
+    hasher.update(name.encode("utf-8"))
+    hasher.update(str(array.dtype).encode("utf-8"))
+    hasher.update(str(array.shape).encode("utf-8"))
+    hasher.update(array.view(np.uint8))
+
+
+def _artifact_digest(model_artifact):
+    hasher = hashlib.md5()
+    array_keys = (
+        "summary_5d",
+        "frequency",
+        "rare_ids",
+        "basis_bank",
+        "prototype_mean_path",
+        "local_basis_bank",
+        "micro_coeff_anchors",
+    )
+    scalar_keys = (
+        "n_proto",
+        "basis_dim",
+        "local_basis_dim",
+        "micro_per_proto",
+        "rare_threshold",
+        "obs_len",
+        "pred_len",
+        "obs_stride",
+        "pred_stride",
+    )
+    for key in array_keys:
+        if key in model_artifact:
+            _update_digest_with_array(hasher, key, model_artifact[key])
+    for key in scalar_keys:
+        hasher.update(f"{key}={model_artifact.get(key, None)!r};".encode("utf-8"))
+    return hasher.hexdigest()[:16]
+
+
+def _derived_label_path(
+    data_dir,
+    split_name,
+    artifact_digest,
+    obs_len,
+    pred_len,
+    max_agents,
+    obs_stride=1,
+    pred_stride=1,
+):
+    safe_split = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(split_name))
+    cache_dir = os.path.join(data_dir, ".cache")
+    return os.path.join(
+        cache_dir,
+        (
+            f"protobasis_labels_v1_{safe_split}_o{obs_len}_p{pred_len}_"
+            f"os{obs_stride}_ps{pred_stride}_m{max_agents}_{artifact_digest}.pt"
+        ),
+    )
+
+
 def _run_progress_step(description, fn):
     start = time.perf_counter()
     progress = tqdm(
@@ -387,6 +446,7 @@ class ProtoBasisArtifact:
 
 class ProtoBasisSceneDataset(Dataset):
     CACHE_VERSION = 5
+    DERIVED_LABEL_CACHE_VERSION = 1
 
     def __init__(
         self,
@@ -506,12 +566,8 @@ class ProtoBasisSceneDataset(Dataset):
             model_artifact.get("micro_coeff_anchors", default_micro_coeff),
             dtype=np.float32,
         )
-        self.gt_basis_coeff = _solve_basis_coefficients(
-            self.samples["future_local"].astype(np.float32, copy=False),
-            self.basis_bank,
-            self.pred_len,
-        )
-        self._assign_prototypes()
+        self.artifact_digest = _artifact_digest(model_artifact)
+        self._load_or_build_derived_labels()
 
     def _build_and_cache(self, cache_path):
         file_names = sorted(
@@ -737,6 +793,77 @@ class ProtoBasisSceneDataset(Dataset):
         self.samples["gt_proto_id"] = gt_proto_id
         self.samples["gt_proto_residual"] = gt_proto_residual
         self.samples["is_rare"] = np.isin(gt_proto_id, self.rare_proto_ids)
+
+    def _build_derived_labels(self):
+        self.gt_basis_coeff = _solve_basis_coefficients(
+            self.samples["future_local"].astype(np.float32, copy=False),
+            self.basis_bank,
+            self.pred_len,
+        )
+        self._assign_prototypes()
+        return {
+            "cache_version": self.DERIVED_LABEL_CACHE_VERSION,
+            "sample_count": len(self),
+            "artifact_digest": self.artifact_digest,
+            "gt_basis_coeff": self.gt_basis_coeff,
+            "gt_proto_id": self.samples["gt_proto_id"],
+            "gt_proto_residual": self.samples["gt_proto_residual"],
+            "is_rare": self.samples["is_rare"],
+        }
+
+    def _load_or_build_derived_labels(self):
+        label_path = _derived_label_path(
+            self.data_dir,
+            self.split_name,
+            self.artifact_digest,
+            obs_len=self.obs_len,
+            pred_len=self.pred_len,
+            max_agents=self.max_agents,
+            obs_stride=self.obs_stride,
+            pred_stride=self.pred_stride,
+        )
+        if os.path.isfile(label_path):
+            print(f"[Cache] loading {self.split_name} derived labels: {label_path}", flush=True)
+            try:
+                cached = _run_progress_step(
+                    f"load:{self.split_name}:derived_labels",
+                    lambda: torch.load(label_path, weights_only=False),
+                )
+            except Exception:
+                cached = None
+            if (
+                isinstance(cached, dict)
+                and cached.get("cache_version") == self.DERIVED_LABEL_CACHE_VERSION
+                and cached.get("sample_count") == len(self)
+                and cached.get("artifact_digest") == self.artifact_digest
+            ):
+                self.gt_basis_coeff = np.asarray(cached["gt_basis_coeff"], dtype=np.float32)
+                self.samples["gt_proto_id"] = np.asarray(cached["gt_proto_id"], dtype=np.int64)
+                self.samples["gt_proto_residual"] = np.asarray(cached["gt_proto_residual"], dtype=np.float32)
+                self.samples["is_rare"] = np.asarray(cached["is_rare"], dtype=np.bool_)
+                return
+            print(f"[Cache] ignoring stale {self.split_name} derived labels", flush=True)
+
+        print(f"[Cache] building {self.split_name} derived labels...", flush=True)
+        payload = _run_progress_step(
+            f"build:{self.split_name}:derived_labels",
+            self._build_derived_labels,
+        )
+        os.makedirs(os.path.dirname(label_path), exist_ok=True)
+        tmp_path = label_path + ".tmp"
+        try:
+            _run_progress_step(
+                f"save:{self.split_name}:derived_labels",
+                lambda: torch.save(payload, tmp_path),
+            )
+            os.replace(tmp_path, label_path)
+            print(f"[Cache] saved {self.split_name} derived labels: {label_path}", flush=True)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def export_model_artifact(self):
         return {
