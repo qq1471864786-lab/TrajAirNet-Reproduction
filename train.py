@@ -214,7 +214,7 @@ def build_parser():
     )
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
-    parser.add_argument("--limit_eval_batches", type=int, default=0)
+    parser.add_argument("--limit_eval_batches", type=int, default=None)
     parser.add_argument(
         "--artifact_max_samples",
         type=int,
@@ -320,6 +320,9 @@ def apply_training_defaults(args):
         else:
             args.eval_batch_size = max(args.batch_size * 2, args.batch_size)
 
+    if args.limit_eval_batches is None:
+        args.limit_eval_batches = 200 if is_unified and is_main_dataset else 0
+
     if args.grad_accum <= 0:
         args.grad_accum = 1
 
@@ -330,6 +333,8 @@ def apply_training_defaults(args):
     if args.phase_c_epochs is None:
         if is_unified and is_small_dataset:
             args.phase_c_epochs = 20
+        elif is_unified and is_main_dataset:
+            args.phase_c_epochs = 8
         else:
             args.phase_c_epochs = 51
     if args.extra_epochs is None:
@@ -341,9 +346,9 @@ def apply_training_defaults(args):
             args.extra_epochs = 35
 
     if args.early_stop_patience is None:
-        args.early_stop_patience = 24 if is_unified and is_main_dataset else 0
+        args.early_stop_patience = 5 if is_unified and is_main_dataset else 0
     if args.early_stop_min_epoch is None:
-        args.early_stop_min_epoch = 35 if is_unified and is_main_dataset else 0
+        args.early_stop_min_epoch = 15 if is_unified and is_main_dataset else 0
     if args.stage_c_div_weight is None:
         args.stage_c_div_weight = 1.0 if is_unified and is_main_dataset else 2.0
 

@@ -605,3 +605,20 @@ Decision:
 
 - Do not immediately make the 96/3-layer compact profile default, because the best available 111_days result (`ADE@20=0.1830` on the current full run) comes from the 128/4-layer profile.
 - If training speed becomes the priority, the next fair short test should compare the current default against a compact command using `--d_model 96 --ff_dim 192 --encoder_layers 3 --topk_proto 10 --micro_per_proto 2 --candidate_dense_topk 0` under the same `limit_train_batches` and `limit_eval_batches`.
+
+## 2026-04-28 Training Hyperparameter Refit
+
+Purpose: update the defaults for the cleaned current architecture instead of carrying the old long-training schedule.
+
+Evidence from the ongoing 111_days full run:
+
+- Best validation point is `epoch 15`, the first `joint_refiner` epoch: `ADE@20=0.1830`, `FDE@20=0.2746`.
+- Later `joint_refiner` epochs keep reducing training loss but validation ADE/FDE drift worse (`epoch 24`: `ADE@20=0.1868`, `FDE@20=0.2840`).
+- Therefore the refiner stage is useful as a short polish stage, not as a 50+ epoch long-training stage.
+
+Default update:
+
+- 111_days schedule becomes `phase_a_epochs=10`, `phase_b_epochs=4`, `phase_c_epochs=8` (`22` epochs total).
+- 111_days early stopping becomes `early_stop_min_epoch=15`, `early_stop_patience=5`.
+- 111_days training-time validation defaults to `limit_eval_batches=200`; pass `--limit_eval_batches 0` explicitly when a full validation sweep is needed.
+- 7days defaults are unchanged for now because the evidence above is from 111_days.
