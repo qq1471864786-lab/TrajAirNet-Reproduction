@@ -58,6 +58,10 @@ LOSS_STAT_KEYS = (
     "bridge_rate",
     "direct_path",
     "direct_rate",
+    "endpoint_coverage",
+    "endpoint_anchor_coverage",
+    "endpoint_min_fde",
+    "endpoint_anchor_min_fde",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -127,6 +131,9 @@ def build_parser():
     parser.add_argument("--micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_true")
     parser.add_argument("--no_micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_false")
     parser.set_defaults(micro_endpoint_offsets=None)
+    parser.add_argument("--endpoint_set_refiner", dest="endpoint_set_refiner", action="store_true")
+    parser.add_argument("--no_endpoint_set_refiner", dest="endpoint_set_refiner", action="store_false")
+    parser.set_defaults(endpoint_set_refiner=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -225,6 +232,8 @@ def build_parser():
         help="Supervise basis-bridge candidates toward the predicted-anchor LS coeff/path.",
     )
     parser.add_argument("--lambda_direct_path", type=float, default=None)
+    parser.add_argument("--lambda_endpoint_coverage", type=float, default=None)
+    parser.add_argument("--lambda_endpoint_anchor", type=float, default=None)
     parser.add_argument(
         "--direct_dynamics_supervision",
         type=str,
@@ -307,6 +316,11 @@ def build_parser():
         "--freeze_backbone_except_micro_endpoint_offsets",
         action="store_true",
         help="Train only the per-micro endpoint offset head.",
+    )
+    parser.add_argument(
+        "--freeze_backbone_except_endpoint_set_refiner",
+        action="store_true",
+        help="Train only the endpoint set refiner after init_checkpoint.",
     )
     parser.add_argument(
         "--freeze_backbone_except_coeff_correction",
@@ -427,6 +441,8 @@ def apply_training_defaults(args):
         args.intention_decoder_layers = 3
     if args.micro_endpoint_offsets is None:
         args.micro_endpoint_offsets = bool(uses_validated_basis_profile)
+    if args.endpoint_set_refiner is None:
+        args.endpoint_set_refiner = False
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
@@ -506,6 +522,11 @@ def apply_training_defaults(args):
         args.lambda_direct_path = 0.10 if use_direct_guidance else 0.0
     if args.direct_dynamics_supervision is None:
         args.direct_dynamics_supervision = "winner_gt_proto" if use_direct_guidance else "none"
+    use_endpoint_guidance = bool(is_unified and is_main_dataset and args.endpoint_set_refiner)
+    if args.lambda_endpoint_coverage is None:
+        args.lambda_endpoint_coverage = 0.35 if use_endpoint_guidance else 0.0
+    if args.lambda_endpoint_anchor is None:
+        args.lambda_endpoint_anchor = 0.10 if use_endpoint_guidance else 0.0
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -662,6 +683,7 @@ def build_model(args, model_artifact):
         intention_modes=args.intention_modes,
         intention_decoder_layers=args.intention_decoder_layers,
         micro_endpoint_offsets=bool(args.micro_endpoint_offsets),
+        endpoint_set_refiner=bool(args.endpoint_set_refiner),
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
@@ -700,6 +722,7 @@ def apply_freeze_policy(model, args):
                 [
                     getattr(model, "query_decoder", None),
                     getattr(model, "micro_endpoint_head", None),
+                    getattr(model, "endpoint_set_refiner", None),
                     getattr(model, "stage2_proj", None),
                     getattr(model, "stage2_endpoint_head", None),
                     getattr(model, "stage2_coeff_head", None),
@@ -841,6 +864,21 @@ def apply_freeze_policy(model, args):
         print(f"[Freeze] trainable_params={trainable} total_params={total}")
         return
 
+    if args.freeze_backbone_except_endpoint_set_refiner:
+        trainable_modules = [getattr(model, "endpoint_set_refiner", None)]
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_endpoint_set_refiner requires --endpoint_set_refiner.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
     if args.freeze_backbone_except_basis_bridge or args.freeze_backbone_except_basis_bridge_coupled:
         trainable_modules = [getattr(model, "basis_bridge_decoder", None)]
         if args.freeze_backbone_except_basis_bridge_coupled:
@@ -864,6 +902,7 @@ def apply_freeze_policy(model, args):
         module
         for module in (
             getattr(model, "basis_bridge_decoder", None),
+            getattr(model, "endpoint_set_refiner", None),
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
         )
@@ -1201,6 +1240,8 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"bridge_coeff={format_scalar(loss_stats['bridge_coeff'])}",
         f"bridge_path={format_scalar(loss_stats['bridge_path'])}",
         f"direct_path={format_scalar(loss_stats['direct_path'])}",
+        f"end_cov={format_scalar(loss_stats['endpoint_coverage'])}",
+        f"end_min={format_scalar(loss_stats['endpoint_min_fde'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -1313,6 +1354,8 @@ def main():
         basis_bridge_supervision=args.basis_bridge_supervision,
         lambda_direct_path=args.lambda_direct_path,
         direct_dynamics_supervision=args.direct_dynamics_supervision,
+        lambda_endpoint_coverage=args.lambda_endpoint_coverage,
+        lambda_endpoint_anchor=args.lambda_endpoint_anchor,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1350,6 +1393,8 @@ def main():
         "soft_proto_modes": args.soft_proto_modes,
         "anchor_set_decoder": bool(args.anchor_set_decoder),
         "anchor_set_modes": args.anchor_set_modes,
+        "micro_endpoint_offsets": bool(args.micro_endpoint_offsets),
+        "endpoint_set_refiner": bool(args.endpoint_set_refiner),
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
@@ -1368,6 +1413,8 @@ def main():
         "lambda_bridge_coeff": args.lambda_bridge_coeff,
         "lambda_bridge_path": args.lambda_bridge_path,
         "lambda_direct_path": args.lambda_direct_path,
+        "lambda_endpoint_coverage": args.lambda_endpoint_coverage,
+        "lambda_endpoint_anchor": args.lambda_endpoint_anchor,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
@@ -1380,6 +1427,7 @@ def main():
         "freeze_backbone_except_direct_dynamics_stack": bool(args.freeze_backbone_except_direct_dynamics_stack),
         "freeze_backbone_except_soft_proto_stack": bool(args.freeze_backbone_except_soft_proto_stack),
         "freeze_backbone_except_anchor_set_stack": bool(args.freeze_backbone_except_anchor_set_stack),
+        "freeze_backbone_except_endpoint_set_refiner": bool(args.freeze_backbone_except_endpoint_set_refiner),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

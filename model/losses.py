@@ -303,6 +303,26 @@ def _direct_dynamics_guided_loss(
     return F.smooth_l1_loss(direct_local[select_mask], target.detach()[select_mask]), select_mask.float().mean()
 
 
+def _endpoint_coverage_losses(pred_xyz, gt_xyz, endpoint_mode_local, gt_local):
+    pred_endpoint = pred_xyz[:, :, -1]
+    endpoint_l2 = torch.linalg.norm(pred_endpoint - gt_xyz[:, None, -1], dim=-1)
+    endpoint_idx = endpoint_l2.argmin(dim=1)
+    winner_endpoint = _gather_candidates(pred_endpoint, endpoint_idx)
+    coverage_loss = F.smooth_l1_loss(winner_endpoint, gt_xyz[:, -1])
+    endpoint_min_fde = endpoint_l2.min(dim=1).values.mean()
+
+    if endpoint_mode_local is None or gt_local is None or endpoint_mode_local.shape[:2] != pred_xyz.shape[:2]:
+        zero = pred_xyz.sum() * 0.0
+        return coverage_loss, zero, endpoint_min_fde, endpoint_min_fde.detach() * 0.0
+
+    anchor_l2 = torch.linalg.norm(endpoint_mode_local - gt_local[:, None, -1], dim=-1)
+    anchor_idx = anchor_l2.argmin(dim=1)
+    anchor_endpoint = _gather_candidates(endpoint_mode_local, anchor_idx)
+    anchor_loss = F.smooth_l1_loss(anchor_endpoint, gt_local[:, -1])
+    anchor_min_fde = anchor_l2.min(dim=1).values.mean()
+    return coverage_loss, anchor_loss, endpoint_min_fde, anchor_min_fde
+
+
 class ProtoBasisLoss(nn.Module):
     def __init__(
         self,
@@ -334,6 +354,8 @@ class ProtoBasisLoss(nn.Module):
         basis_bridge_supervision="none",
         lambda_direct_path=0.0,
         direct_dynamics_supervision="none",
+        lambda_endpoint_coverage=0.0,
+        lambda_endpoint_anchor=0.0,
     ):
         super().__init__()
         if endpoint_residual_supervision not in {"all", "hit_only"}:
@@ -374,6 +396,8 @@ class ProtoBasisLoss(nn.Module):
         self.basis_bridge_supervision = basis_bridge_supervision
         self.lambda_direct_path = lambda_direct_path
         self.direct_dynamics_supervision = direct_dynamics_supervision
+        self.lambda_endpoint_coverage = lambda_endpoint_coverage
+        self.lambda_endpoint_anchor = lambda_endpoint_anchor
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -487,6 +511,12 @@ class ProtoBasisLoss(nn.Module):
             best_idx,
             self.direct_dynamics_supervision,
         )
+        endpoint_coverage_loss, endpoint_anchor_loss, endpoint_min_fde, endpoint_anchor_min_fde = _endpoint_coverage_losses(
+            pred_xyz,
+            gt_xyz,
+            aux.get("endpoint_mode_local"),
+            batch.get("fut_local"),
+        )
 
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
@@ -505,6 +535,8 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_bridge_coeff * bridge_coeff_loss
         total = total + self.lambda_bridge_path * bridge_path_loss
         total = total + self.lambda_direct_path * direct_path_loss
+        total = total + self.lambda_endpoint_coverage * endpoint_coverage_loss
+        total = total + self.lambda_endpoint_anchor * endpoint_anchor_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -527,6 +559,10 @@ class ProtoBasisLoss(nn.Module):
             "bridge_rate": float(bridge_rate.detach().item()),
             "direct_path": float(direct_path_loss.detach().item()),
             "direct_rate": float(direct_rate.detach().item()),
+            "endpoint_coverage": float(endpoint_coverage_loss.detach().item()),
+            "endpoint_anchor_coverage": float(endpoint_anchor_loss.detach().item()),
+            "endpoint_min_fde": float(endpoint_min_fde.detach().item()),
+            "endpoint_anchor_min_fde": float(endpoint_anchor_min_fde.detach().item()),
             "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),
