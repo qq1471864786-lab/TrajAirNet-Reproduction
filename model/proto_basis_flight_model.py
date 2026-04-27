@@ -776,7 +776,7 @@ class PrototypeDynamicsRolloutDecoder(nn.Module):
         velocity_control = self.velocity_head(hidden).transpose(1, 2)
         velocity_delta = F.interpolate(velocity_control, size=self.pred_len, mode="linear", align_corners=True)
         velocity_delta = velocity_delta.transpose(1, 2).reshape(batch_size, num_modes, self.pred_len, 3)
-        gate = 0.5 * torch.tanh(self.gate_head(base_query)).unsqueeze(-1)
+        gate = (0.25 + 0.25 * torch.tanh(self.gate_head(base_query))).unsqueeze(-1)
         velocity = coarse_velocity + gate * velocity_delta
         direct_local = velocity.cumsum(dim=2)
         alpha = self.endpoint_alpha.to(device=direct_local.device, dtype=direct_local.dtype)

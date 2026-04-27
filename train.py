@@ -56,6 +56,8 @@ LOSS_STAT_KEYS = (
     "bridge_coeff",
     "bridge_path",
     "bridge_rate",
+    "direct_path",
+    "direct_rate",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -1063,6 +1065,7 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"proj_path={format_scalar(loss_stats['projection_path'])}",
         f"bridge_coeff={format_scalar(loss_stats['bridge_coeff'])}",
         f"bridge_path={format_scalar(loss_stats['bridge_path'])}",
+        f"direct_path={format_scalar(loss_stats['direct_path'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]

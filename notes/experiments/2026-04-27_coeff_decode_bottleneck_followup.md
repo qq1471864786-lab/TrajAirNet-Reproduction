@@ -260,3 +260,10 @@ Validation rule:
 
 - Run the same 111_days 8-epoch/80-batch/50-eval-batch short test.
 - Only keep as default if ADE@20 improves materially; tiny changes like `0.2137 -> 0.2128` are failures.
+
+Implementation correction:
+
+- First direct-dynamics run used zero-initialized velocity head and zero-initialized gate head with `gate * velocity_delta`.
+- That made the direct rollout initially equivalent to the old path, but also blocked gradients to both new branches because both multiplicative terms were zero.
+- Treat `/3250604003/ProtoBasis-Net/save_model_direct_dynamics_stack_e8_b256_111_short/111_days/seed3407` as an invalid implementation check, not a method result (`ADE@20=0.2129`, tiny change).
+- Fix: initialize the effective gate to `0.25` while keeping velocity residual output zero, so the checkpoint still starts from the old path but gradients reach the velocity rollout head.
