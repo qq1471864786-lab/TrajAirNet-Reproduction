@@ -87,6 +87,8 @@ def build_model(config, checkpoint):
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),
+        trajectory_control_refiner=bool(config.get("trajectory_control_refiner", False)),
+        trajectory_control_points=int(config.get("trajectory_control_points", 32)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),

@@ -99,6 +99,8 @@ def _build_model(config, checkpoint):
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),
+        trajectory_control_refiner=bool(config.get("trajectory_control_refiner", False)),
+        trajectory_control_points=int(config.get("trajectory_control_points", 32)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
         disable_refiner=config.get("disable_refiner", False),
@@ -417,6 +419,8 @@ def _forward_with_local_state(
         refined_local = model.endpoint_shape_refiner(refined_local, active_query)
     if getattr(model, "control_shape_refiner", None) is not None:
         refined_local = model.control_shape_refiner(refined_local, active_query)
+    if getattr(model, "trajectory_control_refiner", None) is not None:
+        refined_local = model.trajectory_control_refiner(refined_local, active_query)
     pred_xyz = model.pose_normalizer.inverse(refined_local, origin, rotation)
     outputs = {
         "pred_xyz": pred_xyz,

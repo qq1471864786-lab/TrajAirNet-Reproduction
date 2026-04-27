@@ -101,6 +101,10 @@ def build_parser():
     parser.add_argument("--no_control_shape_refiner", dest="control_shape_refiner", action="store_false")
     parser.set_defaults(control_shape_refiner=None)
     parser.add_argument("--control_shape_points", type=int, default=None)
+    parser.add_argument("--trajectory_control_refiner", dest="trajectory_control_refiner", action="store_true")
+    parser.add_argument("--no_trajectory_control_refiner", dest="trajectory_control_refiner", action="store_false")
+    parser.set_defaults(trajectory_control_refiner=None)
+    parser.add_argument("--trajectory_control_points", type=int, default=None)
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
@@ -299,6 +303,10 @@ def apply_training_defaults(args):
         args.control_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_points is None:
         args.control_shape_points = 32 if args.control_shape_refiner else 16
+    if args.trajectory_control_refiner is None:
+        args.trajectory_control_refiner = False
+    if args.trajectory_control_points is None:
+        args.trajectory_control_points = 32
     if args.micro_coeff_anchors is None:
         args.micro_coeff_anchors = True
 
@@ -501,6 +509,8 @@ def build_model(args, model_artifact):
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
+        trajectory_control_refiner=bool(args.trajectory_control_refiner),
+        trajectory_control_points=args.trajectory_control_points,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
@@ -536,12 +546,13 @@ def apply_freeze_policy(model, args):
         for module in (
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
+            getattr(model, "trajectory_control_refiner", None),
         )
         if module is not None
     ]
     if not trainable_modules:
         raise RuntimeError(
-            "--freeze_backbone_except_new_heads requires --endpoint_shape_refiner or --control_shape_refiner."
+            "--freeze_backbone_except_new_heads requires at least one shape/control refiner head."
         )
     for parameter in model.parameters():
         parameter.requires_grad = False
@@ -1003,6 +1014,8 @@ def main():
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
+        "trajectory_control_refiner": bool(args.trajectory_control_refiner),
+        "trajectory_control_points": args.trajectory_control_points,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "anchor_recon_supervision": args.anchor_recon_supervision,
         "projection_supervision": args.projection_supervision,
