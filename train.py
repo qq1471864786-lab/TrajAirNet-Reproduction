@@ -59,6 +59,8 @@ LOSS_STAT_KEYS = (
     "direct_path",
     "direct_rate",
     "tail_rescue_gate",
+    "tail_endpoint_router",
+    "tail_endpoint_router_acc",
     "tail_rescue_target_rate",
     "tail_rescue_active_rate",
     "gt_proto_hit_rate",
@@ -131,6 +133,13 @@ def build_parser():
     parser.add_argument("--no_tail_rescue_candidates", dest="tail_rescue_candidates", action="store_false")
     parser.set_defaults(tail_rescue_candidates=None)
     parser.add_argument("--tail_rescue_extra_proto", type=int, default=None)
+    parser.add_argument(
+        "--tail_rescue_source",
+        type=str,
+        default=None,
+        choices=["router_rank", "endpoint_router"],
+        help="Choose rescue prototypes from the main router tail or a dedicated endpoint router.",
+    )
     parser.add_argument(
         "--tail_rescue_selection",
         type=str,
@@ -252,6 +261,7 @@ def build_parser():
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
     parser.add_argument("--lambda_tail_rescue_gate", type=float, default=None)
     parser.add_argument("--tail_rescue_gate_pos_weight", type=float, default=8.0)
+    parser.add_argument("--lambda_tail_endpoint_router", type=float, default=None)
     parser.add_argument("--proto_focal_gamma", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_power", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_max", type=float, default=5.0)
@@ -446,6 +456,8 @@ def apply_training_defaults(args):
         args.tail_rescue_candidates = False
     if args.tail_rescue_extra_proto is None:
         args.tail_rescue_extra_proto = 5
+    if args.tail_rescue_source is None:
+        args.tail_rescue_source = "router_rank"
     if args.tail_rescue_selection is None:
         args.tail_rescue_selection = "oracle_train"
     if args.tail_rescue_threshold is None:
@@ -533,6 +545,8 @@ def apply_training_defaults(args):
         args.direct_dynamics_supervision = "winner_gt_proto" if use_direct_guidance else "none"
     if args.lambda_tail_rescue_gate is None:
         args.lambda_tail_rescue_gate = 0.05 if args.tail_rescue_candidates else 0.0
+    if args.lambda_tail_endpoint_router is None:
+        args.lambda_tail_endpoint_router = 0.20 if args.tail_rescue_candidates and args.tail_rescue_source == "endpoint_router" else 0.0
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -690,6 +704,7 @@ def build_model(args, model_artifact):
         intention_decoder_layers=args.intention_decoder_layers,
         tail_rescue_candidates=bool(args.tail_rescue_candidates),
         tail_rescue_extra_proto=args.tail_rescue_extra_proto,
+        tail_rescue_source=args.tail_rescue_source,
         tail_rescue_selection=args.tail_rescue_selection,
         tail_rescue_threshold=args.tail_rescue_threshold,
         micro_endpoint_offsets=bool(args.micro_endpoint_offsets),
@@ -739,6 +754,7 @@ def apply_freeze_policy(model, args):
                     getattr(model, "control_shape_refiner", None),
                     getattr(model, "tail_rescue_endpoint_head", None),
                     getattr(model, "tail_rescue_gate_head", None),
+                    getattr(model, "tail_endpoint_router_head", None),
                 ]
             )
         trainable_modules = [module for module in trainable_modules if module is not None]
@@ -901,6 +917,7 @@ def apply_freeze_policy(model, args):
             getattr(model, "control_shape_refiner", None),
             getattr(model, "tail_rescue_endpoint_head", None),
             getattr(model, "tail_rescue_gate_head", None),
+            getattr(model, "tail_endpoint_router_head", None),
         )
         if module is not None
     ]
@@ -926,6 +943,12 @@ def move_batch_to_device(batch, device):
         else:
             moved[key] = value
     return moved
+
+
+def endpoint_proto_targets(model, batch):
+    proto_endpoints = model.proto_summary_5d[:, :3].detach().to(device=batch["fut_local"].device)
+    distances = torch.cdist(batch["fut_local"][:, -1].float(), proto_endpoints.float())
+    return distances.argmin(dim=1)
 
 
 def tracked_best_specs(args, run_dir):
@@ -1237,6 +1260,8 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"bridge_path={format_scalar(loss_stats['bridge_path'])}",
         f"direct_path={format_scalar(loss_stats['direct_path'])}",
         f"tail_gate={format_scalar(loss_stats['tail_rescue_gate'])}",
+        f"tail_ep_router={format_scalar(loss_stats['tail_endpoint_router'])}",
+        f"tail_ep_acc={format_scalar(loss_stats['tail_endpoint_router_acc'])}",
         f"tail_target={format_scalar(loss_stats['tail_rescue_target_rate'])}",
         f"tail_active={format_scalar(loss_stats['tail_rescue_active_rate'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
@@ -1353,6 +1378,7 @@ def main():
         direct_dynamics_supervision=args.direct_dynamics_supervision,
         lambda_tail_rescue_gate=args.lambda_tail_rescue_gate,
         tail_rescue_gate_pos_weight=args.tail_rescue_gate_pos_weight,
+        lambda_tail_endpoint_router=args.lambda_tail_endpoint_router,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1392,6 +1418,7 @@ def main():
         "anchor_set_modes": args.anchor_set_modes,
         "tail_rescue_candidates": bool(args.tail_rescue_candidates),
         "tail_rescue_extra_proto": args.tail_rescue_extra_proto,
+        "tail_rescue_source": args.tail_rescue_source,
         "tail_rescue_selection": args.tail_rescue_selection,
         "tail_rescue_threshold": args.tail_rescue_threshold,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
@@ -1413,6 +1440,7 @@ def main():
         "lambda_bridge_path": args.lambda_bridge_path,
         "lambda_direct_path": args.lambda_direct_path,
         "lambda_tail_rescue_gate": args.lambda_tail_rescue_gate,
+        "lambda_tail_endpoint_router": args.lambda_tail_endpoint_router,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
@@ -1472,11 +1500,16 @@ def main():
                 if args.limit_train_batches and batch_index >= args.limit_train_batches:
                     break
                 batch = move_batch_to_device(raw_batch, device)
+                gt_endpoint_proto_id = None
+                if args.tail_rescue_candidates and args.tail_rescue_source == "endpoint_router":
+                    with torch.no_grad():
+                        gt_endpoint_proto_id = endpoint_proto_targets(model, batch)
                 with autocast_context(device, use_amp):
                     outputs = model(
                         batch["obs_xyz"],
                         batch["obs_mask"],
                         gt_proto_id=batch["gt_proto_id"],
+                        gt_endpoint_proto_id=gt_endpoint_proto_id,
                         force_gt_proto=cfg["force_gt_proto"],
                         enable_refiner=cfg["enable_refiner"],
                     )

@@ -109,6 +109,7 @@ def build_model(config, checkpoint):
         intention_decoder_layers=int(config.get("intention_decoder_layers", 3)),
         tail_rescue_candidates=bool(config.get("tail_rescue_candidates", False)),
         tail_rescue_extra_proto=int(config.get("tail_rescue_extra_proto", 5)),
+        tail_rescue_source=config.get("tail_rescue_source", "router_rank"),
         tail_rescue_selection=config.get("tail_rescue_selection", "oracle_train"),
         tail_rescue_threshold=float(config.get("tail_rescue_threshold", 0.5)),
         micro_endpoint_offsets=bool(config.get("micro_endpoint_offsets", False)),

@@ -1210,6 +1210,7 @@ class ProtoBasisNet(nn.Module):
         intention_decoder_layers=3,
         tail_rescue_candidates=False,
         tail_rescue_extra_proto=5,
+        tail_rescue_source="router_rank",
         tail_rescue_selection="oracle_train",
         tail_rescue_threshold=0.5,
         micro_endpoint_offsets=False,
@@ -1252,6 +1253,9 @@ class ProtoBasisNet(nn.Module):
         self.intention_trajectory_decoder_enabled = bool(intention_trajectory_decoder)
         self.tail_rescue_candidates_enabled = bool(tail_rescue_candidates)
         self.tail_rescue_extra_proto = max(int(tail_rescue_extra_proto or 0), 0)
+        if tail_rescue_source not in {"router_rank", "endpoint_router"}:
+            raise ValueError(f"Unsupported tail_rescue_source: {tail_rescue_source}")
+        self.tail_rescue_source = tail_rescue_source
         if tail_rescue_selection not in {"gate", "oracle_train", "always", "score", "oracle_train_score"}:
             raise ValueError(f"Unsupported tail_rescue_selection: {tail_rescue_selection}")
         self.tail_rescue_selection = tail_rescue_selection
@@ -1383,9 +1387,20 @@ class ProtoBasisNet(nn.Module):
             nn.init.zeros_(self.tail_rescue_endpoint_head[-1].bias)
             nn.init.zeros_(self.tail_rescue_gate_head[-1].weight)
             nn.init.zeros_(self.tail_rescue_gate_head[-1].bias)
+            if self.tail_rescue_source == "endpoint_router":
+                self.tail_endpoint_router_head = nn.Sequential(
+                    nn.LayerNorm(d_model * 2),
+                    nn.Linear(d_model * 2, ff_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(ff_dim, n_proto),
+                )
+            else:
+                self.tail_endpoint_router_head = None
         else:
             self.tail_rescue_endpoint_head = None
             self.tail_rescue_gate_head = None
+            self.tail_endpoint_router_head = None
         if self.micro_endpoint_offsets_enabled:
             self.micro_endpoint_head = nn.Sequential(
                 nn.LayerNorm(d_model),
@@ -1504,13 +1519,47 @@ class ProtoBasisNet(nn.Module):
             keep_tensor = torch.empty(0, dtype=torch.long)
         self.register_buffer("candidate_keep_indices", keep_tensor, persistent=False)
 
-    def _decode_tail_rescue_candidates(self, proto_logits, target_ctx, scene_ctx, agent_feat, obs_mask):
+    def _tail_endpoint_router_logits(self, target_ctx, scene_ctx):
+        if self.tail_endpoint_router_head is None:
+            return None
+        return self.tail_endpoint_router_head(torch.cat([target_ctx, scene_ctx], dim=-1))
+
+    def _decode_tail_rescue_candidates(
+        self,
+        proto_logits,
+        target_ctx,
+        scene_ctx,
+        agent_feat,
+        obs_mask,
+        top_proto_idx=None,
+        tail_endpoint_logits=None,
+        gt_endpoint_proto_id=None,
+    ):
         if self.tail_rescue_endpoint_head is None or self.tail_rescue_extra_proto <= 0:
             return None
-        lookahead = min(self.topk_proto + self.tail_rescue_extra_proto, proto_logits.size(-1))
-        if lookahead <= self.topk_proto:
-            return None
-        rescue_proto_idx = proto_logits.topk(lookahead, dim=-1).indices[:, self.topk_proto:lookahead]
+        if self.tail_rescue_source == "endpoint_router" and tail_endpoint_logits is not None:
+            rescue_scores = tail_endpoint_logits
+            if top_proto_idx is not None:
+                rescue_scores = rescue_scores.clone()
+                rescue_scores.scatter_(1, top_proto_idx, torch.finfo(rescue_scores.dtype).min)
+            rescue_count = min(self.tail_rescue_extra_proto, rescue_scores.size(-1))
+            rescue_proto_idx = rescue_scores.topk(rescue_count, dim=-1).indices
+            if self.training and gt_endpoint_proto_id is not None and rescue_proto_idx.numel() > 0:
+                default_hit = (
+                    top_proto_idx.eq(gt_endpoint_proto_id[:, None]).any(dim=1)
+                    if top_proto_idx is not None
+                    else torch.zeros_like(gt_endpoint_proto_id, dtype=torch.bool)
+                )
+                rescue_hit = rescue_proto_idx.eq(gt_endpoint_proto_id[:, None]).any(dim=1)
+                replace_mask = ~(default_hit | rescue_hit)
+                if replace_mask.any():
+                    rescue_proto_idx = rescue_proto_idx.clone()
+                    rescue_proto_idx[replace_mask, -1] = gt_endpoint_proto_id[replace_mask]
+        else:
+            lookahead = min(self.topk_proto + self.tail_rescue_extra_proto, proto_logits.size(-1))
+            if lookahead <= self.topk_proto:
+                return None
+            rescue_proto_idx = proto_logits.topk(lookahead, dim=-1).indices[:, self.topk_proto:lookahead]
         rescue_summary = self.proto_summary_5d[rescue_proto_idx]
         rescue_proto_token = self.prototype_router.proto_emb(rescue_proto_idx) + self.prototype_router.proto_proj(rescue_summary)
         target_rep = target_ctx[:, None, :].expand(-1, rescue_proto_idx.size(1), -1)
@@ -1639,7 +1688,15 @@ class ProtoBasisNet(nn.Module):
         rescue_active = keep.ge(default_count).any(dim=1).float()
         return selected, True, rescue_active
 
-    def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
+    def forward(
+        self,
+        obs_xyz,
+        obs_mask,
+        gt_proto_id=None,
+        gt_endpoint_proto_id=None,
+        force_gt_proto=False,
+        enable_refiner=True,
+    ):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
         feats_local = build_local_features(local_xyz)
         feats_global = build_global_features(obs_xyz)
@@ -1669,6 +1726,7 @@ class ProtoBasisNet(nn.Module):
         tail_rescue_active = None
         tail_rescue_logit = None
         tail_rescue_target = None
+        tail_endpoint_logits = None
 
         if self.intention_trajectory_decoder is not None:
             active_query, direct_local, pred_score, endpoint_mode_local = self.intention_trajectory_decoder(
@@ -1748,12 +1806,16 @@ class ProtoBasisNet(nn.Module):
             active_query = query_feat
             candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
             if self.tail_rescue_candidates_enabled:
+                tail_endpoint_logits = self._tail_endpoint_router_logits(target_ctx, scene_ctx)
                 rescue_tensors = self._decode_tail_rescue_candidates(
                     proto_logits,
                     target_ctx,
                     scene_ctx,
                     agent_feat,
                     obs_mask,
+                    top_proto_idx=top_proto_idx,
+                    tail_endpoint_logits=tail_endpoint_logits,
+                    gt_endpoint_proto_id=gt_endpoint_proto_id,
                 )
                 tail_rescue_active, tail_rescue_logit, tail_rescue_target = self._tail_rescue_decision(
                     proto_logits,
@@ -1970,6 +2032,8 @@ class ProtoBasisNet(nn.Module):
             aux["tail_rescue_active"] = tail_rescue_active.float()
         if tail_rescue_target is not None:
             aux["tail_rescue_target"] = tail_rescue_target
+        if tail_endpoint_logits is not None:
+            aux["tail_endpoint_logits"] = tail_endpoint_logits
         if micro_endpoint_delta is not None:
             aux["micro_endpoint_delta"] = micro_endpoint_delta
         if soft_proto_idx is not None:
