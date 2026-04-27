@@ -1252,7 +1252,7 @@ class ProtoBasisNet(nn.Module):
         self.intention_trajectory_decoder_enabled = bool(intention_trajectory_decoder)
         self.tail_rescue_candidates_enabled = bool(tail_rescue_candidates)
         self.tail_rescue_extra_proto = max(int(tail_rescue_extra_proto or 0), 0)
-        if tail_rescue_selection not in {"gate", "oracle_train", "always"}:
+        if tail_rescue_selection not in {"gate", "oracle_train", "always", "score", "oracle_train_score"}:
             raise ValueError(f"Unsupported tail_rescue_selection: {tail_rescue_selection}")
         self.tail_rescue_selection = tail_rescue_selection
         self.tail_rescue_threshold = float(tail_rescue_threshold)
@@ -1561,9 +1561,13 @@ class ProtoBasisNet(nn.Module):
         if gt_proto_id is not None:
             natural_top = natural_idx[:, : self.topk_proto]
             target = (~natural_top.eq(gt_proto_id[:, None]).any(dim=1)).float()
-        if self.tail_rescue_selection == "always":
+        if self.tail_rescue_selection in {"score"}:
+            active = None
+        elif self.tail_rescue_selection == "oracle_train_score" and not (self.training and target is not None):
+            active = None
+        elif self.tail_rescue_selection == "always":
             active = torch.ones_like(gate_active)
-        elif self.tail_rescue_selection == "oracle_train" and self.training and target is not None:
+        elif self.tail_rescue_selection in {"oracle_train", "oracle_train_score"} and self.training and target is not None:
             active = target.bool()
         else:
             active = gate_active
@@ -1606,6 +1610,34 @@ class ProtoBasisNet(nn.Module):
             else:
                 selected[key] = torch.where(mask, rescue_value, default_value)
         return selected, True
+
+    def _apply_tail_rescue_score_pool(self, base_tensors, rescue_tensors):
+        if rescue_tensors is None or self.n_micro <= 0 or self.candidate_keep_indices.numel() == 0:
+            return base_tensors, False, None
+        default_keep = self.candidate_keep_indices.to(device=base_tensors["coeff"].device)
+        rescue_proto_count = rescue_tensors["candidate_proto_idx"].size(1) // self.n_micro
+        rescue_first = torch.arange(rescue_proto_count, device=base_tensors["coeff"].device) * self.n_micro
+        default_count = int(default_keep.numel())
+        if rescue_first.numel() == 0:
+            return base_tensors, False, None
+
+        pooled = {}
+        for key, tensor in base_tensors.items():
+            default_value = tensor.index_select(1, default_keep)
+            rescue_value = rescue_tensors[key].index_select(1, rescue_first)
+            pooled[key] = torch.cat([default_value, rescue_value], dim=1)
+
+        score = pooled["pred_score"]
+        keep = score.topk(default_count, dim=1).indices
+        selected = {}
+        for key, tensor in pooled.items():
+            gather_index = keep
+            while gather_index.dim() < tensor.dim():
+                gather_index = gather_index.unsqueeze(-1)
+            gather_index = gather_index.expand(-1, -1, *tensor.shape[2:])
+            selected[key] = torch.gather(tensor, 1, gather_index)
+        rescue_active = keep.ge(default_count).any(dim=1).float()
+        return selected, True, rescue_active
 
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
@@ -1739,11 +1771,17 @@ class ProtoBasisNet(nn.Module):
                     "coarse_local": coarse_local,
                     "candidate_proto_idx": candidate_proto_idx,
                 }
-                selected_tensors, candidate_selection_applied = self._apply_tail_rescue_selection(
-                    base_tensors,
-                    rescue_tensors,
-                    tail_rescue_active,
-                )
+                if self.tail_rescue_selection in {"score", "oracle_train_score"} and tail_rescue_active is None:
+                    selected_tensors, candidate_selection_applied, tail_rescue_active = self._apply_tail_rescue_score_pool(
+                        base_tensors,
+                        rescue_tensors,
+                    )
+                else:
+                    selected_tensors, candidate_selection_applied = self._apply_tail_rescue_selection(
+                        base_tensors,
+                        rescue_tensors,
+                        tail_rescue_active,
+                    )
                 if candidate_selection_applied:
                     query_feat = selected_tensors["query_feat"]
                     coeff = selected_tensors["coeff"]

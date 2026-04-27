@@ -135,7 +135,7 @@ def build_parser():
         "--tail_rescue_selection",
         type=str,
         default=None,
-        choices=["gate", "oracle_train", "always"],
+        choices=["gate", "oracle_train", "always", "score", "oracle_train_score"],
         help="Select tail-rescue candidates by learned gate, training-time oracle then gate, or always.",
     )
     parser.add_argument("--tail_rescue_threshold", type=float, default=None)
