@@ -267,3 +267,35 @@ Implementation correction:
 - That made the direct rollout initially equivalent to the old path, but also blocked gradients to both new branches because both multiplicative terms were zero.
 - Treat `/3250604003/ProtoBasis-Net/save_model_direct_dynamics_stack_e8_b256_111_short/111_days/seed3407` as an invalid implementation check, not a method result (`ADE@20=0.2129`, tiny change).
 - Fix: initialize the effective gate to `0.25` while keeping velocity residual output zero, so the checkpoint still starts from the old path but gradients reach the velocity rollout head.
+
+Corrected result:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | GLeV@20 | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| current checkpoint baseline | 0.2137 | 0.3046 | 0.3848 | 0.0898 | reference |
+| direct dynamics rollout, best epoch 7 | 0.2139 | 0.3055 | n/a | n/a | no gain |
+| direct dynamics rollout, epoch 8 | 0.2140 | 0.3056 | 0.3862 | 0.0887 | no gain |
+
+Conclusion:
+
+- Do not make `direct_dynamics_decoder` default.
+- This is now valid negative evidence: after fixing the dead gate, `direct_path` was active (`~0.0467`) but did not improve ADE.
+- The repeated failure of bridge, basis-aware coeff, temporal-basis dynamics, and direct rollout suggests the next intervention should move upstream from path generation to candidate generation/routing. A strong next test is a soft prototype-memory decoder that generates K candidates by attending over all prototypes instead of pruning to hard top-k first, so router-miss samples are not irrevocably discarded.
+
+## 2026-04-27 Soft Prototype-Memory Decoder Plan
+
+Purpose: test a larger upstream change against the router-miss bottleneck. Instead of selecting hard top-k prototypes and discarding the rest before decoding, generate the evaluated K candidates with learned candidate queries that cross-attend to all prototype memories.
+
+Design:
+
+- Keep the temporal/social encoder and router logits for auxiliary prototype learning and reporting.
+- Replace hard top-k candidate generation with `soft_proto_decoder`: 20 candidate queries attend over all 64 prototype tokens plus prototype summary features.
+- Generate endpoint, basis coeff, score, and refiner gate directly for the 20 candidates.
+- Continue through existing basis reconstruction, coupled decoder, local-basis/refiner stack.
+- Use prototype attention argmax only as a diagnostic/alignment id; do not rely on GT-prototype-aligned losses for the first short run.
+
+Validation:
+
+- Init from current best checkpoint with partial load.
+- Train soft proto stack only, 8 epochs, short 111_days validation.
+- Disable GT-prototype coeff/shape/FDE losses for this run; use winner-based projection guidance so the soft candidates are not forced into hard-router labels.
