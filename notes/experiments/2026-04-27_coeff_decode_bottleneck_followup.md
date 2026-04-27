@@ -83,6 +83,75 @@ Interpretation: local observed-history similarity does not recover a good future
 
 ## Updated Conclusion
 
+## 2026-04-27 Default Module Re-Audit
+
+Purpose: re-check the cleaned current default module-by-module before making any new architecture changes, so later experiments do not drift into directionless add-ons.
+
+Setup:
+
+- Checkpoint: `save_model_probe_control_continue_e8_111_short/111_days/seed3407/best_best20.pt`
+- Dataset: `111_days`, test split
+- Eval: 50 batches, batch size 128, 6400 samples
+- Current default: `topk_proto=15`, `micro_per_proto=2`, `candidate_dense_topk=5`, `local_basis_dim=2`, two-stage decoder, coupled decoder, endpoint/control shape refiners
+
+Module ablation results:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | Top1_ADE | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| full default | 0.25884 | 0.37556 | 0.51484 | 0.75726 | baseline for this audit |
+| force GT prototype | 0.23873 | 0.33108 | 0.51014 | 0.75512 | router helps, but is not enough |
+| no social | 0.28310 | 0.40923 | 0.54680 | 0.78675 | social is useful |
+| no router / generic modes | 0.57723 | 1.02784 | 0.71594 | 1.01530 | prototype router is essential |
+| no temporal refiner | 0.26398 | 0.38281 | 0.52072 | 0.76154 | small positive module |
+| no endpoint shape refiner | 0.28168 | 0.37556 | 0.52893 | 0.77579 | endpoint-preserving shape refiner helps ADE |
+| no control shape refiner | 0.26794 | 0.37556 | 0.52103 | 0.75882 | control refiner helps modestly |
+| no shape refiners | 0.28257 | 0.37556 | 0.52831 | 0.77159 | keep refiners, but they are not the main fix |
+| no local basis | 0.26215 | 0.37555 | 0.51510 | 0.75602 | local basis is a small gain |
+| no two-stage decoder | 0.43547 | 0.60915 | 0.67332 | 0.88496 | two-stage decoder is core |
+| no coupled decoder | 0.36757 | 0.62132 | 0.63839 | 0.91140 | coupled endpoint-coeff decoder is core |
+
+Failure buckets:
+
+| Bucket | Count | ADE | FDE |
+| --- | ---: | ---: | ---: |
+| all | 6400 | 0.25884 | 0.50358 |
+| router-hit | 5402 | 0.20975 | 0.39321 |
+| router-miss | 998 | 0.52453 | 1.10099 |
+| rare | 3250 | 0.27320 | 0.54763 |
+| top1-hit | 1654 | 0.19192 | 0.32298 |
+| top1-miss | 4746 | 0.28216 | 0.56652 |
+
+Router rates:
+
+- `topk_hit = 0.84406`
+- `top1_hit = 0.25844`
+- `rare_topk_hit = 0.84615`
+
+Oracle checks:
+
+| Probe | ADE | Interpretation |
+| --- | ---: | --- |
+| `gt_endpoint_plus_pred_coeff` | 0.17398 | better endpoints would be enough to pass 0.19 with current coeffs |
+| `pred_endpoint_plus_global_basis_ls` | 0.04549 | current endpoint anchors plus optimal basis coeffs have large headroom |
+| `gt_endpoint_plus_global_basis_ls` | 0.01586 | basis representation is not the ceiling |
+| `pred_endpoint_straight` | 0.54878 | endpoint-only linear anchor is not a path model |
+| `coeff_blend_alpha_0.10` | 0.25766 | small oracle move is weak on this harder sample window |
+| `coeff_blend_alpha_0.25` | 0.21838 | larger coeff/path correction still gives large ADE gain |
+
+Candidate allocation check:
+
+- Winner from dense top-5 prototype ranks: `4406`
+- Winner from tail ranks 5-14: `1994`
+- Dense-rank-only min ADE: `0.34368`
+- Tail-rank-only min ADE: `0.43210`
+
+Audit conclusion:
+
+- Keep the current cleaned default modules. Router, social, two-stage decoding, coupled decoding, and endpoint/control shape refiners are all useful.
+- Do not remove the prototype-basis story. The basis space is strong enough; the issue is how the model predicts endpoint-conditioned future shape.
+- Do not spend the next round on score-only, router-only, basis-dim-only, or another small post-hoc refiner unless a short oracle first shows a large gain.
+- The next valid architecture work must directly target coefficient/future-shape inference after the predicted endpoint anchor.
+
 The original coefficient/path-shape bottleneck is real, but the problem is not just a small refiner, router recall, or one conflicting coefficient loss. The remaining hard part is coefficient inference: predicting the correct future-shape code from the currently available observations is weak.
 
 This means the next serious change must be larger than a tail correction head:
