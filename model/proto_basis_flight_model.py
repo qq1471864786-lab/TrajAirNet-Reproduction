@@ -1592,7 +1592,7 @@ class ProtoBasisNet(nn.Module):
             "candidate_proto_idx": rescue_candidate_proto,
         }
 
-    def _tail_rescue_decision(self, proto_logits, target_ctx, scene_ctx, gt_proto_id=None):
+    def _tail_rescue_decision(self, proto_logits, target_ctx, scene_ctx, gt_proto_id=None, gt_endpoint_proto_id=None):
         if self.tail_rescue_gate_head is None:
             return None, None, None
         prob = torch.softmax(proto_logits.float(), dim=-1).to(dtype=target_ctx.dtype)
@@ -1607,9 +1607,10 @@ class ProtoBasisNet(nn.Module):
         gate_logit = self.tail_rescue_gate_head(gate_input).squeeze(-1)
         gate_active = torch.sigmoid(gate_logit) > self.tail_rescue_threshold
         target = None
-        if gt_proto_id is not None:
+        target_id = gt_endpoint_proto_id if self.tail_rescue_source == "endpoint_router" and gt_endpoint_proto_id is not None else gt_proto_id
+        if target_id is not None:
             natural_top = natural_idx[:, : self.topk_proto]
-            target = (~natural_top.eq(gt_proto_id[:, None]).any(dim=1)).float()
+            target = (~natural_top.eq(target_id[:, None]).any(dim=1)).float()
         if self.tail_rescue_selection in {"score"}:
             active = None
         elif self.tail_rescue_selection == "oracle_train_score" and not (self.training and target is not None):
@@ -1822,6 +1823,7 @@ class ProtoBasisNet(nn.Module):
                     target_ctx,
                     scene_ctx,
                     gt_proto_id=gt_proto_id,
+                    gt_endpoint_proto_id=gt_endpoint_proto_id,
                 )
                 base_tensors = {
                     "query_feat": query_feat,
