@@ -619,6 +619,7 @@ class EndpointSetRefiner(nn.Module):
         super().__init__()
         self.endpoint_proj = nn.Linear(3, d_model)
         self.coeff_proj = nn.Linear(basis_dim, d_model)
+        self.motion_proj = nn.Linear(12, d_model)
         self.self_attn = nn.ModuleList(
             [nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout) for _ in range(layers)]
         )
@@ -648,8 +649,12 @@ class EndpointSetRefiner(nn.Module):
         nn.init.zeros_(self.score_delta[-1].weight)
         nn.init.zeros_(self.score_delta[-1].bias)
 
-    def forward(self, query_feat, endpoint_local, coeff, score):
-        hidden = query_feat + self.endpoint_proj(endpoint_local) + self.coeff_proj(coeff)
+    def forward(self, query_feat, endpoint_local, coeff, score, motion_stats=None):
+        if motion_stats is None:
+            motion_token = 0.0
+        else:
+            motion_token = self.motion_proj(motion_stats)[:, None, :]
+        hidden = query_feat + self.endpoint_proj(endpoint_local) + self.coeff_proj(coeff) + motion_token
         for attn, ffn, norm1, norm2 in zip(self.self_attn, self.ffn, self.norm1, self.norm2):
             attended, _ = attn(hidden, hidden, hidden)
             hidden = norm1(hidden + attended)
@@ -1529,6 +1534,20 @@ class ProtoBasisNet(nn.Module):
 
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
+        target_local = local_xyz[:, 0]
+        last_velocity = target_local[:, -1] - target_local[:, -2] if target_local.size(1) > 1 else target_local[:, -1]
+        if target_local.size(1) > 2:
+            prev_velocity = target_local[:, -2] - target_local[:, -3]
+        else:
+            prev_velocity = last_velocity
+        acceleration = last_velocity - prev_velocity
+        mean_velocity = (
+            target_local[:, 1:].sub(target_local[:, :-1]).mean(dim=1)
+            if target_local.size(1) > 1
+            else last_velocity
+        )
+        cv_endpoint = float(self.pred_len) * last_velocity
+        motion_stats = torch.cat([last_velocity, mean_velocity, acceleration, cv_endpoint], dim=-1)
         feats_local = build_local_features(local_xyz)
         feats_global = build_global_features(obs_xyz)
 
@@ -1706,6 +1725,7 @@ class ProtoBasisNet(nn.Module):
                 endpoint_mode_local,
                 coeff,
                 pred_score,
+                motion_stats=motion_stats,
             )
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
             coarse_local = self.basis_bank(anchor_local, coeff)
