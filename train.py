@@ -426,7 +426,7 @@ def apply_training_defaults(args):
     if args.intention_decoder_layers is None:
         args.intention_decoder_layers = 3
     if args.micro_endpoint_offsets is None:
-        args.micro_endpoint_offsets = False
+        args.micro_endpoint_offsets = bool(uses_validated_basis_profile)
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:

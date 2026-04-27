@@ -421,3 +421,19 @@ Validation:
 
 - First short run: train only the micro endpoint head from the current best checkpoint.
 - If FDE/ADE improves materially, unfreeze the endpoint/coupled/refiner stack for a second short run.
+
+Results:
+
+| Variant | Eval | ADE@20 | FDE@20 | ADE@5 | Top1_ADE | rare_FDE@20 | GLeV@20 | Decision |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| current default | 50 batch | 0.2137 | 0.3046 | 0.3848 | 0.6063 | n/a | 0.0898 | reference |
+| micro endpoint head only | 50 batch | 0.2138 | 0.3055 | 0.3838 | 0.6106 | 0.7572 | 0.0905 | no material gain |
+| micro endpoint stack | 50 batch | 0.2104 | 0.3004 | 0.3825 | 0.6012 | 0.7499 | 0.0875 | promote to short baseline |
+| current default | 100 batch | 0.2173 | 0.3130 | 0.3937 | 0.6202 | 0.7111 | 0.0903 | reference |
+| micro endpoint stack | 100 batch | 0.2130 | 0.3069 | 0.3915 | 0.6147 | 0.6991 | 0.0879 | confirmed gain |
+
+Conclusion:
+
+- Promote `micro_endpoint_offsets` as the unified default for the next baseline because the gain survives a 100-batch check and improves ADE, FDE, Top1, and rare FDE.
+- This is not the 0.19 solution. It recovers about `0.004` ADE on the 100-batch check, so endpoint allocation is a real but insufficient bottleneck.
+- GLeV drops slightly, so future runs should monitor diversity before claiming a pure win.
