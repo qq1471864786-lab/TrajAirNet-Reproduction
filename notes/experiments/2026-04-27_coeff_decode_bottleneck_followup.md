@@ -495,3 +495,59 @@ Conclusion:
 - Directly pulling the nearest candidate endpoint toward GT reduces training `endpoint_min_fde`, but it does not transfer to validation FDE in short checks. This suggests the remaining FDE gap is not solved by a late endpoint correction head or by a simple min-FDE loss.
 - The default rank-conditioned endpoint head is not obviously weak in practice; replacing it with prototype-conditioned endpoint generation disrupted the learned micro/coupled/refiner stack.
 - Next endpoint-side investigation should be diagnostic first: split FDE by route/turn/altitude-change regimes and compare constant-velocity, prototype endpoint, micro endpoint, and final refined endpoint errors before adding another module.
+
+## 2026-04-27 FDE Tail Diagnosis
+
+Purpose: identify why the current best checkpoint has good ADE but still relatively high FDE before adding another endpoint module.
+
+Checkpoint:
+
+`save_model_micro_endpoint_stack_continue4_lowdiv_e8_b512_111_mid/111_days/seed3407/best_best20.pt`
+
+Validation:
+
+- 111_days test, first 100 batches, 51,200 samples.
+- Current default candidate budget: `topk_proto=15`, `micro_per_proto=2`, `candidate_dense_topk=5`; this means rank 1-5 prototypes get two micro candidates and rank 6-15 get one candidate.
+
+Main results:
+
+| Split | Share | ADE@20 | FDE@20 | endpoint minFDE | GT proto rank p50/p90 | top15 hit | top20 hit | rare rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| overall | 100.0% | 0.1953 | 0.2818 | 0.3018 | 2 / 11 | 0.9375 | 0.9599 | 0.4653 |
+| worst 10% by FDE | 10.0% | 0.4540 | 0.9596 | 0.9660 | 12 / 33 | 0.5959 | 0.7191 | 0.6406 |
+| worst 5% by FDE | 5.0% | 0.5691 | 1.2307 | 1.2472 | 18 / 37 | 0.4359 | 0.5809 | 0.6559 |
+| router hit | 93.8% | 0.1767 | 0.2427 | 0.2621 | 2 / 8 | 1.0000 | 1.0000 | 0.4602 |
+| router miss | 6.2% | 0.4743 | 0.8686 | 0.8964 | 23 / 40 | 0.0000 | 0.3577 | 0.5407 |
+
+Rank-bucket results:
+
+| GT proto rank | Share | FDE@20 | endpoint minFDE | force GT proto FDE |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 36.1% | 0.1972 | 0.2206 | 0.1972 |
+| 2-5 | 41.2% | 0.2236 | 0.2439 | 0.2236 |
+| 6-15 | 16.5% | 0.3903 | 0.3989 | 0.3903 |
+| 16-30 | 4.6% | 0.7772 | 0.8010 | 0.6584 |
+| 31-64 | 1.6% | 1.1285 | 1.1675 | 0.8633 |
+
+Candidate-budget check:
+
+| Candidate set | ADE@20/window | FDE@20/window | Notes |
+| --- | ---: | ---: | --- |
+| full20 current | 0.1953 | 0.2818 | rank 1-5 have two micro endpoints |
+| sparse15 first micro only | 0.2213 | 0.3377 | removing second micro from rank 1-5 costs +0.0559 FDE |
+| dense top5 only | 0.2592 | 0.4476 | rank 6-15 candidates are needed |
+
+Best-FDE candidate source:
+
+- Overall, the best FDE candidate comes from rank 1-5 in 71.9% samples and from rank 6-15 in 28.1%.
+- In the worst 10%, best FDE candidate comes from rank 6-15 in 59.7%.
+- In the worst 5%, best FDE candidate comes from rank 6-15 in 66.1%.
+- The second micro candidate in rank 1-5 is useful: removing it increases overall FDE by about `0.056`, so those slots cannot be globally reallocated without loss.
+
+Conclusion:
+
+- FDE is a tail problem, not a uniform endpoint-head weakness.
+- The tail is mainly caused by endpoint candidate coverage failure: in the worst 10%, only `59.6%` of samples include the GT prototype in the current top-15 candidate pool; in the worst 5%, only `43.6%` do.
+- The final FDE is almost the same as endpoint minFDE (`0.9596` vs `0.9660` in worst 10%), so coeff/path/refiner modules cannot repair these cases after the endpoint candidate pool misses the right intent.
+- Simple global candidate reallocation is unsafe because the duplicated top-5 micro endpoints are materially useful.
+- Next repair should be conditional tail rescue: add or train a low-confidence/rare-aware rescue candidate mechanism that introduces rank 16-20 or rare endpoint alternatives only when the router distribution indicates tail risk. Do not repeat generic endpoint refiner, FDE-min loss, coeff-only, or raw candidate expansion experiments.
