@@ -124,6 +124,9 @@ def build_parser():
     parser.set_defaults(intention_trajectory_decoder=None)
     parser.add_argument("--intention_modes", type=int, default=None)
     parser.add_argument("--intention_decoder_layers", type=int, default=None)
+    parser.add_argument("--micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_true")
+    parser.add_argument("--no_micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_false")
+    parser.set_defaults(micro_endpoint_offsets=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -301,6 +304,11 @@ def build_parser():
         help="Train only the direct learned-intention trajectory decoder.",
     )
     parser.add_argument(
+        "--freeze_backbone_except_micro_endpoint_offsets",
+        action="store_true",
+        help="Train only the per-micro endpoint offset head.",
+    )
+    parser.add_argument(
         "--freeze_backbone_except_coeff_correction",
         dest="freeze_backbone_except_new_heads",
         action="store_true",
@@ -417,6 +425,8 @@ def apply_training_defaults(args):
         args.intention_modes = 20
     if args.intention_decoder_layers is None:
         args.intention_decoder_layers = 3
+    if args.micro_endpoint_offsets is None:
+        args.micro_endpoint_offsets = False
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
@@ -649,6 +659,7 @@ def build_model(args, model_artifact):
         intention_trajectory_decoder=bool(args.intention_trajectory_decoder),
         intention_modes=args.intention_modes,
         intention_decoder_layers=args.intention_decoder_layers,
+        micro_endpoint_offsets=bool(args.micro_endpoint_offsets),
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
@@ -802,6 +813,21 @@ def apply_freeze_policy(model, args):
         trainable_modules = [module for module in trainable_modules if module is not None]
         if not trainable_modules:
             raise RuntimeError("--freeze_backbone_except_intention_decoder requires --intention_trajectory_decoder.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
+    if args.freeze_backbone_except_micro_endpoint_offsets:
+        trainable_modules = [getattr(model, "micro_endpoint_head", None)]
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_micro_endpoint_offsets requires --micro_endpoint_offsets.")
         for parameter in model.parameters():
             parameter.requires_grad = False
         for module in trainable_modules:

@@ -107,6 +107,7 @@ def build_model(config, checkpoint):
         intention_trajectory_decoder=bool(config.get("intention_trajectory_decoder", False)),
         intention_modes=int(config.get("intention_modes", 20)),
         intention_decoder_layers=int(config.get("intention_decoder_layers", 3)),
+        micro_endpoint_offsets=bool(config.get("micro_endpoint_offsets", False)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),

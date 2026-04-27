@@ -1207,6 +1207,7 @@ class ProtoBasisNet(nn.Module):
         intention_trajectory_decoder=False,
         intention_modes=20,
         intention_decoder_layers=3,
+        micro_endpoint_offsets=False,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -1244,6 +1245,7 @@ class ProtoBasisNet(nn.Module):
         self.soft_proto_decoder_enabled = bool(soft_proto_decoder)
         self.anchor_set_decoder_enabled = bool(anchor_set_decoder)
         self.intention_trajectory_decoder_enabled = bool(intention_trajectory_decoder)
+        self.micro_endpoint_offsets_enabled = bool(micro_endpoint_offsets)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -1350,6 +1352,18 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.intention_trajectory_decoder = None
+        if self.micro_endpoint_offsets_enabled:
+            self.micro_endpoint_head = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, ff_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(ff_dim, 3),
+            )
+            nn.init.zeros_(self.micro_endpoint_head[-1].weight)
+            nn.init.zeros_(self.micro_endpoint_head[-1].bias)
+        else:
+            self.micro_endpoint_head = None
         if self.basis_coeff_decoder_enabled:
             self.basis_coeff_decoder = BasisAwareCoeffDecoder(
                 d_model=d_model,
@@ -1550,9 +1564,15 @@ class ProtoBasisNet(nn.Module):
                 micro_coeff_anchor=micro_coeff_anchor,
             )
             endpoint_mode_local = endpoint_local.repeat_interleave(self.n_micro, dim=1)
+            micro_endpoint_delta = None
+            if self.micro_endpoint_head is not None:
+                micro_endpoint_delta = self.micro_endpoint_head(query_feat)
+                endpoint_mode_local = endpoint_mode_local + micro_endpoint_delta
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
             coarse_local = self.basis_bank(anchor_local, coeff)
             active_query = query_feat
+        if self.anchor_set_decoder is not None:
+            micro_endpoint_delta = None
         basis_coeff = None
         if self.basis_coeff_decoder is not None:
             coeff_before_basis = coeff
@@ -1719,6 +1739,8 @@ class ProtoBasisNet(nn.Module):
             "proto_frequency": self.proto_frequency,
             "proto_summary_5d": self.proto_summary_5d,
         }
+        if micro_endpoint_delta is not None:
+            aux["micro_endpoint_delta"] = micro_endpoint_delta
         if soft_proto_idx is not None:
             aux["soft_proto_idx"] = soft_proto_idx
         if bridge_local is not None:

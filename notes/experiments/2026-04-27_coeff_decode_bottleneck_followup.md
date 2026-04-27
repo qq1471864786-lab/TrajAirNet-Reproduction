@@ -373,3 +373,51 @@ Validation:
 - Short 111_days run from current best checkpoint with partial load.
 - First freeze encoder/social/router and train only the direct intention decoder to test whether the decoder can exploit the existing representation.
 - If 50-batch ADE@20 does not approach or beat `0.2137` quickly, do not spend full training on it. If it beats baseline by at least `0.015`, unfreeze and expand.
+
+Result:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | endpoint_var | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| direct intention, frozen encoder, epoch 8 | 1.1798 | 2.0989 | 1.2054 | 0.0057 | failed |
+
+Conclusion:
+
+- Do not continue this chain.
+- Fully bypassing prototype/basis without endpoint anchors collapses the 20 learned queries into almost identical trajectories. The problem is not only decoder capacity; the model needs a reliable intent/endpoint candidate source.
+
+## 2026-04-27 Aggressive LS Projection Distillation
+
+Purpose: test whether the strong coefficient oracle (`coeff_blend_alpha=0.25` reaching about `0.18~0.22`, depending on sample window) can be made learnable by directly supervising all candidates toward LS coefficients under their predicted endpoints.
+
+Validation:
+
+- Init from current best checkpoint.
+- Freeze encoder/router, train coeff-generation stack.
+- Use `projection_supervision=all`, `lambda_projection_coeff=0.5`, `lambda_projection_path=2.0`.
+
+Result:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | Decision |
+| --- | ---: | ---: | ---: | --- |
+| aggressive LS projection, epoch 8 | 0.2381 | 0.3244 | 0.4098 | worse than current default |
+
+Conclusion:
+
+- Do not make this default and do not expand to full training.
+- The LS oracle is real, but forcing every candidate toward the per-sample LS target disturbs endpoint/candidate structure. The learnable fix must improve endpoint-specific candidate allocation, not just increase LS supervision weight.
+
+## 2026-04-27 Micro Endpoint Offset Plan
+
+Purpose: use the endpoint oracle evidence without adding unfair context. Current `micro_per_proto=2` spends multiple candidates inside high-rank prototypes, but those micro candidates share the same endpoint and only differ in coeff/shape. This underuses the K=20 budget for endpoint/intent coverage.
+
+Design:
+
+- Add `micro_endpoint_offsets`, default off.
+- After the prototype-conditioned query decoder, each micro candidate predicts its own endpoint delta from its query feature.
+- Zero-initialize the endpoint-offset head so old checkpoints start exactly from the current default behavior.
+- Keep the ProtoBasis route, basis, coupled decoder, and refiners; this changes candidate endpoint allocation, not the full method story.
+
+Validation:
+
+- First short run: train only the micro endpoint head from the current best checkpoint.
+- If FDE/ADE improves materially, unfreeze the endpoint/coupled/refiner stack for a second short run.
