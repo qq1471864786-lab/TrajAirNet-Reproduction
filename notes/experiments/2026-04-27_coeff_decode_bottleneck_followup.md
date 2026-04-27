@@ -160,3 +160,36 @@ This means the next serious change must be larger than a tail correction head:
 2. Or replace the coefficient decoder with a stronger multi-modal dynamics decoder that predicts trajectory shape directly from query/prototype context while preserving the ProtoBasis interpretability path.
 
 Do not keep adding small post-hoc correction heads unless a diagnostic first shows that the head can capture a large part of the LS coefficient oracle.
+
+## 2026-04-27 Endpoint-Conditioned Basis Bridge Short Test
+
+Purpose: test the planned bridge fix for the confirmed `predicted endpoint anchor -> predicted coeff/path` bottleneck. The bridge predicts endpoint-preserving residual control points, projects them through the existing basis pseudo-inverse, and reconstructs candidate paths from the fixed basis. It is off by default and zero-initialized to preserve old checkpoints.
+
+Setup:
+
+- Init: `/3250604003/ProtoBasis-Net/save_model_probe_control_continue_e8_111_short/111_days/seed3407/best_best20.pt`
+- Dataset: `111_days`
+- Train: bridge-only freeze, 8 epochs, 80 train batches/epoch, batch size 512, no AMP
+- Eval: first 50 test batches, eval batch size 1024, no AMP
+- Run: `/3250604003/ProtoBasis-Net/save_model_bridge_frozen_e8_111_short/111_days/seed3407`
+
+Fair 50-batch comparison:
+
+| Variant | ADE@20 | FDE@20 | ADE@5 | Top1_ADE | GLeV@20 | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| current checkpoint baseline | 0.2137 | 0.3046 | 0.3848 | 0.6063 | 0.0898 | reference |
+| basis bridge, best epoch 1 | 0.2137 | 0.3046 | n/a | n/a | n/a | no gain |
+| basis bridge, epoch 8 | 0.2139 | 0.3046 | 0.3855 | 0.6057 | 0.0898 | no gain |
+
+Training signal:
+
+- `bridge_path` stayed around `0.0453` by epoch 8.
+- `bridge_coeff` stayed around `0.4810` by epoch 8.
+- Final winner train ADE was `0.2234`, close to the frozen baseline range.
+
+Conclusion:
+
+- This bridge implementation does not pass the short-test threshold (`>=0.012` ADE@20 gain).
+- Do not make `basis_bridge_decoder` default.
+- The failure suggests that merely predicting a low-resolution residual path and projecting it back to the fixed basis is not enough under frozen context/query features.
+- The next backup direction should be a more direct basis-aware coefficient inference mechanism, e.g. basis-token cross-attention or a stronger coeff decoder, rather than another endpoint-preserving post-hoc path control head.
