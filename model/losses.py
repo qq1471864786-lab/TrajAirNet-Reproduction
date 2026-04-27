@@ -334,9 +334,6 @@ class ProtoBasisLoss(nn.Module):
         basis_bridge_supervision="none",
         lambda_direct_path=0.0,
         direct_dynamics_supervision="none",
-        lambda_tail_rescue_gate=0.0,
-        tail_rescue_gate_pos_weight=8.0,
-        lambda_tail_endpoint_router=0.0,
     ):
         super().__init__()
         if endpoint_residual_supervision not in {"all", "hit_only"}:
@@ -377,9 +374,6 @@ class ProtoBasisLoss(nn.Module):
         self.basis_bridge_supervision = basis_bridge_supervision
         self.lambda_direct_path = lambda_direct_path
         self.direct_dynamics_supervision = direct_dynamics_supervision
-        self.lambda_tail_rescue_gate = lambda_tail_rescue_gate
-        self.tail_rescue_gate_pos_weight = max(float(tail_rescue_gate_pos_weight), 1.0)
-        self.lambda_tail_endpoint_router = lambda_tail_endpoint_router
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -493,41 +487,6 @@ class ProtoBasisLoss(nn.Module):
             best_idx,
             self.direct_dynamics_supervision,
         )
-        tail_rescue_logit = aux.get("tail_rescue_logit")
-        tail_rescue_target = aux.get("tail_rescue_target")
-        if tail_rescue_logit is not None:
-            if tail_rescue_target is None:
-                if top_proto_idx is None:
-                    tail_rescue_target = tail_rescue_logit.new_zeros(tail_rescue_logit.shape)
-                else:
-                    natural_hit = top_proto_idx.eq(gt_proto_id[:, None]).any(dim=1)
-                    tail_rescue_target = (~natural_hit).float()
-            tail_rescue_target = tail_rescue_target.to(device=tail_rescue_logit.device, dtype=tail_rescue_logit.dtype)
-            pos_weight = tail_rescue_logit.new_tensor(self.tail_rescue_gate_pos_weight)
-            tail_rescue_gate_loss = F.binary_cross_entropy_with_logits(
-                tail_rescue_logit,
-                tail_rescue_target,
-                pos_weight=pos_weight,
-            )
-            tail_rescue_target_rate = tail_rescue_target.mean()
-            tail_rescue_active = aux.get("tail_rescue_active")
-            if tail_rescue_active is None:
-                tail_rescue_active_rate = (torch.sigmoid(tail_rescue_logit) > 0.5).float().mean()
-            else:
-                tail_rescue_active_rate = tail_rescue_active.to(device=tail_rescue_logit.device).float().mean()
-        else:
-            tail_rescue_gate_loss = gt_xyz.sum() * 0.0
-            tail_rescue_target_rate = gt_xyz.new_tensor(0.0)
-            tail_rescue_active_rate = gt_xyz.new_tensor(0.0)
-        tail_endpoint_logits = aux.get("tail_endpoint_logits")
-        if tail_endpoint_logits is not None:
-            proto_endpoints = aux["proto_summary_5d"][:, :3].to(device=gt_xyz.device, dtype=gt_xyz.dtype)
-            endpoint_target = torch.cdist(batch["fut_local"][:, -1].float(), proto_endpoints.float()).argmin(dim=1)
-            tail_endpoint_router_loss = F.cross_entropy(tail_endpoint_logits, endpoint_target)
-            tail_endpoint_router_acc = tail_endpoint_logits.argmax(dim=1).eq(endpoint_target).float().mean()
-        else:
-            tail_endpoint_router_loss = gt_xyz.sum() * 0.0
-            tail_endpoint_router_acc = gt_xyz.new_tensor(0.0)
 
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
@@ -546,8 +505,6 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_bridge_coeff * bridge_coeff_loss
         total = total + self.lambda_bridge_path * bridge_path_loss
         total = total + self.lambda_direct_path * direct_path_loss
-        total = total + self.lambda_tail_rescue_gate * tail_rescue_gate_loss
-        total = total + self.lambda_tail_endpoint_router * tail_endpoint_router_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -570,11 +527,6 @@ class ProtoBasisLoss(nn.Module):
             "bridge_rate": float(bridge_rate.detach().item()),
             "direct_path": float(direct_path_loss.detach().item()),
             "direct_rate": float(direct_rate.detach().item()),
-            "tail_rescue_gate": float(tail_rescue_gate_loss.detach().item()),
-            "tail_endpoint_router": float(tail_endpoint_router_loss.detach().item()),
-            "tail_endpoint_router_acc": float(tail_endpoint_router_acc.detach().item()),
-            "tail_rescue_target_rate": float(tail_rescue_target_rate.detach().item()),
-            "tail_rescue_active_rate": float(tail_rescue_active_rate.detach().item()),
             "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),

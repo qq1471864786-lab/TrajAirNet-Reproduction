@@ -551,3 +551,34 @@ Conclusion:
 - The final FDE is almost the same as endpoint minFDE (`0.9596` vs `0.9660` in worst 10%), so coeff/path/refiner modules cannot repair these cases after the endpoint candidate pool misses the right intent.
 - Simple global candidate reallocation is unsafe because the duplicated top-5 micro endpoints are materially useful.
 - Next repair should be conditional tail rescue: add or train a low-confidence/rare-aware rescue candidate mechanism that introduces rank 16-20 or rare endpoint alternatives only when the router distribution indicates tail risk. Do not repeat generic endpoint refiner, FDE-min loss, coeff-only, or raw candidate expansion experiments.
+
+## 2026-04-28 Tail Rescue Candidate Attempts
+
+Purpose: test whether the FDE tail can be repaired by conditionally replacing redundant top-5 micro endpoint slots with rescue endpoint candidates while keeping the public output budget at `K=20`.
+
+Setup:
+
+- Init checkpoint: `save_model_micro_endpoint_stack_continue4_lowdiv_e8_b512_111_mid/111_days/seed3407/best_best20.pt`.
+- Short train: 8 epochs, 80 train batches/epoch, 50 eval batches.
+- Main comparison window: old 100-batch diagnostic `ADE@20=0.1953`, `FDE@20=0.2818`.
+- All variants kept weather/extra context off and did not change the public `K=20` evaluation protocol.
+
+Results:
+
+| Variant | Eval | ADE@20 | FDE@20 | rare_FDE@20 | Decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| rank16-20 rescue + learned gate | 50 batch best | 0.1987 | ~0.287 | ~0.694 | not enough |
+| rank16-20 rescue + learned gate | 100 batch | 0.1987 | 0.2871 | 0.6940 | worse than old 100-batch baseline |
+| rank16-20 rescue + oracle selection | 100 batch diagnostic | 0.1947 | 0.2766 | 0.6694 | mechanism has small oracle value |
+| rank16-20 rescue + always on | 100 batch diagnostic | 0.2151 | 0.3159 | 0.7655 | too many false positives |
+| rank16-20 rescue + score-pooled top20 | 50 batch best | 0.1988 | 0.2891 | 0.7146 | worse |
+| rank16-20 rescue + strong gate loss | 50 batch best | 0.2031 | 0.2940 | 0.7288 | worse |
+| endpoint-router rescue source | 50 batch best | 0.2035 | ~0.303 | ~0.748 | worse |
+
+Conclusion:
+
+- The oracle result confirms the diagnosis direction but the learnable conversion is too weak. Rank-tail rescue can repair some FDE-tail cases only when the model is told exactly which samples need rescue.
+- The learned gate under-selects tail cases (`1.7%` active vs `6.3%` target), and lowering the threshold quickly over-selects (`39%` to nearly all samples), which hurts ADE/FDE.
+- Score-pooled rescue and endpoint-router rescue both increase false-positive rescue candidates and degrade `ADE@20/FDE@20`.
+- Do not keep these rescue modules as default. If the code is present only as an experiment switch, do not use it in paper tables.
+- Next FDE work should not be another late candidate swap. The stronger direction is to redesign endpoint generation itself, likely by predicting endpoint distributions/anchors jointly with the main decoder rather than trying to patch missed modes after the router has already committed.
