@@ -122,7 +122,7 @@ class TemporalEncoder(nn.Module):
         self.encoder = nn.TransformerEncoder(block, num_layers=layers)
         self.pool_proj = nn.Sequential(nn.Linear(d_model * 2, d_model), nn.LayerNorm(d_model))
 
-    def forward(self, feats_local, feats_global):
+    def forward(self, feats_local, feats_global, return_target_sequence=False):
         batch_size, num_agents, obs_len, _ = feats_local.shape
         local_h = self.local_proj(feats_local)
         global_h = self.global_proj(feats_global)
@@ -130,10 +130,14 @@ class TemporalEncoder(nn.Module):
         hidden = hidden + self.time_emb(self.time_ids[:obs_len])[None, None, :, :]
         hidden = hidden.view(batch_size * num_agents, obs_len, -1)
         hidden = self.encoder(hidden)
+        sequence_hidden = hidden.view(batch_size, num_agents, obs_len, -1)
         pooled = hidden.max(dim=1).values
         last = hidden[:, -1]
         out = self.pool_proj(torch.cat([pooled, last], dim=-1))
-        return out.view(batch_size, num_agents, -1)
+        agent_out = out.view(batch_size, num_agents, -1)
+        if return_target_sequence:
+            return agent_out, sequence_hidden[:, 0]
+        return agent_out
 
 
 class TargetSocialAggregator(nn.Module):
@@ -552,6 +556,96 @@ class BasisBridgeDecoder(nn.Module):
         return bridge_coeff, bridge_local, bridge_control_local, gate.squeeze(-1).squeeze(-1)
 
 
+class TemporalBasisDynamicsDecoder(nn.Module):
+    def __init__(
+        self,
+        d_model=96,
+        basis_dim=16,
+        pred_len=120,
+        num_control_points=24,
+        nhead=4,
+        ff_dim=256,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.pred_len = int(pred_len)
+        self.num_control_points = int(num_control_points)
+        self.endpoint_proj = nn.Linear(3, d_model)
+        self.coeff_proj = nn.Linear(basis_dim, d_model)
+        self.stats_proj = nn.Linear(12, d_model)
+        self.control_tokens = nn.Parameter(torch.randn(self.num_control_points, d_model) * 0.02)
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
+        self.time_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
+        self.agent_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
+        self.norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(4)])
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, d_model),
+        )
+        self.control_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, ff_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_dim, 3),
+        )
+        nn.init.zeros_(self.control_head[-1].weight)
+        nn.init.zeros_(self.control_head[-1].bias)
+        endpoint_envelope = 1.0 - torch.linspace(0.0, 1.0, steps=pred_len)
+        self.register_buffer("endpoint_envelope", endpoint_envelope, persistent=False)
+
+    def forward(
+        self,
+        query_feat,
+        endpoint_local,
+        coeff,
+        coarse_local,
+        target_temporal_feat,
+        agent_feat,
+        obs_mask,
+        anchor_local,
+        basis_pinv,
+        basis_bank,
+    ):
+        coarse_end = coarse_local[:, :, -1]
+        coarse_mean = coarse_local.mean(dim=2)
+        endpoint_gap = coarse_end - endpoint_local
+        stats = torch.cat([endpoint_local, coarse_end, coarse_mean, endpoint_gap], dim=-1)
+        base_query = query_feat + self.endpoint_proj(endpoint_local) + self.coeff_proj(coeff) + self.stats_proj(stats)
+
+        batch_size, num_modes, hidden_dim = base_query.shape
+        control = base_query[:, :, None, :] + self.control_tokens.to(device=base_query.device, dtype=base_query.dtype)
+        control = control.reshape(batch_size * num_modes, self.num_control_points, hidden_dim)
+
+        attended, _ = self.self_attn(control, control, control)
+        control = self.norms[0](control + attended)
+
+        time_memory = target_temporal_feat[:, None].expand(-1, num_modes, -1, -1)
+        time_memory = time_memory.reshape(batch_size * num_modes, target_temporal_feat.size(1), hidden_dim)
+        attended, _ = self.time_attn(control, time_memory, time_memory)
+        control = self.norms[1](control + attended)
+
+        agent_memory = agent_feat[:, None].expand(-1, num_modes, -1, -1)
+        agent_memory = agent_memory.reshape(batch_size * num_modes, agent_feat.size(1), hidden_dim)
+        agent_mask = obs_mask[:, None].expand(-1, num_modes, -1).reshape(batch_size * num_modes, obs_mask.size(1))
+        attended, _ = self.agent_attn(control, agent_memory, agent_memory, key_padding_mask=~agent_mask)
+        control = self.norms[2](control + attended)
+        control = self.norms[3](control + self.ffn(control))
+
+        control_delta = self.control_head(control).transpose(1, 2)
+        residual_delta = F.interpolate(control_delta, size=coarse_local.size(2), mode="linear", align_corners=True)
+        residual_delta = residual_delta.transpose(1, 2).reshape(batch_size, num_modes, coarse_local.size(2), 3)
+        envelope = self.endpoint_envelope.to(device=coarse_local.device, dtype=coarse_local.dtype)
+        residual = coarse_local - anchor_local + envelope[None, None, :, None] * residual_delta
+        flat_residual = residual.reshape(batch_size * num_modes, -1)
+        dynamics_coeff = flat_residual @ basis_pinv.to(device=coarse_local.device, dtype=coarse_local.dtype)
+        dynamics_coeff = dynamics_coeff.reshape(batch_size, num_modes, -1)
+        dynamics_local = basis_bank(anchor_local, dynamics_coeff)
+        return dynamics_coeff, dynamics_local
+
+
 class CoupledEndpointCoeffDecoder(nn.Module):
     def __init__(self, d_model=96, basis_dim=16, iters=1, dropout=0.1):
         super().__init__()
@@ -632,6 +726,8 @@ class ProtoBasisNet(nn.Module):
         coupled_decoder_iters=0,
         basis_bridge_decoder=False,
         bridge_control_points=16,
+        temporal_dynamics_decoder=False,
+        dynamics_control_points=24,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -664,6 +760,7 @@ class ProtoBasisNet(nn.Module):
         self.basis_coeff_decoder_enabled = bool(basis_coeff_decoder)
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
         self.basis_bridge_decoder_enabled = bool(basis_bridge_decoder)
+        self.temporal_dynamics_decoder_enabled = bool(temporal_dynamics_decoder)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -791,6 +888,18 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.basis_bridge_decoder = None
+        if self.temporal_dynamics_decoder_enabled:
+            self.temporal_dynamics_decoder = TemporalBasisDynamicsDecoder(
+                d_model=d_model,
+                basis_dim=basis_dim,
+                pred_len=pred_len,
+                num_control_points=dynamics_control_points,
+                nhead=nhead,
+                ff_dim=ff_dim,
+                dropout=dropout,
+            )
+        else:
+            self.temporal_dynamics_decoder = None
         if self.endpoint_shape_refiner_enabled:
             self.endpoint_shape_refiner = EndpointPreservingShapeRefiner(d_model=d_model, pred_len=pred_len)
         else:
@@ -821,7 +930,11 @@ class ProtoBasisNet(nn.Module):
         feats_local = build_local_features(local_xyz)
         feats_global = build_global_features(obs_xyz)
 
-        agent_feat = self.temporal_encoder(feats_local, feats_global)
+        agent_feat, target_temporal_feat = self.temporal_encoder(
+            feats_local,
+            feats_global,
+            return_target_sequence=True,
+        )
         if self.disable_social:
             target_ctx = agent_feat[:, 0]
             scene_ctx = _masked_mean(agent_feat, obs_mask)
@@ -902,6 +1015,8 @@ class ProtoBasisNet(nn.Module):
         bridge_control_local = None
         bridge_coeff = None
         bridge_gate = None
+        dynamics_local = None
+        dynamics_coeff = None
         if self.basis_bridge_decoder is not None:
             coeff_before_bridge = coeff
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
@@ -917,6 +1032,24 @@ class ProtoBasisNet(nn.Module):
             bridge_coeff = coeff
             bridge_local = coarse_local
             coeff_delta = coeff_delta + (coeff - coeff_before_bridge)
+        if self.temporal_dynamics_decoder is not None:
+            coeff_before_dynamics = coeff
+            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
+            coeff, coarse_local = self.temporal_dynamics_decoder(
+                active_query,
+                endpoint_mode_local,
+                coeff,
+                coarse_local,
+                target_temporal_feat,
+                agent_feat,
+                obs_mask,
+                anchor_local,
+                self.basis_pinv,
+                self.basis_bank,
+            )
+            dynamics_coeff = coeff
+            dynamics_local = coarse_local
+            coeff_delta = coeff_delta + (coeff - coeff_before_dynamics)
         if self.has_local_basis:
             proto_mean_path = self.prototype_mean_path[candidate_proto_idx]
             proto_mean_endpoint = proto_mean_path[:, :, -1, :]
@@ -962,6 +1095,13 @@ class ProtoBasisNet(nn.Module):
                     "bridge_local": bridge_local,
                     "bridge_control_local": bridge_control_local,
                     "bridge_gate": bridge_gate,
+                }
+            )
+        if dynamics_local is not None:
+            aux.update(
+                {
+                    "dynamics_coeff": dynamics_coeff,
+                    "dynamics_local": dynamics_local,
                 }
             )
 

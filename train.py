@@ -101,6 +101,10 @@ def build_parser():
     parser.add_argument("--no_basis_bridge_decoder", dest="basis_bridge_decoder", action="store_false")
     parser.set_defaults(basis_bridge_decoder=None)
     parser.add_argument("--bridge_control_points", type=int, default=None)
+    parser.add_argument("--temporal_dynamics_decoder", dest="temporal_dynamics_decoder", action="store_true")
+    parser.add_argument("--no_temporal_dynamics_decoder", dest="temporal_dynamics_decoder", action="store_false")
+    parser.set_defaults(temporal_dynamics_decoder=None)
+    parser.add_argument("--dynamics_control_points", type=int, default=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -245,6 +249,11 @@ def build_parser():
         help="Train the basis-aware coeff decoder plus query/two-stage/coupled decoder stack.",
     )
     parser.add_argument(
+        "--freeze_backbone_except_temporal_dynamics_stack",
+        action="store_true",
+        help="Train temporal dynamics decoder plus query/two-stage/coupled/refiner stack.",
+    )
+    parser.add_argument(
         "--freeze_backbone_except_coeff_correction",
         dest="freeze_backbone_except_new_heads",
         action="store_true",
@@ -339,6 +348,10 @@ def apply_training_defaults(args):
         args.basis_bridge_decoder = False
     if args.bridge_control_points is None:
         args.bridge_control_points = 16
+    if args.temporal_dynamics_decoder is None:
+        args.temporal_dynamics_decoder = False
+    if args.dynamics_control_points is None:
+        args.dynamics_control_points = 24
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
@@ -555,6 +568,8 @@ def build_model(args, model_artifact):
         coupled_decoder_iters=args.coupled_decoder_iters,
         basis_bridge_decoder=bool(args.basis_bridge_decoder),
         bridge_control_points=args.bridge_control_points,
+        temporal_dynamics_decoder=bool(args.temporal_dynamics_decoder),
+        dynamics_control_points=args.dynamics_control_points,
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
@@ -603,6 +618,30 @@ def apply_freeze_policy(model, args):
         trainable_modules = [module for module in trainable_modules if module is not None]
         if not trainable_modules:
             raise RuntimeError("--freeze_backbone_except_basis_coeff_decoder requires --basis_coeff_decoder.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
+    if args.freeze_backbone_except_temporal_dynamics_stack:
+        trainable_modules = [
+            getattr(model, "temporal_dynamics_decoder", None),
+            getattr(model, "query_decoder", None),
+            getattr(model, "stage2_proj", None),
+            getattr(model, "stage2_endpoint_head", None),
+            getattr(model, "stage2_coeff_head", None),
+            getattr(model, "coupled_decoder", None),
+            getattr(model, "endpoint_shape_refiner", None),
+            getattr(model, "control_shape_refiner", None),
+        ]
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_temporal_dynamics_stack requires --temporal_dynamics_decoder.")
         for parameter in model.parameters():
             parameter.requires_grad = False
         for module in trainable_modules:
@@ -1111,6 +1150,8 @@ def main():
         "coupled_decoder_iters": args.coupled_decoder_iters,
         "basis_bridge_decoder": bool(args.basis_bridge_decoder),
         "bridge_control_points": args.bridge_control_points,
+        "temporal_dynamics_decoder": bool(args.temporal_dynamics_decoder),
+        "dynamics_control_points": args.dynamics_control_points,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
@@ -1135,6 +1176,7 @@ def main():
         "freeze_backbone_except_basis_bridge_coupled": bool(args.freeze_backbone_except_basis_bridge_coupled),
         "freeze_backbone_except_basis_coeff_decoder": bool(args.freeze_backbone_except_basis_coeff_decoder),
         "freeze_backbone_except_coeff_decoder_stack": bool(args.freeze_backbone_except_coeff_decoder_stack),
+        "freeze_backbone_except_temporal_dynamics_stack": bool(args.freeze_backbone_except_temporal_dynamics_stack),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

@@ -96,6 +96,8 @@ def build_model(config, checkpoint):
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
         basis_bridge_decoder=bool(config.get("basis_bridge_decoder", False)),
         bridge_control_points=int(config.get("bridge_control_points", 16)),
+        temporal_dynamics_decoder=bool(config.get("temporal_dynamics_decoder", False)),
+        dynamics_control_points=int(config.get("dynamics_control_points", 24)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),
