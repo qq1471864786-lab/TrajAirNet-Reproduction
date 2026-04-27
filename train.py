@@ -58,6 +58,9 @@ LOSS_STAT_KEYS = (
     "bridge_rate",
     "direct_path",
     "direct_rate",
+    "tail_rescue_gate",
+    "tail_rescue_target_rate",
+    "tail_rescue_active_rate",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -124,6 +127,18 @@ def build_parser():
     parser.set_defaults(intention_trajectory_decoder=None)
     parser.add_argument("--intention_modes", type=int, default=None)
     parser.add_argument("--intention_decoder_layers", type=int, default=None)
+    parser.add_argument("--tail_rescue_candidates", dest="tail_rescue_candidates", action="store_true")
+    parser.add_argument("--no_tail_rescue_candidates", dest="tail_rescue_candidates", action="store_false")
+    parser.set_defaults(tail_rescue_candidates=None)
+    parser.add_argument("--tail_rescue_extra_proto", type=int, default=None)
+    parser.add_argument(
+        "--tail_rescue_selection",
+        type=str,
+        default=None,
+        choices=["gate", "oracle_train", "always"],
+        help="Select tail-rescue candidates by learned gate, training-time oracle then gate, or always.",
+    )
+    parser.add_argument("--tail_rescue_threshold", type=float, default=None)
     parser.add_argument("--micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_true")
     parser.add_argument("--no_micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_false")
     parser.set_defaults(micro_endpoint_offsets=None)
@@ -235,6 +250,8 @@ def build_parser():
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
+    parser.add_argument("--lambda_tail_rescue_gate", type=float, default=None)
+    parser.add_argument("--tail_rescue_gate_pos_weight", type=float, default=8.0)
     parser.add_argument("--proto_focal_gamma", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_power", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_max", type=float, default=5.0)
@@ -425,6 +442,14 @@ def apply_training_defaults(args):
         args.intention_modes = 20
     if args.intention_decoder_layers is None:
         args.intention_decoder_layers = 3
+    if args.tail_rescue_candidates is None:
+        args.tail_rescue_candidates = False
+    if args.tail_rescue_extra_proto is None:
+        args.tail_rescue_extra_proto = 5
+    if args.tail_rescue_selection is None:
+        args.tail_rescue_selection = "oracle_train"
+    if args.tail_rescue_threshold is None:
+        args.tail_rescue_threshold = 0.5
     if args.micro_endpoint_offsets is None:
         args.micro_endpoint_offsets = bool(uses_validated_basis_profile)
     if args.endpoint_shape_refiner is None:
@@ -506,6 +531,8 @@ def apply_training_defaults(args):
         args.lambda_direct_path = 0.10 if use_direct_guidance else 0.0
     if args.direct_dynamics_supervision is None:
         args.direct_dynamics_supervision = "winner_gt_proto" if use_direct_guidance else "none"
+    if args.lambda_tail_rescue_gate is None:
+        args.lambda_tail_rescue_gate = 0.05 if args.tail_rescue_candidates else 0.0
 
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
@@ -661,6 +688,10 @@ def build_model(args, model_artifact):
         intention_trajectory_decoder=bool(args.intention_trajectory_decoder),
         intention_modes=args.intention_modes,
         intention_decoder_layers=args.intention_decoder_layers,
+        tail_rescue_candidates=bool(args.tail_rescue_candidates),
+        tail_rescue_extra_proto=args.tail_rescue_extra_proto,
+        tail_rescue_selection=args.tail_rescue_selection,
+        tail_rescue_threshold=args.tail_rescue_threshold,
         micro_endpoint_offsets=bool(args.micro_endpoint_offsets),
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
@@ -706,6 +737,8 @@ def apply_freeze_policy(model, args):
                     getattr(model, "coupled_decoder", None),
                     getattr(model, "endpoint_shape_refiner", None),
                     getattr(model, "control_shape_refiner", None),
+                    getattr(model, "tail_rescue_endpoint_head", None),
+                    getattr(model, "tail_rescue_gate_head", None),
                 ]
             )
         trainable_modules = [module for module in trainable_modules if module is not None]
@@ -866,6 +899,8 @@ def apply_freeze_policy(model, args):
             getattr(model, "basis_bridge_decoder", None),
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
+            getattr(model, "tail_rescue_endpoint_head", None),
+            getattr(model, "tail_rescue_gate_head", None),
         )
         if module is not None
     ]
@@ -1201,6 +1236,9 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"bridge_coeff={format_scalar(loss_stats['bridge_coeff'])}",
         f"bridge_path={format_scalar(loss_stats['bridge_path'])}",
         f"direct_path={format_scalar(loss_stats['direct_path'])}",
+        f"tail_gate={format_scalar(loss_stats['tail_rescue_gate'])}",
+        f"tail_target={format_scalar(loss_stats['tail_rescue_target_rate'])}",
+        f"tail_active={format_scalar(loss_stats['tail_rescue_active_rate'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -1313,6 +1351,8 @@ def main():
         basis_bridge_supervision=args.basis_bridge_supervision,
         lambda_direct_path=args.lambda_direct_path,
         direct_dynamics_supervision=args.direct_dynamics_supervision,
+        lambda_tail_rescue_gate=args.lambda_tail_rescue_gate,
+        tail_rescue_gate_pos_weight=args.tail_rescue_gate_pos_weight,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1350,6 +1390,10 @@ def main():
         "soft_proto_modes": args.soft_proto_modes,
         "anchor_set_decoder": bool(args.anchor_set_decoder),
         "anchor_set_modes": args.anchor_set_modes,
+        "tail_rescue_candidates": bool(args.tail_rescue_candidates),
+        "tail_rescue_extra_proto": args.tail_rescue_extra_proto,
+        "tail_rescue_selection": args.tail_rescue_selection,
+        "tail_rescue_threshold": args.tail_rescue_threshold,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
@@ -1368,6 +1412,7 @@ def main():
         "lambda_bridge_coeff": args.lambda_bridge_coeff,
         "lambda_bridge_path": args.lambda_bridge_path,
         "lambda_direct_path": args.lambda_direct_path,
+        "lambda_tail_rescue_gate": args.lambda_tail_rescue_gate,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,

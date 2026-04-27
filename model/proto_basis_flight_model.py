@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 
 import torch
@@ -1207,6 +1208,10 @@ class ProtoBasisNet(nn.Module):
         intention_trajectory_decoder=False,
         intention_modes=20,
         intention_decoder_layers=3,
+        tail_rescue_candidates=False,
+        tail_rescue_extra_proto=5,
+        tail_rescue_selection="oracle_train",
+        tail_rescue_threshold=0.5,
         micro_endpoint_offsets=False,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
@@ -1245,6 +1250,12 @@ class ProtoBasisNet(nn.Module):
         self.soft_proto_decoder_enabled = bool(soft_proto_decoder)
         self.anchor_set_decoder_enabled = bool(anchor_set_decoder)
         self.intention_trajectory_decoder_enabled = bool(intention_trajectory_decoder)
+        self.tail_rescue_candidates_enabled = bool(tail_rescue_candidates)
+        self.tail_rescue_extra_proto = max(int(tail_rescue_extra_proto or 0), 0)
+        if tail_rescue_selection not in {"gate", "oracle_train", "always"}:
+            raise ValueError(f"Unsupported tail_rescue_selection: {tail_rescue_selection}")
+        self.tail_rescue_selection = tail_rescue_selection
+        self.tail_rescue_threshold = float(tail_rescue_threshold)
         self.micro_endpoint_offsets_enabled = bool(micro_endpoint_offsets)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
@@ -1352,6 +1363,29 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.intention_trajectory_decoder = None
+        if self.tail_rescue_candidates_enabled:
+            rescue_endpoint_in = d_model * 3 + 5
+            self.tail_rescue_endpoint_head = nn.Sequential(
+                nn.LayerNorm(rescue_endpoint_in),
+                nn.Linear(rescue_endpoint_in, ff_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(ff_dim, 3),
+            )
+            self.tail_rescue_gate_head = nn.Sequential(
+                nn.LayerNorm(d_model * 2 + 4),
+                nn.Linear(d_model * 2 + 4, ff_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(ff_dim // 2, 1),
+            )
+            nn.init.zeros_(self.tail_rescue_endpoint_head[-1].weight)
+            nn.init.zeros_(self.tail_rescue_endpoint_head[-1].bias)
+            nn.init.zeros_(self.tail_rescue_gate_head[-1].weight)
+            nn.init.zeros_(self.tail_rescue_gate_head[-1].bias)
+        else:
+            self.tail_rescue_endpoint_head = None
+            self.tail_rescue_gate_head = None
         if self.micro_endpoint_offsets_enabled:
             self.micro_endpoint_head = nn.Sequential(
                 nn.LayerNorm(d_model),
@@ -1470,6 +1504,109 @@ class ProtoBasisNet(nn.Module):
             keep_tensor = torch.empty(0, dtype=torch.long)
         self.register_buffer("candidate_keep_indices", keep_tensor, persistent=False)
 
+    def _decode_tail_rescue_candidates(self, proto_logits, target_ctx, scene_ctx, agent_feat, obs_mask):
+        if self.tail_rescue_endpoint_head is None or self.tail_rescue_extra_proto <= 0:
+            return None
+        lookahead = min(self.topk_proto + self.tail_rescue_extra_proto, proto_logits.size(-1))
+        if lookahead <= self.topk_proto:
+            return None
+        rescue_proto_idx = proto_logits.topk(lookahead, dim=-1).indices[:, self.topk_proto:lookahead]
+        rescue_summary = self.proto_summary_5d[rescue_proto_idx]
+        rescue_proto_token = self.prototype_router.proto_emb(rescue_proto_idx) + self.prototype_router.proto_proj(rescue_summary)
+        target_rep = target_ctx[:, None, :].expand(-1, rescue_proto_idx.size(1), -1)
+        scene_rep = scene_ctx[:, None, :].expand(-1, rescue_proto_idx.size(1), -1)
+        endpoint_input = torch.cat([target_rep, scene_rep, rescue_proto_token, rescue_summary], dim=-1)
+        rescue_endpoint_local = rescue_summary[:, :, :3] + self.tail_rescue_endpoint_head(endpoint_input)
+        rescue_micro_coeff_anchor = self.micro_coeff_anchors[rescue_proto_idx] if self.has_micro_coeff_anchors else None
+        rescue_query, rescue_coeff, rescue_score, rescue_gate, rescue_coeff_delta = self.query_decoder(
+            rescue_proto_token,
+            rescue_endpoint_local,
+            target_ctx,
+            agent_feat,
+            obs_mask,
+            micro_coeff_anchor=rescue_micro_coeff_anchor,
+        )
+        rescue_endpoint_mode = rescue_endpoint_local.repeat_interleave(self.n_micro, dim=1)
+        if self.micro_endpoint_head is not None:
+            rescue_endpoint_mode = rescue_endpoint_mode + self.micro_endpoint_head(rescue_query)
+        rescue_anchor = build_anchor(rescue_endpoint_mode, self.anchor_alpha.to(rescue_endpoint_mode))
+        rescue_coarse = self.basis_bank(rescue_anchor, rescue_coeff)
+        rescue_candidate_proto = rescue_proto_idx.repeat_interleave(self.n_micro, dim=1)
+        return {
+            "query_feat": rescue_query,
+            "coeff": rescue_coeff,
+            "pred_score": rescue_score,
+            "difficulty_gate": rescue_gate,
+            "coeff_delta": rescue_coeff_delta,
+            "endpoint_mode_local": rescue_endpoint_mode,
+            "coarse_local": rescue_coarse,
+            "candidate_proto_idx": rescue_candidate_proto,
+        }
+
+    def _tail_rescue_decision(self, proto_logits, target_ctx, scene_ctx, gt_proto_id=None):
+        if self.tail_rescue_gate_head is None:
+            return None, None, None
+        prob = torch.softmax(proto_logits.float(), dim=-1).to(dtype=target_ctx.dtype)
+        lookahead = min(self.topk_proto + self.tail_rescue_extra_proto, proto_logits.size(-1))
+        top_values, natural_idx = prob.topk(lookahead, dim=-1)
+        top1_prob = top_values[:, :1]
+        kept_mass = top_values[:, : self.topk_proto].sum(dim=-1, keepdim=True)
+        rescue_mass = top_values[:, self.topk_proto:].sum(dim=-1, keepdim=True) if lookahead > self.topk_proto else top1_prob * 0.0
+        entropy = -(prob * prob.clamp_min(1e-8).log()).sum(dim=-1, keepdim=True)
+        entropy = entropy / max(math.log(max(proto_logits.size(-1), 2)), 1e-6)
+        gate_input = torch.cat([target_ctx, scene_ctx, top1_prob, kept_mass, rescue_mass, entropy], dim=-1)
+        gate_logit = self.tail_rescue_gate_head(gate_input).squeeze(-1)
+        gate_active = torch.sigmoid(gate_logit) > self.tail_rescue_threshold
+        target = None
+        if gt_proto_id is not None:
+            natural_top = natural_idx[:, : self.topk_proto]
+            target = (~natural_top.eq(gt_proto_id[:, None]).any(dim=1)).float()
+        if self.tail_rescue_selection == "always":
+            active = torch.ones_like(gate_active)
+        elif self.tail_rescue_selection == "oracle_train" and self.training and target is not None:
+            active = target.bool()
+        else:
+            active = gate_active
+        return active, gate_logit, target
+
+    def _apply_tail_rescue_selection(
+        self,
+        base_tensors,
+        rescue_tensors,
+        rescue_active,
+    ):
+        if rescue_tensors is None or rescue_active is None or self.n_micro <= 0:
+            return base_tensors, False
+        if self.candidate_keep_indices.numel() == 0:
+            return base_tensors, False
+        default_keep = self.candidate_keep_indices.to(device=base_tensors["coeff"].device)
+        base_first = torch.arange(self.topk_proto, device=base_tensors["coeff"].device) * self.n_micro
+        rescue_proto_count = rescue_tensors["candidate_proto_idx"].size(1) // self.n_micro
+        rescue_first = torch.arange(rescue_proto_count, device=base_tensors["coeff"].device) * self.n_micro
+        if base_first.numel() + rescue_first.numel() != default_keep.numel():
+            return base_tensors, False
+
+        active_float = rescue_active.to(device=base_tensors["coeff"].device).view(-1, 1)
+        active_bool = rescue_active.to(device=base_tensors["coeff"].device).view(-1, 1)
+        selected = {}
+        for key, tensor in base_tensors.items():
+            default_value = tensor.index_select(1, default_keep)
+            rescue_base = tensor.index_select(1, base_first)
+            rescue_value = torch.cat([rescue_base, rescue_tensors[key].index_select(1, rescue_first)], dim=1)
+            if tensor.dtype == torch.bool:
+                mask = active_bool
+            elif tensor.is_floating_point():
+                mask = active_float
+                while mask.dim() < default_value.dim():
+                    mask = mask.unsqueeze(-1)
+            else:
+                mask = active_bool
+            if tensor.is_floating_point():
+                selected[key] = torch.where(mask.bool(), rescue_value, default_value)
+            else:
+                selected[key] = torch.where(mask, rescue_value, default_value)
+        return selected, True
+
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False, enable_refiner=True):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
         feats_local = build_local_features(local_xyz)
@@ -1494,6 +1631,12 @@ class ProtoBasisNet(nn.Module):
             force_gt_proto=force_gt_proto,
             disable_router=self.disable_router,
         )
+
+        candidate_proto_idx = None
+        candidate_selection_applied = False
+        tail_rescue_active = None
+        tail_rescue_logit = None
+        tail_rescue_target = None
 
         if self.intention_trajectory_decoder is not None:
             active_query, direct_local, pred_score, endpoint_mode_local = self.intention_trajectory_decoder(
@@ -1571,6 +1714,46 @@ class ProtoBasisNet(nn.Module):
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
             coarse_local = self.basis_bank(anchor_local, coeff)
             active_query = query_feat
+            candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
+            if self.tail_rescue_candidates_enabled:
+                rescue_tensors = self._decode_tail_rescue_candidates(
+                    proto_logits,
+                    target_ctx,
+                    scene_ctx,
+                    agent_feat,
+                    obs_mask,
+                )
+                tail_rescue_active, tail_rescue_logit, tail_rescue_target = self._tail_rescue_decision(
+                    proto_logits,
+                    target_ctx,
+                    scene_ctx,
+                    gt_proto_id=gt_proto_id,
+                )
+                base_tensors = {
+                    "query_feat": query_feat,
+                    "coeff": coeff,
+                    "pred_score": pred_score,
+                    "difficulty_gate": difficulty_gate,
+                    "coeff_delta": coeff_delta,
+                    "endpoint_mode_local": endpoint_mode_local,
+                    "coarse_local": coarse_local,
+                    "candidate_proto_idx": candidate_proto_idx,
+                }
+                selected_tensors, candidate_selection_applied = self._apply_tail_rescue_selection(
+                    base_tensors,
+                    rescue_tensors,
+                    tail_rescue_active,
+                )
+                if candidate_selection_applied:
+                    query_feat = selected_tensors["query_feat"]
+                    coeff = selected_tensors["coeff"]
+                    pred_score = selected_tensors["pred_score"]
+                    difficulty_gate = selected_tensors["difficulty_gate"]
+                    coeff_delta = selected_tensors["coeff_delta"]
+                    endpoint_mode_local = selected_tensors["endpoint_mode_local"]
+                    coarse_local = selected_tensors["coarse_local"]
+                    candidate_proto_idx = selected_tensors["candidate_proto_idx"]
+                    active_query = query_feat
         if self.anchor_set_decoder is not None:
             micro_endpoint_delta = None
         basis_coeff = None
@@ -1609,9 +1792,13 @@ class ProtoBasisNet(nn.Module):
                 self.anchor_alpha,
             )
             coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
-        if self.anchor_set_decoder is None:
+        if self.anchor_set_decoder is None and candidate_proto_idx is None:
             candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
-        if self.anchor_set_decoder is None and self.candidate_keep_indices.numel() > 0:
+        if (
+            self.anchor_set_decoder is None
+            and self.candidate_keep_indices.numel() > 0
+            and not candidate_selection_applied
+        ):
             keep = self.candidate_keep_indices.to(device=coeff.device)
             query_feat = query_feat.index_select(1, keep)
             coeff = coeff.index_select(1, keep)
@@ -1739,6 +1926,12 @@ class ProtoBasisNet(nn.Module):
             "proto_frequency": self.proto_frequency,
             "proto_summary_5d": self.proto_summary_5d,
         }
+        if tail_rescue_logit is not None:
+            aux["tail_rescue_logit"] = tail_rescue_logit
+        if tail_rescue_active is not None:
+            aux["tail_rescue_active"] = tail_rescue_active.float()
+        if tail_rescue_target is not None:
+            aux["tail_rescue_target"] = tail_rescue_target
         if micro_endpoint_delta is not None:
             aux["micro_endpoint_delta"] = micro_endpoint_delta
         if soft_proto_idx is not None:
