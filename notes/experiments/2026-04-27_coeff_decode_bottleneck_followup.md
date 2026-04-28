@@ -857,3 +857,65 @@ Decision:
 - Do not implement simple nearest-neighbor retrieval as a default endpoint source.
 - Retrieval remains a credible non-ASCENT direction only if used as an internal candidate pool plus a learned scorer/gate, or as an auxiliary training prior that teaches the endpoint generator where historical alternatives lie.
 - Acceptance condition for any retrieval-based model change: public K=20 `endpoint_min_fde` must improve, not just the K=40 oracle union. Otherwise it repeats the failed tail-rescue pattern.
+
+## 2026-04-28 Retrieval Selection Follow-up
+
+Purpose: test whether the retrieval oracle headroom can be converted back into the public `K=20` budget by either a learned selector or prototype-conditioned retrieval.
+
+### Learned selector
+
+Setup:
+
+- Memory bank: first `327680` train samples.
+- Selector training samples: next `81920` train samples, disjoint from memory bank.
+- Candidate pool per sample: current model K=20 endpoints + glocal retrieval K=20 endpoints.
+- Selector: small MLP over query feature, candidate endpoint, source flag, rank, current probability/retrieval similarity.
+- Target: classify the top-5 lowest endpoint-error candidates in the K=40 pool.
+- Eval: 111_days first 50 test batches.
+
+Results:
+
+| Selection rule | Retrieval selected / sample | Endpoint minFDE | rare | router-hit | router-miss | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| current K=20 | 0.00 | 0.2799 | 0.3202 | 0.2333 | 1.0806 | baseline |
+| retrieval K=20 | 20.00 | 0.5386 | 0.6368 | 0.4861 | 1.4414 | bad alone |
+| oracle union K=40 | 20.00 internal | 0.2377 | 0.2745 | 0.2030 | 0.8356 | headroom exists |
+| learned selector, retrieval bias -2 | 0.09 | 0.2799 | 0.3203 | 0.2333 | 1.0819 | effectively baseline |
+| learned selector, retrieval bias -1 | 1.56 | 0.2872 | 0.3270 | 0.2375 | 1.1421 | worse |
+| learned selector, retrieval bias -0.5 | 3.94 | 0.3098 | 0.3504 | 0.2515 | 1.3130 | worse |
+| learned selector, retrieval bias 0 | 6.78 | 0.3574 | 0.4115 | 0.2861 | 1.5845 | much worse |
+
+Readout:
+
+- A shallow learned scorer does not reliably identify the rare samples where retrieval helps.
+- As soon as it selects a meaningful number of retrieval endpoints, public K=20 endpoint minFDE gets worse.
+- The retrieval oracle gain is therefore not immediately actionable as a late K=40 -> K=20 selector.
+
+### Prototype-conditioned retrieval
+
+Setup:
+
+- Same 327k sampled memory and 50-batch test window.
+- Retrieval distance is biased toward memory samples whose `gt_proto_id` is inside the model's current candidate prototype set.
+- This tests whether retrieval can be integrated cleanly into the existing ProtoBasis router/prototype chain.
+
+Results:
+
+| Retrieval variant | Retrieval K=20 | current15 + retrieval5 | Oracle union K=40 | rare union | miss union | Readout |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| no proto bias | 0.4295 | 0.3041 | 0.2277 | 0.2626 | 0.7711 | best union |
+| proto penalty 5 | 0.4284 | 0.3102 | 0.2317 | 0.2665 | 0.8692 | worse tail |
+| proto penalty 10 | 0.4288 | 0.3112 | 0.2335 | 0.2684 | 0.9076 | worse |
+| proto penalty 50 | 0.4278 | 0.3121 | 0.2349 | 0.2702 | 0.9357 | worse |
+| proto penalty 200 | 0.4280 | 0.3123 | 0.2351 | 0.2706 | 0.9398 | worse |
+
+Readout:
+
+- Prototype-conditioned retrieval slightly improves retrieval's average standalone score, but it worsens the router-miss tail and reduces oracle union value.
+- The useful retrieval endpoints often come from outside the current prototype set, which matches the endpoint-coverage diagnosis: the current router/prototype candidate set is exactly what fails on tail cases.
+
+Decision:
+
+- Do not implement retrieval as direct endpoint replacement, fixed-slot candidate injection, shallow learned selector, or prototype-filtered retrieval.
+- Retrieval is still informative as an analysis tool and may be useful as an auxiliary prior for training a new endpoint generator, but current evidence does not justify adding a retrieval module to the default architecture.
+- Next non-ASCENT direction should move away from late retrieval selection and test a trainable endpoint distribution/latent endpoint sampler that improves `endpoint_min_fde` inside public K=20 from the start.
