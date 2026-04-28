@@ -750,3 +750,67 @@ Smoke check:
 - Old best checkpoint still loads under the cleaned model.
 - 111_days 50-batch eval using the cleaned code: `ADE@20=0.1858`, `FDE@20=0.2806`.
 - Pre-cleanup 50-batch reference was `ADE@20=0.1839`, `FDE@20=0.2774`; the cleanup costs about `+0.0019` ADE on old weights, which matches the prior low-contribution diagnosis and should be rechecked by fresh training if this cleaned profile becomes the final default.
+
+## 2026-04-28 Clean Architecture ADE/FDE Bottleneck Audit
+
+Purpose: after cleanup, re-run the module ablation and oracle diagnosis on the current architecture so later changes target the actual remaining ADE/FDE bottleneck instead of stale pre-cleanup branches.
+
+Setup:
+
+- Remote run: `.remote_runs/ade_fde_bottleneck_20260428_142330`.
+- Init checkpoint: `save_model_111days_current_default_full/111_days/seed3407/best_best20.pt`.
+- Short continuation: 3 joint-refiner epochs, 80 train batches/epoch, 50 eval batches.
+- Ablation/diagnostic window: 111_days first 50 test batches, batch size 1024, about `51200` samples.
+- Clean short checkpoint: `ADE@20=0.1852`, `FDE@20=0.2799`.
+
+Structure contribution on the clean checkpoint:
+
+| Variant | ADE@20 | Delta ADE | FDE@20 | Delta FDE | Readout |
+| --- | ---: | ---: | ---: | ---: | --- |
+| default eval | 0.1852 | +0.0000 | 0.2799 | +0.0000 | baseline |
+| no social | 0.2000 | +0.0148 | 0.3054 | +0.0255 | useful, also helps router quality |
+| no router / generic modes | 0.4881 | +0.3029 | 1.1243 | +0.8444 | essential |
+| no endpoint shape refiner | 0.3176 | +0.1324 | 0.2799 | +0.0000 | essential for mid-path ADE, endpoint-preserving |
+| no control shape refiner | 0.3484 | +0.1632 | 0.2799 | +0.0000 | essential for mid-path ADE, endpoint-preserving |
+| no shape refiners | 0.2221 | +0.0369 | 0.2799 | +0.0000 | net ADE gain remains strong |
+| no local basis | 0.1952 | +0.0100 | 0.2799 | +0.0000 | small but real ADE gain |
+| no support-aware local basis | 0.1900 | +0.0048 | 0.2799 | +0.0000 | small stabilizer |
+| no two-stage decoder | 0.4036 | +0.2184 | 0.6807 | +0.4008 | essential for both ADE and FDE |
+| no two-stage endpoint update | 0.2035 | +0.0183 | 0.3503 | +0.0704 | main endpoint/FDE updater |
+| no two-stage coeff update | 0.1884 | +0.0032 | 0.2819 | +0.0020 | minor after cleanup |
+| no coupled decoder | 0.2136 | +0.0284 | 0.3934 | +0.1135 | important endpoint-coeff coupling |
+| no micro coeff anchors | 0.2928 | +0.1076 | 0.3631 | +0.0832 | essential candidate-shape prior |
+
+Oracle diagnosis:
+
+| Diagnostic | ADE | FDE | Meaning |
+| --- | ---: | ---: | --- |
+| actual final | 0.1852 | 0.2799 | current clean checkpoint |
+| force GT proto | 0.1768 | 0.2577 | router has headroom, but not enough alone |
+| coarse before shape refiners | 0.2221 | 0.2799 | shape refiners mainly fix ADE, not FDE |
+| straight endpoint anchor | 0.5513 | 0.2799 | basis/shape modules are doing real path work |
+| current endpoint + LS coeff | 0.0365 | 0.2799 | if endpoint is fixed, basis can nearly fit the path; FDE is locked by endpoint |
+| GT endpoint + predicted coeff | 0.1431 | 0.0000 | endpoint correction alone would remove FDE and also cut ADE |
+| GT endpoint + LS coeff | 0.0169 | 0.0000 | basis space is not the current ADE ceiling |
+
+Bucket diagnosis:
+
+| Bucket | Share | ADE | FDE | Readout |
+| --- | ---: | ---: | ---: | --- |
+| router hit | 94.5% | 0.1651 | 0.2333 | strong majority path |
+| router miss | 5.5% | 0.5298 | 1.0806 | still a severe tail, but too small to explain all remaining FDE |
+| rare samples | 46.5% | 0.2052 | 0.3202 | harder than average and aligned with endpoint miss |
+
+Conclusion:
+
+- Current ADE bottleneck is not the low-rank basis itself: `GT endpoint + LS coeff` reaches `0.0169` ADE, and `current endpoint + LS coeff` reaches `0.0365` ADE.
+- Current FDE bottleneck is endpoint candidate coverage/quality: `endpoint_min_fde=0.2799`, essentially identical to actual `FDE@20=0.2799`, so later shape modules cannot repair the final-point error.
+- Router remains important but no longer explains the full gap: forcing GT prototype only improves `ADE` by `0.0084` and `FDE` by `0.0222`.
+- The endpoint-relevant chain to protect is `router -> two-stage endpoint update -> coupled endpoint-coeff decoder -> micro coeff anchors`; disabling two-stage endpoint or coupled decoder hurts FDE much more than disabling coeff-only update.
+- Endpoint-preserving shape refiners are strong ADE modules but should not be expected to improve FDE by design.
+
+Next direction:
+
+- Stop spending primary effort on coeff-only, shape-refiner-only, or router-only tweaks.
+- The next credible repair must generate better endpoint candidates before final selection, not patch the trajectory after endpoints are fixed. The highest-value target is a joint endpoint/intention generator that preserves the current router prior but gives each prototype a better learned endpoint set or distribution.
+- Any new FDE repair must report both `actual FDE` and `endpoint_min_fde`; if endpoint_minFDE does not move, the change is not fixing the real FDE bottleneck.
