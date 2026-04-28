@@ -814,3 +814,46 @@ Next direction:
 - Stop spending primary effort on coeff-only, shape-refiner-only, or router-only tweaks.
 - The next credible repair must generate better endpoint candidates before final selection, not patch the trajectory after endpoints are fixed. The highest-value target is a joint endpoint/intention generator that preserves the current router prior but gives each prototype a better learned endpoint set or distribution.
 - Any new FDE repair must report both `actual FDE` and `endpoint_min_fde`; if endpoint_minFDE does not move, the change is not fixing the real FDE bottleneck.
+
+## 2026-04-28 Retrieval Endpoint Prior Probe
+
+Purpose: test a non-ASCENT direction for the endpoint/FDE bottleneck: retrieve similar historical observations from the 111_days train split and use their future endpoints as memory candidates. This is inspired by memory/retrieval trajectory prediction, but this run is only a no-training endpoint oracle probe.
+
+Setup:
+
+- Checkpoint: `save_model_clean_bottleneck_e3_111_short/111_days/seed3407/best_best20.pt`.
+- Test window: 111_days first 50 test batches, `51200` samples.
+- Memory source: train split only, so no test future leakage.
+- Retrieval features:
+  - `local`: target observed trajectory normalized by last observed pose, flattened.
+  - `glocal`: `local` plus raw global observed target trajectory, flattened.
+- Metrics below are endpoint minFDE in local coordinates; lower is better.
+
+Main results:
+
+| Candidate source | Memory size | Endpoint minFDE | rare | router-hit | router-miss | Readout |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| current model K=20 | - | 0.2799 | 0.3202 | 0.2333 | 1.0806 | baseline |
+| local retrieval K=20 | 327680 | 0.5579 | 0.6561 | 0.5281 | 1.0689 | retrieval alone is weak |
+| glocal retrieval K=20 | 327680 | 0.4295 | 0.5052 | 0.3878 | 1.1464 | better than local, still weak alone |
+| current15 + glocal retrieval5 | 327680 | 0.3041 | 0.3442 | 0.2485 | 1.2611 | replacing current slots hurts |
+| current10 + glocal retrieval10 | 327680 | 0.3423 | 0.3928 | 0.2871 | 1.2915 | worse |
+| current20 + glocal retrieval20 oracle union | 327680 | 0.2277 | 0.2626 | 0.1961 | 0.7711 | strong complementary endpoint headroom |
+| current model K=20 | - | 0.2799 | 0.3202 | 0.2333 | 1.0806 | repeated baseline |
+| local retrieval K=20 | 1109836 | 0.5764 | 0.6761 | 0.5450 | 1.1164 | full memory not better |
+| glocal retrieval K=20 | 1109836 | 0.4717 | 0.5452 | 0.4258 | 1.2618 | full memory not better |
+| current15 + glocal retrieval5 | 1109836 | 0.3078 | 0.3471 | 0.2510 | 1.2852 | still worse |
+| current20 + glocal retrieval20 oracle union | 1109836 | 0.2319 | 0.2654 | 0.1992 | 0.7941 | similar union headroom |
+
+Conclusion:
+
+- Retrieval is not a drop-in replacement for the current endpoint generator. Its standalone K=20 endpoint minFDE is much worse than the model's current K=20.
+- Retrieval does provide complementary endpoints: the oracle union of current K=20 and retrieval K=20 improves endpoint minFDE from `0.2799` to about `0.228-0.232`, with rare samples improving from `0.3202` to about `0.263-0.265`.
+- The benefit does not survive naive K=20 slot replacement. `current15 + retrieval5` and `current10 + retrieval10` are both worse than the current model, which means the low-score current candidates are still useful and cannot be blindly dropped.
+- Full train memory is not better than the 327k sampled memory in this simple nearest-neighbor setup; more memory adds noisy neighbors unless retrieval/ranking is learned.
+
+Decision:
+
+- Do not implement simple nearest-neighbor retrieval as a default endpoint source.
+- Retrieval remains a credible non-ASCENT direction only if used as an internal candidate pool plus a learned scorer/gate, or as an auxiliary training prior that teaches the endpoint generator where historical alternatives lie.
+- Acceptance condition for any retrieval-based model change: public K=20 `endpoint_min_fde` must improve, not just the K=40 oracle union. Otherwise it repeats the failed tail-rescue pattern.
