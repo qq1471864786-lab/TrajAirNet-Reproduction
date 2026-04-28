@@ -560,6 +560,12 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
                 copied = target.clone()
                 rows = min(value.shape[0], target.shape[0])
                 copied[:rows] = value[:rows].to(device=target.device, dtype=target.dtype)
+                if target.shape[0] > value.shape[0] and "endpoint_head" in key and value.shape[0] % 3 == 0:
+                    extra_rows = target.shape[0] - value.shape[0]
+                    tail_rows = min(extra_rows, value.shape[0])
+                    tail = value[-tail_rows:].to(device=target.device, dtype=target.dtype)
+                    repeats = (extra_rows + tail_rows - 1) // tail_rows
+                    copied[value.shape[0] :] = tail.repeat((repeats,) + (1,) * (tail.dim() - 1))[:extra_rows]
                 compatible_state[key] = copied
                 resized_keys.append(key)
                 continue
