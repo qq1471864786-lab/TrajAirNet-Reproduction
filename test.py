@@ -90,7 +90,6 @@ def build_model(config, checkpoint):
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
         endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
         candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
-        candidate_keep_policy=config.get("candidate_keep_policy", "dense_head"),
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
         micro_endpoint_offsets=bool(config.get("micro_endpoint_offsets", False)),
