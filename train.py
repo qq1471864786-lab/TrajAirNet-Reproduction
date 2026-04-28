@@ -115,6 +115,7 @@ def build_parser():
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
+    parser.add_argument("--candidate_keep_policy", type=str, default="dense_head", choices=["dense_head", "tail_balanced"])
     parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
@@ -527,6 +528,7 @@ def build_model(args, model_artifact):
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
         endpoint_conditioning=args.endpoint_conditioning,
         candidate_dense_topk=args.candidate_dense_topk,
+        candidate_keep_policy=args.candidate_keep_policy,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
         micro_endpoint_offsets=bool(args.micro_endpoint_offsets),
@@ -1094,6 +1096,7 @@ def main():
         "basis_dim": args.basis_dim,
         "endpoint_conditioning": args.endpoint_conditioning,
         "candidate_dense_topk": args.candidate_dense_topk,
+        "candidate_keep_policy": args.candidate_keep_policy,
         "coupled_decoder": bool(args.coupled_decoder),
         "coupled_decoder_iters": args.coupled_decoder_iters,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),

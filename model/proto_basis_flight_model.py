@@ -557,6 +557,7 @@ class ProtoBasisNet(nn.Module):
         use_micro_coeff_anchors=False,
         endpoint_conditioning="rank",
         candidate_dense_topk=0,
+        candidate_keep_policy="dense_head",
         coupled_decoder=False,
         coupled_decoder_iters=0,
         micro_endpoint_offsets=False,
@@ -583,6 +584,7 @@ class ProtoBasisNet(nn.Module):
         self.n_micro = n_micro
         self.num_modes = topk_proto * n_micro
         self.candidate_dense_topk = int(candidate_dense_topk or 0)
+        self.candidate_keep_policy = candidate_keep_policy
         self.disable_social = disable_social
         self.disable_router = disable_router
         self.disable_refiner = disable_refiner
@@ -735,7 +737,15 @@ class ProtoBasisNet(nn.Module):
         else:
             self.endpoint_set_refiner = None
         keep_indices = []
-        if 0 < self.candidate_dense_topk < self.topk_proto and self.n_micro > 1:
+        if self.candidate_keep_policy == "tail_balanced" and self.n_micro > 1:
+            extra_micro_ranks = {0, 1, 2, 5, 6}
+            for proto_rank in range(self.topk_proto):
+                keep_indices.append(proto_rank * self.n_micro)
+                if proto_rank in extra_micro_ranks:
+                    keep_indices.append(proto_rank * self.n_micro + 1)
+        elif self.candidate_keep_policy != "dense_head":
+            raise ValueError(f"Unsupported candidate_keep_policy: {self.candidate_keep_policy}")
+        elif 0 < self.candidate_dense_topk < self.topk_proto and self.n_micro > 1:
             for proto_rank in range(self.topk_proto):
                 micro_count = self.n_micro if proto_rank < self.candidate_dense_topk else 1
                 for micro_rank in range(micro_count):
