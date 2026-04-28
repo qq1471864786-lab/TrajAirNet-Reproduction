@@ -543,6 +543,32 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
         return None
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("model", checkpoint)
+    if allow_partial:
+        model_state = model.state_dict()
+        compatible_state = {}
+        resized_keys = []
+        skipped_keys = []
+        for key, value in state_dict.items():
+            target = model_state.get(key)
+            if target is None:
+                skipped_keys.append(key)
+                continue
+            if value.shape == target.shape:
+                compatible_state[key] = value
+                continue
+            if value.dim() == target.dim() and all(src == dst for src, dst in zip(value.shape[1:], target.shape[1:])):
+                copied = target.clone()
+                rows = min(value.shape[0], target.shape[0])
+                copied[:rows] = value[:rows].to(device=target.device, dtype=target.dtype)
+                compatible_state[key] = copied
+                resized_keys.append(key)
+                continue
+            skipped_keys.append(key)
+        state_dict = compatible_state
+        if resized_keys:
+            print("[Init] resized keys:", ", ".join(resized_keys[:12]) + (" ..." if len(resized_keys) > 12 else ""))
+        if skipped_keys:
+            print("[Init] skipped incompatible keys:", ", ".join(skipped_keys[:12]) + (" ..." if len(skipped_keys) > 12 else ""))
     load_result = model.load_state_dict(state_dict, strict=not allow_partial)
     missing = list(getattr(load_result, "missing_keys", []))
     unexpected = list(getattr(load_result, "unexpected_keys", []))
