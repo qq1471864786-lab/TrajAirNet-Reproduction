@@ -112,6 +112,7 @@ def build_model(config, checkpoint):
         candidate_selection=config.get("candidate_selection", "fixed"),
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
+        set_endpoint_decoder=bool(config.get("set_endpoint_decoder", False)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),
