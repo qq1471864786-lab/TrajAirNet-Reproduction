@@ -78,14 +78,6 @@ def _prototype_loss(logits, targets, proto_frequency=None, focal_gamma=0.0, freq
     return loss.mean()
 
 
-def _prototype_topk_margin_loss(logits, targets, topk, margin):
-    if topk <= 0 or topk >= logits.size(1):
-        return logits.sum() * 0.0
-    threshold = logits.topk(topk, dim=-1).values[:, -1]
-    target_logit = logits.gather(1, targets[:, None]).squeeze(1)
-    return F.relu(threshold + float(margin) - target_logit).mean()
-
-
 def _gt_proto_aligned_losses(pred_xyz, gt_xyz, top_proto_idx, gt_proto_id, ade):
     if top_proto_idx is None or top_proto_idx.size(1) != pred_xyz.size(1):
         zero = pred_xyz.sum() * 0.0
@@ -249,9 +241,6 @@ class ProtoBasisLoss(nn.Module):
         projection_supervision="none",
         lambda_endpoint_coverage=0.0,
         lambda_endpoint_delta=0.0,
-        lambda_proto_topk_margin=0.0,
-        proto_topk_margin=0.2,
-        proto_topk=0,
     ):
         super().__init__()
         if endpoint_residual_supervision not in {"all", "hit_only"}:
@@ -285,9 +274,6 @@ class ProtoBasisLoss(nn.Module):
         self.projection_supervision = projection_supervision
         self.lambda_endpoint_coverage = lambda_endpoint_coverage
         self.lambda_endpoint_delta = lambda_endpoint_delta
-        self.lambda_proto_topk_margin = lambda_proto_topk_margin
-        self.proto_topk_margin = proto_topk_margin
-        self.proto_topk = int(proto_topk or 0)
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -321,12 +307,6 @@ class ProtoBasisLoss(nn.Module):
             focal_gamma=self.proto_focal_gamma,
             freq_weight_power=self.proto_freq_weight_power,
             freq_weight_max=self.proto_freq_weight_max,
-        )
-        proto_topk_margin_loss = _prototype_topk_margin_loss(
-            proto_logits,
-            gt_proto_id,
-            self.proto_topk or top_proto_idx.size(1),
-            self.proto_topk_margin,
         )
 
         match_mask = top_proto_idx.eq(gt_proto_id.unsqueeze(1))
@@ -412,13 +392,11 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_projection_path * projection_path_loss
         total = total + self.lambda_endpoint_coverage * endpoint_coverage_loss
         total = total + self.lambda_endpoint_delta * endpoint_delta_loss
-        total = total + self.lambda_proto_topk_margin * proto_topk_margin_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
             "fde": float(fde_loss.detach().item()),
             "proto": float(proto_loss.detach().item()),
-            "proto_topk_margin": float(proto_topk_margin_loss.detach().item()),
             "res": float(res_loss.detach().item()),
             "score": float(score_loss.detach().item()),
             "div": float(div_loss.detach().item()),

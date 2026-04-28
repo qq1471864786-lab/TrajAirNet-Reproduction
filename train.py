@@ -41,7 +41,6 @@ LOSS_STAT_KEYS = (
     "xyz",
     "fde",
     "proto",
-    "proto_topk_margin",
     "res",
     "score",
     "div",
@@ -197,8 +196,6 @@ def build_parser():
     parser.add_argument("--proto_focal_gamma", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_power", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_max", type=float, default=5.0)
-    parser.add_argument("--lambda_proto_topk_margin", type=float, default=0.0)
-    parser.add_argument("--proto_topk_margin", type=float, default=0.2)
     parser.add_argument(
         "--endpoint_residual_supervision",
         type=str,
@@ -1068,9 +1065,6 @@ def main():
         projection_supervision=args.projection_supervision,
         lambda_endpoint_coverage=args.lambda_endpoint_coverage,
         lambda_endpoint_delta=args.lambda_endpoint_delta,
-        lambda_proto_topk_margin=args.lambda_proto_topk_margin,
-        proto_topk_margin=args.proto_topk_margin,
-        proto_topk=args.topk_proto,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1113,8 +1107,6 @@ def main():
         "lambda_projection_path": args.lambda_projection_path,
         "lambda_endpoint_coverage": args.lambda_endpoint_coverage,
         "lambda_endpoint_delta": args.lambda_endpoint_delta,
-        "lambda_proto_topk_margin": args.lambda_proto_topk_margin,
-        "proto_topk_margin": args.proto_topk_margin,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
