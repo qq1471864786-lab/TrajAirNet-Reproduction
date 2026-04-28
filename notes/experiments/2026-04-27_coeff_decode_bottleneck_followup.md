@@ -1115,3 +1115,36 @@ Default-chain smoke:
 - `test.py` now resolves old main-protocol checkpoints without a stored `candidate_selection` field to `tail_swap`; `--candidate_selection fixed` remains the explicit old-mask reproduction path.
 - 111_days 100-batch default smoke, no candidate override: `ADE@20=0.1860`, `FDE@20=0.2760`, `rare_FDE@20=0.6783`.
 - 111_days 100-batch fixed override: `ADE@20=0.1858`, `FDE@20=0.2806`, `rare_FDE@20=0.6896`.
+
+### Final endpoint/FDE bottleneck repair probes
+
+Purpose: after tail-swap fixed the biggest public `K=20` compression issue, test whether the remaining FDE gap can be repaired without changing the core ProtoBasis story or adding a large ASCENT-like dynamics decoder.
+
+Tested probes:
+
+| Probe | Setup | ADE@20 | FDE@20 | Decision |
+| --- | --- | ---: | ---: | --- |
+| continue control, no new loss | 3 epochs, 60 train batches/epoch, 80 eval batches | 0.177872 | 0.266229 | reference |
+| endpoint admission loss, `lambda=0.04` | same budget | 0.177802 | 0.266339 | ADE neutral, FDE slightly worse; do not keep |
+| endpoint coverage loss, `lambda=0.08` | same budget | 0.177798 | 0.265999 | tiny FDE gain only |
+| endpoint coverage loss, `lambda=0.04` | same budget | 0.177823 | 0.266091 | tiny FDE gain only |
+| endpoint coverage refiner head + coverage loss | same budget, partial init | 0.177983 | 0.267119 | worse; do not keep |
+| refined tail-swap after shape refiners | no retrain, 100-batch eval | 0.1888 | 0.2823 | identical to tail-swap because refiners preserve endpoints |
+| more aggressive tail-swap variants | no retrain, 60-batch scan | best FDE lower but ADE worse | mixed | not clean enough to promote |
+| mid control, no new loss | 5 epochs, 120 train batches/epoch, 100 eval batches | 0.187844 best20 | about 0.2816 in 100-batch test | reference |
+| mid endpoint coverage loss, `lambda=0.04` | same budget | 0.187739 best20 | about 0.2816 in 100-batch test | ADE +0.0001 only, FDE unchanged |
+
+Readout:
+
+- The remaining FDE weakness is real but now small relative to the validated tail-swap gain.
+- Directly supervising endpoint admission through candidate scores does not move the public K=20 set enough.
+- A new endpoint correction head is not justified: it adds parameters and partial-init complexity while worsening the short validation.
+- Endpoint-preserving shape refiners cannot fix FDE by construction; they should stay framed as ADE/path-shape modules.
+- More aggressive all-30 compression can reduce FDE in some windows, but it trades away ADE and is too brittle for the default.
+
+Decision:
+
+- Do not promote endpoint admission loss, endpoint coverage loss, endpoint coverage refiner, or `tail_swap_refined`.
+- Keep the current score-biased `tail_swap` rule as the final default candidate-compression repair.
+- Treat the large architecture bottlenecks as closed for now: router, coefficient/path decoding, endpoint shape, and candidate compression have all been probed with controlled short tests, and the only robust default improvement is tail-swap.
+- Next work should move to paper ablations/full reruns rather than further architecture chasing, unless a new oracle shows a much larger gain than the current sub-`0.001` endpoint probes.
