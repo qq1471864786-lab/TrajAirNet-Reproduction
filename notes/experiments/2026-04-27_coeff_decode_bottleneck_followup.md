@@ -1185,3 +1185,58 @@ Decision:
 - The direction is not false: it gives about `0.001` to `0.0015` FDE improvement and improves rare_FDE in the short window.
 - The magnitude is too small relative to added parameters (`~168k`) and another loss term, so it is not paper-defensible as a new default module.
 - This reinforces the current conclusion: remaining endpoint/FDE weakness is a shallow residual issue after tail-swap, not a large remaining architecture bottleneck under the current candidate/prototype formulation.
+
+## 2026-04-29 Module/Loss Cleanup Audit
+
+Purpose: re-check active modules and training losses under one matched window, then remove low-return clutter from the default architecture/training path.
+
+Setup:
+
+- Checkpoint: `save_model_111days_current_default_full/111_days/seed3407/best_best20.pt`.
+- Module audit: same checkpoint, 111_days first 100 test batches, batch size 1024, one inference module disabled at a time.
+- Loss audit: same checkpoint init, 3 polish epochs, 80 train batches/epoch, 50 eval batches.
+- Scratch sanity: 6 short epochs from random init, 80 train batches/epoch, 50 eval batches.
+
+Module audit:
+
+| Variant | ADE@20 | Delta ADE | FDE@20 | Delta FDE | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| default | 0.1888 | +0.0000 | 0.2823 | +0.0000 | baseline |
+| no social | 0.2085 | +0.0197 | 0.3212 | +0.0389 | keep |
+| no endpoint shape refiner | 0.3172 | +0.1284 | 0.2823 | +0.0000 | keep |
+| no control shape refiner | 0.3636 | +0.1748 | 0.2823 | +0.0000 | keep |
+| no shape refiners | 0.2227 | +0.0339 | 0.2823 | +0.0000 | keep |
+| no local basis | 0.1977 | +0.0089 | 0.2823 | +0.0000 | keep, small positive |
+| no support-aware local basis | 0.1947 | +0.0059 | 0.2823 | +0.0000 | keep, small positive |
+| no two-stage endpoint | 0.2107 | +0.0219 | 0.3658 | +0.0835 | keep |
+| no two-stage coeff | 0.1913 | +0.0025 | 0.2830 | +0.0007 | low contribution |
+| no two-stage decoder | 0.4117 | +0.2229 | 0.6794 | +0.3971 | keep |
+| no coupled decoder | 0.2197 | +0.0309 | 0.4119 | +0.1296 | keep |
+| no micro coeff anchors | 0.2841 | +0.0953 | 0.3606 | +0.0783 | keep |
+| candidate fixed | 0.1891 | +0.0003 | 0.2864 | +0.0041 | keep tail-swap for FDE/rare |
+
+Loss audit:
+
+| Variant | Best ADE@20 | Delta ADE | Best FDE@20 | Delta FDE | Decision |
+| --- | ---: | ---: | ---: | ---: | --- |
+| full default losses | 0.18468 | +0.00000 | 0.27484 | +0.00000 | reference |
+| no coeff/smooth/div | 0.18451 | -0.00017 | 0.27531 | +0.00047 | disable these by default |
+| no score/res | 0.18465 | -0.00002 | 0.27490 | +0.00005 | endpoint residual loss removable; keep score for candidate ranking |
+| no gt-proto shape/fde/coeff | 0.18571 | +0.00104 | 0.27632 | +0.00147 | keep |
+| minimal keep-gt loss (`xyz/fde/proto/score/gt-proto`) | 0.18470 | +0.00002 | 0.27542 | +0.00058 | acceptable simplified default |
+| no two-stage coeff, short continuation | 0.18499 | +0.00031 | 0.27439 | -0.00045 | remove branch for simplicity |
+
+Scratch sanity:
+
+| Variant | Best ADE@20 | FDE@20 | Readout |
+| --- | ---: | ---: | --- |
+| default loss, 6 short epochs | 0.31059 | 0.45722 | reference |
+| simplified loss, 6 short epochs | 0.30839 | 0.45421 | no early-training regression |
+
+Cleanup decision:
+
+- Keep core modules: router, social aggregation, micro coefficient anchors, two-stage endpoint update, coupled endpoint-coeff decoder, local basis, endpoint shape refiner, and control shape refiner.
+- Remove the low-return two-stage coefficient update branch from the active model path. Old checkpoints remain loadable by filtering `stage2_coeff_head.*`.
+- Disable/remove low-return training auxiliaries: endpoint residual loss, diversity repulsion, coefficient L2, and trajectory smoothness.
+- Keep candidate `score` loss because `tail_swap` uses candidate scores and removing it saves little complexity.
+- Keep GT-prototype shape/FDE/coeff losses because the matched ablation showed a clear ADE/FDE drop without them.

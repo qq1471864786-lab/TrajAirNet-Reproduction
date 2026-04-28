@@ -467,7 +467,6 @@ class ProtoBasisNet(nn.Module):
         support_aware_local_basis=False,
         two_stage_decoder=False,
         two_stage_update_endpoint=True,
-        two_stage_update_coeff=True,
         dropout=0.1,
         proto_summary_5d: Optional[torch.Tensor] = None,
         proto_frequency: Optional[torch.Tensor] = None,
@@ -509,7 +508,6 @@ class ProtoBasisNet(nn.Module):
         self.support_aware_local_basis = support_aware_local_basis
         self.two_stage_decoder = two_stage_decoder
         self.two_stage_update_endpoint = two_stage_update_endpoint
-        self.two_stage_update_coeff = two_stage_update_coeff
         self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
@@ -602,11 +600,9 @@ class ProtoBasisNet(nn.Module):
                 nn.LayerNorm(d_model),
             )
             self.stage2_endpoint_head = nn.Linear(d_model, 3)
-            self.stage2_coeff_head = nn.Linear(d_model, basis_dim)
         else:
             self.stage2_proj = None
             self.stage2_endpoint_head = None
-            self.stage2_coeff_head = None
         if self.coupled_decoder_enabled:
             self.coupled_decoder = CoupledEndpointCoeffDecoder(
                 d_model=d_model,
@@ -756,10 +752,6 @@ class ProtoBasisNet(nn.Module):
             stage2_query = query_feat + self.stage2_proj(stage2_input)
             if self.two_stage_update_endpoint:
                 endpoint_mode_local = endpoint_mode_local + self.stage2_endpoint_head(stage2_query)
-            if self.two_stage_update_coeff:
-                stage2_coeff_delta = self.stage2_coeff_head(stage2_query)
-                coeff = coeff + stage2_coeff_delta
-                coeff_delta = coeff_delta + stage2_coeff_delta
             anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
             coarse_local = self.basis_bank(anchor_local, coeff)
             active_query = stage2_query

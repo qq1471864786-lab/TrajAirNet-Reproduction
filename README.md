@@ -19,12 +19,17 @@ Current default protocol:
 - `candidate_selection = tail_swap`
 - `basis_dim = 16`
 - `local_basis_dim = 2`
+- `two_stage_decoder = true` with endpoint update only
+- `coupled_decoder = true`
 - `endpoint_shape_refiner = true`
 - `control_shape_refiner = true`
 - `control_shape_points = 32`
+- default training losses: `xyz + fde + proto + score + gt_proto_shape/fde/coeff`
 - `best@5 / best@20`
 
 The model builds 30 internal candidates from 15 routed prototypes x 2 micro modes, then compresses them to the public K=20 budget. The current default is score-biased `tail_swap`: high-confidence early slots are preserved, and up to two low-confidence tail slots can be replaced by better-scored, diverse internal candidates. Use `--candidate_selection fixed` to reproduce the previous fixed top-5-dense K20 mask.
+
+Low-contribution training auxiliaries are disabled by default after the 2026-04-29 cleanup: endpoint residual supervision, diversity repulsion, coefficient L2, smoothness, and the two-stage coefficient update were not retained in matched short ablations.
 
 Current default training command:
 

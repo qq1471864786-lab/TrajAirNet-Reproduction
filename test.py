@@ -56,7 +56,6 @@ def build_parser():
     parser.add_argument("--ablate_no_support_aware_local_basis", action="store_true")
     parser.add_argument("--ablate_no_two_stage_decoder", action="store_true")
     parser.add_argument("--ablate_no_two_stage_endpoint", action="store_true")
-    parser.add_argument("--ablate_no_two_stage_coeff", action="store_true")
     parser.add_argument("--ablate_no_coupled_decoder", action="store_true")
     parser.add_argument("--ablate_no_micro_coeff_anchors", action="store_true")
     parser.add_argument(
@@ -92,7 +91,6 @@ def build_model(config, checkpoint):
         support_aware_local_basis=config.get("support_aware_local_basis", False),
         two_stage_decoder=bool(config.get("two_stage_decoder", False)),
         two_stage_update_endpoint=not config.get("no_two_stage_update_endpoint", False),
-        two_stage_update_coeff=not config.get("no_two_stage_update_coeff", False),
         dropout=config["dropout"],
         proto_summary_5d=torch.tensor(checkpoint["proto_summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(checkpoint["proto_freq"], dtype=torch.float32),
@@ -140,6 +138,7 @@ def drop_removed_state_keys(state_dict):
         "micro_endpoint_head.",
         "endpoint_set_refiner.",
         "query_decoder.gate_head.",
+        "stage2_coeff_head.",
     )
     return {
         key: value
@@ -192,8 +191,6 @@ def apply_eval_ablation_overrides(model, args):
         model.two_stage_decoder = False
     if args.ablate_no_two_stage_endpoint:
         model.two_stage_update_endpoint = False
-    if args.ablate_no_two_stage_coeff:
-        model.two_stage_update_coeff = False
     if args.ablate_no_coupled_decoder:
         model.coupled_decoder = None
         model.coupled_decoder_enabled = False

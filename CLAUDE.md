@@ -18,6 +18,8 @@ Language: English academic. Writing style: direct, precise, no overclaiming.
 4. **Social Aggregator**: cross-attention over neighboring aircraft (ASCENT has none)
 5. **Shape Refinement**: endpoint-preserving shape/control-point refiners
 
+Current cleanup stance: keep the endpoint update path, coupled endpoint-coeff decoder, micro coefficient anchors, local basis, and shape refiners. Do not re-add low-contribution auxiliaries without new evidence: endpoint residual loss, diversity loss, coefficient L2, smoothness loss, or the two-stage coefficient update.
+
 ## Verified Numbers (do not change without re-running experiments)
 ### Main Table (111_days, K=20)
 | Method | ADE@20 | FDE@20 |

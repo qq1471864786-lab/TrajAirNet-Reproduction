@@ -41,18 +41,12 @@ LOSS_STAT_KEYS = (
     "xyz",
     "fde",
     "proto",
-    "res",
     "score",
-    "div",
-    "coeff",
-    "smooth",
     "gt_proto_shape",
     "gt_proto_fde",
     "gt_proto_coeff",
     "gt_proto_hit_rate",
     "winner_ade",
-    "res_hit_rate",
-    "res_miss_rate",
 )
 
 ANSI_GREEN = "\033[92m"
@@ -84,7 +78,6 @@ def build_parser():
     parser.add_argument("--two_stage_decoder", dest="two_stage_decoder", action="store_true")
     parser.add_argument("--no_two_stage_decoder", dest="two_stage_decoder", action="store_false")
     parser.add_argument("--no_two_stage_update_endpoint", action="store_true")
-    parser.add_argument("--no_two_stage_update_coeff", action="store_true")
     parser.set_defaults(two_stage_decoder=None)
     parser.add_argument("--coupled_decoder", dest="coupled_decoder", action="store_true")
     parser.add_argument("--no_coupled_decoder", dest="coupled_decoder", action="store_false")
@@ -137,8 +130,6 @@ def build_parser():
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
     parser.add_argument("--min_lr", type=float, default=1.5e-5)
     parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra polish epochs.")
-    parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
-    parser.add_argument("--stage_c_div_weight", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
@@ -156,11 +147,7 @@ def build_parser():
     parser.add_argument("--lambda_xyz", type=float, default=1.0)
     parser.add_argument("--lambda_fde", type=float, default=1.0)
     parser.add_argument("--lambda_proto", type=float, default=0.35)
-    parser.add_argument("--lambda_res", type=float, default=0.2)
     parser.add_argument("--lambda_score", type=float, default=0.03)
-    parser.add_argument("--lambda_div", type=float, default=0.05)
-    parser.add_argument("--lambda_coeff", type=float, default=0.02)
-    parser.add_argument("--lambda_smooth", type=float, default=0.10)
     parser.add_argument("--lambda_gt_proto_shape", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_fde", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_coeff", type=float, default=None)
@@ -170,14 +157,6 @@ def build_parser():
     parser.add_argument("--proto_focal_gamma", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_power", type=float, default=0.0)
     parser.add_argument("--proto_freq_weight_max", type=float, default=5.0)
-    parser.add_argument(
-        "--endpoint_residual_supervision",
-        type=str,
-        default="all",
-        choices=["all", "hit_only"],
-        help="Use legacy endpoint residual supervision for all samples or only samples whose GT prototype is in top-k.",
-    )
-
     parser.add_argument("--disable_social", action="store_true")
     parser.add_argument("--disable_router", action="store_true")
 
@@ -324,9 +303,6 @@ def apply_training_defaults(args):
         args.early_stop_patience = 5 if is_unified and is_main_dataset else 0
     if args.early_stop_min_epoch is None:
         args.early_stop_min_epoch = 15 if is_unified and is_main_dataset else 0
-    if args.stage_c_div_weight is None:
-        args.stage_c_div_weight = 1.0 if is_unified and is_main_dataset else 2.0
-
     if args.lambda_gt_proto_shape is None:
         args.lambda_gt_proto_shape = 0.15 if is_unified and is_main_dataset else 0.0
     if args.lambda_gt_proto_fde is None:
@@ -355,14 +331,12 @@ def stage_config(epoch, args):
         return {
             "name": "basis_warmup",
             "force_gt_proto": True,
-            "div_weight": 0.0,
             "rare_weight": 1.0,
         }
     if epoch <= args.phase_a_epochs + args.phase_b_epochs:
         return {
             "name": "joint_router",
             "force_gt_proto": False,
-            "div_weight": args.stage_b_div_weight,
             "rare_weight": 1.0,
         }
     stage_name = "joint_polish"
@@ -371,7 +345,6 @@ def stage_config(epoch, args):
     return {
         "name": stage_name,
         "force_gt_proto": False,
-        "div_weight": args.stage_c_div_weight,
         "rare_weight": 1.5,
     }
 
@@ -450,7 +423,6 @@ def build_model(args, model_artifact):
         support_aware_local_basis=args.support_aware_local_basis,
         two_stage_decoder=bool(args.two_stage_decoder),
         two_stage_update_endpoint=not args.no_two_stage_update_endpoint,
-        two_stage_update_coeff=not args.no_two_stage_update_coeff,
         dropout=args.dropout,
         proto_summary_5d=torch.tensor(model_artifact["summary_5d"], dtype=torch.float32),
         proto_frequency=torch.tensor(model_artifact["frequency"], dtype=torch.float32),
@@ -484,6 +456,7 @@ def drop_removed_state_keys(state_dict):
         "micro_endpoint_head.",
         "endpoint_set_refiner.",
         "query_decoder.gate_head.",
+        "stage2_coeff_head.",
     )
     return {
         key: value
@@ -867,12 +840,7 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"xyz={format_scalar(loss_stats['xyz'])}",
         f"fde={format_scalar(loss_stats['fde'])}",
         f"proto={format_scalar(loss_stats['proto'])}",
-        f"res={format_scalar(loss_stats['res'])}",
-        f"res_hit={format_scalar(loss_stats['res_hit_rate'])}",
         f"score={format_scalar(loss_stats['score'])}",
-        f"div={format_scalar(loss_stats['div'])}",
-        f"coeff={format_scalar(loss_stats['coeff'])}",
-        f"smooth={format_scalar(loss_stats['smooth'])}",
         f"gt_shape={format_scalar(loss_stats['gt_proto_shape'])}",
         f"gt_fde={format_scalar(loss_stats['gt_proto_fde'])}",
         f"gt_coeff={format_scalar(loss_stats['gt_proto_coeff'])}",
@@ -963,11 +931,7 @@ def main():
         lambda_xyz=args.lambda_xyz,
         lambda_fde=args.lambda_fde,
         lambda_proto=args.lambda_proto,
-        lambda_res=args.lambda_res,
         lambda_score=args.lambda_score,
-        lambda_div=args.lambda_div,
-        lambda_coeff=args.lambda_coeff,
-        lambda_smooth=args.lambda_smooth,
         lambda_gt_proto_shape=args.lambda_gt_proto_shape,
         lambda_gt_proto_fde=args.lambda_gt_proto_fde,
         lambda_gt_proto_coeff=args.lambda_gt_proto_coeff,
@@ -977,7 +941,6 @@ def main():
         proto_focal_gamma=args.proto_focal_gamma,
         proto_freq_weight_power=args.proto_freq_weight_power,
         proto_freq_weight_max=args.proto_freq_weight_max,
-        endpoint_residual_supervision=args.endpoint_residual_supervision,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1007,7 +970,6 @@ def main():
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
-        "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
