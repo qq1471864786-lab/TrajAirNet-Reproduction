@@ -493,7 +493,6 @@ def select_metric_subset(metrics: dict[str, Any]) -> dict[str, Any]:
         "ADE@20",
         "FDE@20",
         "rare_FDE@20",
-        "GLeV@20",
         "Top1_ADE",
         "Top1_FDE",
         "proto_top1_acc",
@@ -621,7 +620,7 @@ def print_compact_summary(summary: dict[str, Any]) -> None:
     if summary.get("peak_memory_mb") is not None:
         latest_parts.append(f"mem={format_scalar(summary.get('peak_memory_mb'), digits=1)}MB")
     metrics = summary.get("metrics") or {}
-    for name in ("ADE@5", "FDE@5", "ADE@20", "FDE@20", "rare_FDE@20", "GLeV@20"):
+    for name in ("ADE@5", "FDE@5", "ADE@20", "FDE@20", "rare_FDE@20"):
         if name in metrics:
             latest_parts.append(f"{name}={format_scalar(metrics[name])}")
     if latest_parts:

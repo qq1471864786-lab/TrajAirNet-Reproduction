@@ -49,8 +49,6 @@ Primary reported metrics:
 - `FDE@5`
 - `ADE@20`
 - `FDE@20`
-- `GLeV@5`
-- `GLeV@20`
 - `rare_FDE@20`
 
 Ablation switches:

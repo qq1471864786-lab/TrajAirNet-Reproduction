@@ -42,13 +42,13 @@ ASCENT Table II 也使用相同协议（明确写了 "following the setup of [Go
 
 | 论文 | 表格 | 数据集 | 输入 | 预测 | 采样率 | K | 指标 |
 |---|---|---|---|---|---|---|---|
-| GooDFlight Table I | 111_days | 40s/40步 | 120s/120步 | 1Hz | 20 | ADE/FDE/GLeV |
+| GooDFlight Table I | 111_days | 40s/40步 | 120s/120步 | 1Hz | 20 | ADE/FDE |
 | GooDFlight Table II | 7days1~4 | 40s/40步 | 120s/120步 | 1Hz | 20 | ADE/FDE |
 | ASCENT Table II 上 | 111_days | 40s/40步 | 120s/120步 | 1Hz | 20 | ADE/FDE |
 | ASCENT Table II 下 | 111_days | 11s/11步 | 120s/12步 | 1Hz→0.1Hz | 5 | ADE/FDE |
 | ASCENT Table I 上 | 7days1~4 | 11s/11步 | 120s/12步 | 1Hz→0.1Hz | 5 | ADE/FDE |
 | ASCENT Table I 下 | 7days1~4 | 16s/16步 | 120s/24步 | 0.2Hz | 5 | ADE/FDE |
-| **我们** | **全部** | **40s/40步** | **120s/120步** | **1Hz** | **20** | **ADE/FDE/GLeV** |
+| **我们** | **全部** | **40s/40步** | **120s/120步** | **1Hz** | **20** | **ADE/FDE** |
 
 ### 2.3 关键结论
 
@@ -82,17 +82,7 @@ ASCENT Table II 也使用相同协议（明确写了 "following the setup of [Go
 | ASCENT | 0.19 | 0.26 | ASCENT Tab.II |
 | **ProtoBasis-Net (Ours)** | **待填** | **待填** | — |
 
-GLeV 单独列或单独小表（只有 GooDFlight 报了 GLeV）：
-
-| Method | GLeV↑ | 来源 |
-|---|---|---|
-| TrajAirNet | 0.0024 | GooDFlight Tab.III |
-| Social-PatteRNN-ATT | 0.0024 | GooDFlight Tab.III |
-| MID | 0.0024 | GooDFlight Tab.III |
-| GooDFlight | 0.0120 | GooDFlight Tab.III |
-| **ProtoBasis-Net (Ours)** | **待填** | — |
-
-GLeV 按 GooDFlight 定义为 `local_var / global_var`，方向为 higher-is-better。当前项目公式方向与 GooDFlight 一致，但本项目 `GLeV@20` 的量级可能与 GooDFlight Table III 相差较大；写论文主结论前必须核对 K、top-n nearest endpoints、候选筛选和单位。
+不使用 GLeV 做横向对比。GooDFlight 原文提出该指标，但公式、文字解释和数值量级不够清晰，当前项目只把 ADE/FDE 作为公平主指标。
 
 注意：GooDFlight 自报 ADE=0.27/FDE=0.35，ASCENT 复现报 0.29/0.39。
 论文中统一引 ASCENT 的数字（因为主表其他 baseline 也来自 ASCENT），
@@ -116,14 +106,14 @@ GLeV 按 GooDFlight 定义为 `local_var / global_var`，方向为 higher-is-bet
 
 数据集：111_days，协议：`trajair_40to120_best20`
 
-| 配置 | ADE@20↓ | FDE@20↓ | GLeV↑ |
-|---|---|---|---|
-| Full model | 待填 | 待填 | 待填 |
-| w/o Prototype Router (--disable_router) | 待填 | 待填 | 待填 |
-| w/o SVD Basis Bank | 待填 | 待填 | 待填 |
-| w/o Micro expansion (`--topk_proto 20 --micro_per_proto 1 --candidate_dense_topk 0`) | 待填 | 待填 | 待填 |
-| w/o Temporal Refiner (--disable_refiner) | 待填 | 待填 | 待填 |
-| w/o Social Aggregator (--disable_social) | 待填 | 待填 | 待填 |
+| 配置 | ADE@20↓ | FDE@20↓ |
+|---|---|---|
+| Full model | 待填 | 待填 |
+| w/o Prototype Router (--disable_router) | 待填 | 待填 |
+| w/o SVD Basis Bank | 待填 | 待填 |
+| w/o Micro expansion (`--topk_proto 20 --micro_per_proto 1 --candidate_dense_topk 0`) | 待填 | 待填 |
+| w/o Temporal Refiner (--disable_refiner) | 待填 | 待填 |
+| w/o Social Aggregator (--disable_social) | 待填 | 待填 |
 
 ### 不做的实验
 
@@ -195,12 +185,11 @@ GLeV 按 GooDFlight 定义为 `local_var / global_var`，方向为 higher-is-bet
 
 ### 5.3 vs ASCENT (arXiv 2026)
 - ASCENT：纯Transformer + 模式查询解码，无基分解，无多样性指标
-- 我们：原型路由 + SVD基分解 + 微模式扩展 + GLeV多样性评估
+- 我们：原型路由 + SVD基分解 + 微模式扩展 + 可解释候选结构
 - ASCENT ADE@20=0.19 优于我们的 0.228
 - **应对策略**：
-  1. 我们报告 GLeV（ASCENT 未报告），展示多样性优势
-  2. 强调结构化先验的可解释性
-  3. 用 "competitive with" 描述关系，不硬碰数字
+  1. 强调结构化先验的可解释性
+  2. 用 "competitive with" 描述关系，不硬碰数字
 
 ### 5.4 vs GooDFlight (2025)
 - GooDFlight：扩散模型 + goal estimation + CFG意图调节
@@ -277,7 +266,7 @@ Method → Experiments → Related Work → Introduction → Abstract
 - 4.2 Main Results — Table 1 (111_days SOTA对比)
 - 4.3 Generalization — Table 2 (7days1~4 对比)
 - 4.4 Ablation Study — Table 3
-- 4.5 Diversity Analysis (GLeV)
+- 4.5 Qualitative and Case Analysis
 - Figure 2: 轨迹可视化
 
 **5. Conclusion** (~0.5 page)
@@ -289,13 +278,13 @@ Method → Experiments → Related Work → Introduction → Abstract
 | Table 1 | 111_days SOTA对比 (ADE@20/FDE@20) | ASCENT Tab.II | 必须 |
 | Table 2 | 7days1~4 泛化 (ADE@20/FDE@20) | GooDFlight Tab.II | 必须 |
 | Table 3 | 消融实验 | — | 必须 |
-| Table 4 | GLeV 多样性对比 | GooDFlight Tab.III | 推荐 |
+| Table 4 | 定性案例 / 误差分解 | — | 推荐 |
 
 ### 7.3 需要的图表
 
 - Figure 1: 架构总图（必须）
 - Figure 2: 轨迹可视化，2-3个场景（必须）
-- Figure 3: GLeV/多样性柱状图（可选）
+- Figure 3: 典型场景可视化或误差分解图（可选）
 
 ---
 
@@ -331,7 +320,7 @@ python train.py 111_days \
 
 ### 9.1 ASCENT 数字更优
 - ASCENT ADE@20=0.19 vs 我们 0.228
-- 应对：报 GLeV（ASCENT 没报），强调结构化多样性和可解释性
+- 应对：强调结构化先验、社会交互建模和可解释候选分解
 - 用 "competitive with" 而非 "state-of-the-art"
 
 ### 9.2 7days1 仍未超过 GooDFlight
@@ -361,7 +350,7 @@ python train.py 111_days \
 
 ### 10.2 引用策略
 - 主表 baseline 数字统一引 ASCENT Table II
-- GLeV 数字引 GooDFlight Table III
+- 不引用 GLeV 数字作横向比较
 - 7days 数字引 GooDFlight Table II
 
 ### 10.3 图表制作

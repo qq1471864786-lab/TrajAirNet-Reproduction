@@ -47,8 +47,6 @@ def protocol_hash(config: Dict[str, Any]) -> str:
         "n_proto",
         "eval_topk_primary",
         "eval_topk_secondary",
-        "glev_topn_primary",
-        "glev_topn_secondary",
     ]
     subset = {key: config.get(key) for key in keys}
     return stable_hash(subset)

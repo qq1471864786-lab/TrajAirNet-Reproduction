@@ -259,8 +259,6 @@ def apply_protocol(args):
     args.pred_horizon_sec = spec.pred_horizon_sec
     args.eval_topk_primary = spec.eval_topk_primary
     args.eval_topk_secondary = spec.eval_topk_secondary
-    args.glev_topn_primary = spec.glev_topn_primary
-    args.glev_topn_secondary = spec.glev_topn_secondary
     return spec
 
 
@@ -616,13 +614,11 @@ def unified_best20_sort_key(metrics, args):
     rare_k = secondary_k if secondary_k != args.eval_topk_primary else args.eval_topk_primary
     ade = float(metrics[f"ADE@{secondary_k}"])
     fde = float(metrics[f"FDE@{secondary_k}"])
-    glev = float(metrics[f"GLeV@{secondary_k}"])
     rare_fde = float(metrics[f"rare_FDE@{rare_k}"])
     return (
         ade + fde,
         fde,
         ade,
-        glev,
         rare_fde,
     )
 
@@ -728,8 +724,6 @@ def evaluate(
                 batch,
                 primary_k=args.eval_topk_primary,
                 secondary_k=args.eval_topk_secondary,
-                glev_topn_primary=args.glev_topn_primary,
-                glev_topn_secondary=args.glev_topn_secondary,
             )
             update_metric_sums(metric_sums, metrics, count)
             total_count += count
@@ -844,7 +838,6 @@ def _metric_lines(args, metrics):
             [
                 f"ADE@{secondary_k}={format_scalar(metrics[f'ADE@{secondary_k}'])}",
                 f"FDE@{secondary_k}={format_scalar(metrics[f'FDE@{secondary_k}'])}",
-                f"GLeV@{secondary_k}={format_scalar(metrics[f'GLeV@{secondary_k}'])}",
                 f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
             ]
         )
@@ -853,7 +846,6 @@ def _metric_lines(args, metrics):
             [
                 f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
                 f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
-                f"GLeV@{primary_k}={format_scalar(metrics[f'GLeV@{primary_k}'])}",
                 f"rare_FDE@{rare_k}={format_scalar(metrics[f'rare_FDE@{rare_k}'])}",
             ]
         )
@@ -861,7 +853,6 @@ def _metric_lines(args, metrics):
     eval_aux = [
         f"ADE@{primary_k}={format_scalar(metrics[f'ADE@{primary_k}'])}",
         f"FDE@{primary_k}={format_scalar(metrics[f'FDE@{primary_k}'])}",
-        f"GLeV@{primary_k}={format_scalar(metrics[f'GLeV@{primary_k}'])}",
     ]
 
     eval_aux.extend(
@@ -1164,7 +1155,6 @@ def main():
                 best_records[best_key]["epoch"] = epoch
                 best_records[best_key]["sort_key"] = candidate_sort_key
                 best_records[best_key]["fde_value"] = float(metrics[f"FDE@{secondary_k}"])
-                best_records[best_key]["glev_value"] = float(metrics[f"GLeV@{secondary_k}"])
                 best_records[best_key]["rare_fde_value"] = float(metrics[f"rare_FDE@{rare_k}"])
                 best_records[best_key]["selection_score"] = candidate_sort_key[0]
                 best_updates.append(
@@ -1187,11 +1177,9 @@ def main():
                 best_records[ade_key]["sort_key"] = (
                     ade_value,
                     float(metrics[f"FDE@{secondary_k}"]),
-                    float(metrics[f"GLeV@{secondary_k}"]),
                     float(metrics[f"rare_FDE@{rare_k}"]),
                 )
                 best_records[ade_key]["fde_value"] = float(metrics[f"FDE@{secondary_k}"])
-                best_records[ade_key]["glev_value"] = float(metrics[f"GLeV@{secondary_k}"])
                 best_records[ade_key]["rare_fde_value"] = float(metrics[f"rare_FDE@{rare_k}"])
                 best_records[ade_key]["selection_score"] = ade_value
                 best_updates.append(

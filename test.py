@@ -180,8 +180,6 @@ def evaluate(
                 batch,
                 primary_k=config.get("eval_topk_primary", 5),
                 secondary_k=config.get("eval_topk_secondary", 20),
-                glev_topn_primary=config.get("glev_topn_primary", 2),
-                glev_topn_secondary=config.get("glev_topn_secondary", 5),
             )
             update_metric_sums(metric_sums, metrics, batch_count)
             total_count += batch_count

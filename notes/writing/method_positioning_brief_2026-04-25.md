@@ -205,17 +205,9 @@ MTR 用 learnable motion query pairs 同时做 global intention localization 和
 
 ## 8. 必须修正/核实的风险点
 
-### GLeV 定义方向已确认
+### GLeV 不作为横向对比指标
 
-GLeV 按 GooDFlight 原文定义为：
-
-```python
-local_var / global_var
-```
-
-其中 `local_var` 是靠近 ground-truth endpoint 的候选终点方差，`global_var` 是所有候选终点方差。该比值越大表示 ground-truth 附近仍保留更高局部多样性，因此 **higher-is-better**。`model/metrics.py` 的公式方向正确，旧错误注释已删除。
-
-仍需单独核对的是数值量级：本项目当前 `GLeV@20` 常在 `0.06-0.21`，而 GooDFlight Table III 约为 `0.0024-0.012`。写 Experiments 时需要确认 K、top-n nearest endpoint、候选筛选和单位是否完全一致；在核对前不要把 GLeV 数值当作严格可比的主结论。
+GooDFlight 提出了 GLeV，但原文公式、解释文字和表格量级不够清晰，直接横向对比容易不公平。当前项目不再报告 GLeV 作为主结果，也不再用它支撑相对 GooDFlight 或 ASCENT 的结论。多模态候选质量改用 ADE/FDE、消融和典型场景可视化说明。
 
 ### Method 草稿和代码默认组件有漂移
 
@@ -241,8 +233,7 @@ TrajAir 原始数据包含 METAR/风等上下文，当前 dataset 只使用 xyz�
    - w/o micro modes
    - w/o refiner
    - w/o social
-4. GLeV 定义核查与重新计算。
-5. latency: `bs=1` 和 `bs=16`，用于对比 GooDFlight diffusion 与 ASCENT lightweight claim。
+4. latency: `bs=1` 和 `bs=16`，用于对比 GooDFlight diffusion 与 ASCENT lightweight claim。
 
 消融表必须能支撑机制：
 

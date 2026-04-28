@@ -152,14 +152,12 @@ for job in jobs:
                 "epoch": best.get("epoch"),
                 "ADE@20": best.get("value"),
                 "FDE@20": best.get("fde_value"),
-                "GLeV@20": best.get("glev_value"),
                 "rare_FDE@20": best.get("rare_fde_value"),
             },
             "final": {
                 "epoch": latest.get("epoch"),
                 "ADE@20": (latest.get("metrics") or {}).get("ADE@20"),
                 "FDE@20": (latest.get("metrics") or {}).get("FDE@20"),
-                "GLeV@20": (latest.get("metrics") or {}).get("GLeV@20"),
                 "rare_FDE@20": (latest.get("metrics") or {}).get("rare_FDE@20"),
             },
             "stdout_tail": tail_lines(job["stdout_path"], 20),
@@ -224,9 +222,9 @@ def print_summary(payload: dict[str, Any]) -> None:
         print(
             f"- {item['dataset']} [{item.get('device')}] status={item.get('status')} "
             f"best(ADE20={best.get('ADE@20')}, FDE20={best.get('FDE@20')}, "
-            f"GLeV20={best.get('GLeV@20')}, rare={best.get('rare_FDE@20')}, epoch={best.get('epoch')}) "
+            f"rare={best.get('rare_FDE@20')}, epoch={best.get('epoch')}) "
             f"final(ADE20={final.get('ADE@20')}, FDE20={final.get('FDE@20')}, "
-            f"GLeV20={final.get('GLeV@20')}, rare={final.get('rare_FDE@20')}, epoch={final.get('epoch')})"
+            f"rare={final.get('rare_FDE@20')}, epoch={final.get('epoch')})"
         )
 
 

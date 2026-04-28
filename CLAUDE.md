@@ -38,13 +38,7 @@ Numbers source: ASCENT Table II (for baselines), our seed3407 100-epoch run (for
 
 For ADE/FDE, lower values are better. Current 7days1 is still weaker than GooDFlight in both ADE and FDE, but the gap is smaller than the old incorrect notes implied.
 
-### GLeV (diversity, 111_days, higher is better)
-| Method | GLeV@20 |
-|--------|---------|
-| GooDFlight | 0.0120 |
-| **Ours** | TBD (best seen: 0.058 at e27 on 7days1) |
-
-GLeV follows GooDFlight's `local_var/global_var` definition and is higher-is-better. Do not make strict numeric-scale claims until K, top-n, candidate filtering, and units are checked.
+GooDFlight introduced a GLeV diversity metric, but the paper's formula, textual explanation, and reported scale are not clear enough for a fair direct comparison in this project. Do not report or optimize GLeV in the main experiments; use ADE/FDE and focused ablations instead.
 
 ## Positioning
 - vs ASCENT: "competitive with ASCENT" — do NOT claim to beat it. ASCENT=0.19, ours=0.228.
@@ -61,13 +55,12 @@ GLeV follows GooDFlight's `local_var/global_var` definition and is higher-is-bet
 1. Introduction (~1 page)
 2. Related Work (~1 page): Aircraft Trajectory Prediction / Multi-Modal Forecasting / Basis Decomposition
 3. Method (~2 pages): Problem Formulation → Encoder → Social → Router → Basis → Micro-mode → Refiner → Training
-4. Experiments (~2 pages): Main Table / Generalization / Ablation / GLeV
+4. Experiments (~2 pages): Main Table / Generalization / Ablation / Case Study
 5. Conclusion (~0.5 page)
 
 ## Experiments Still Needed
 - 7days2, 7days3, 7days4 (not yet run)
 - Ablation: w/o Router, w/o Basis, w/o Micro, w/o Refiner, w/o Social (not yet run)
-- GLeV for our method on 111_days (not yet confirmed)
 
 ## Writing Files Location
 - Drafts: `notes/writing/`

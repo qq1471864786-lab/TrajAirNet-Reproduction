@@ -13,8 +13,6 @@ class ProtocolSpec:
     pred_horizon_sec: int
     eval_topk_primary: int
     eval_topk_secondary: int
-    glev_topn_primary: int
-    glev_topn_secondary: int
     implemented: bool
     note: str
 
@@ -30,8 +28,6 @@ PROTOCOLS: Dict[str, ProtocolSpec] = {
         pred_horizon_sec=120,
         eval_topk_primary=5,
         eval_topk_secondary=20,
-        glev_topn_primary=2,
-        glev_topn_secondary=5,
         implemented=True,
         note="Unified TrajAir main protocol for 111Days and 7Days1~4.",
     ),
@@ -45,8 +41,6 @@ PROTOCOLS: Dict[str, ProtocolSpec] = {
         pred_horizon_sec=120,
         eval_topk_primary=5,
         eval_topk_secondary=5,
-        glev_topn_primary=2,
-        glev_topn_secondary=2,
         implemented=True,
         note="Appendix protocol for TrajAirNet / ASCENT legacy 11-step observation and 120s horizon at 10s stride.",
     ),
@@ -60,8 +54,6 @@ PROTOCOLS: Dict[str, ProtocolSpec] = {
         pred_horizon_sec=120,
         eval_topk_primary=5,
         eval_topk_secondary=5,
-        glev_topn_primary=2,
-        glev_topn_secondary=2,
         implemented=True,
         note="Appendix protocol for ASCENT legacy 16-step observation and 120s horizon at 0.2Hz.",
     ),
