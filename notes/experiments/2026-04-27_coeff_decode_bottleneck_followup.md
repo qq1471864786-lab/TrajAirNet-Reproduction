@@ -622,3 +622,38 @@ Default update:
 - 111_days early stopping becomes `early_stop_min_epoch=15`, `early_stop_patience=5`.
 - 111_days training-time validation defaults to `limit_eval_batches=200`; pass `--limit_eval_batches 0` explicitly when a full validation sweep is needed.
 - 7days defaults are unchanged for now because the evidence above is from 111_days.
+
+## 2026-04-28 FDE Repair Follow-up
+
+Purpose: test FDE-focused fixes after the 100-batch diagnosis showed that the remaining error is mainly endpoint candidate coverage in tail samples, not coeff/path reconstruction.
+
+Reference:
+
+- Checkpoint: `save_model_111days_current_default_full/111_days/seed3407/best_best20.pt`
+- Eval window: 111_days first 100 test batches
+- Baseline: `ADE@20=0.1872`, `FDE@20=0.2840`
+
+Results:
+
+| Variant | Eval | ADE@20 | FDE@20 | rare_FDE@20 | Decision |
+| --- | --- | ---: | ---: | ---: | --- |
+| endpoint set refiner, coverage 0.15 | 100 batch | 0.1872 | 0.2842 | ~0.650 | no gain |
+| endpoint set refiner, coverage 1.0 | 100 batch | 0.1873 | 0.2840 | 0.6489 | no gain |
+| top20 internal pool, random new-rank init | 100 batch | 0.1947 | 0.3028 | 0.6934 | worse |
+| top20 internal pool, tail-rank init | 100 batch | 0.1942 | 0.3009 | 0.6909 | worse |
+| router top-k margin, strong | 100 batch | 0.1881 | 0.2857 | 0.6568 | near but not better |
+| router top-k margin, light | 100 batch | 0.1878 | 0.2852 | 0.6570 | near but not better |
+| tail-balanced candidate keep | 100 batch | 0.1885 | 0.2872 | 0.6602 | worse |
+
+Findings:
+
+- Expanding the internal candidate pool increases theoretical tail coverage but disrupts the learned endpoint/score structure enough to hurt both ADE and FDE.
+- Router top-k margin raises train-time top-k hit rate, but the gain does not convert into validation FDE improvement. Stronger routing pressure also hurts candidate quality.
+- Reallocating duplicate micro endpoint slots from rank 4-5 to rank 6-7 is unsafe; the head-rank duplicate candidates are still needed.
+- The remaining FDE gap is not fixed by late endpoint correction, raw candidate expansion, router-only loss, or simple static candidate reallocation.
+
+Decision:
+
+- Do not promote these FDE repair attempts to default.
+- Revert the failed router-margin and tail-balanced code paths after recording the results.
+- Keep the current best default checkpoint/config as baseline. The next credible FDE direction needs a new endpoint/intention generator trained from scratch or a new external intent signal; partial continuation patches are not showing enough headroom.
