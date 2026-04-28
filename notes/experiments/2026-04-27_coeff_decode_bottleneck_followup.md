@@ -1148,3 +1148,40 @@ Decision:
 - Keep the current score-biased `tail_swap` rule as the final default candidate-compression repair.
 - Treat the large architecture bottlenecks as closed for now: router, coefficient/path decoding, endpoint shape, and candidate compression have all been probed with controlled short tests, and the only robust default improvement is tail-swap.
 - Next work should move to paper ablations/full reruns rather than further architecture chasing, unless a new oracle shows a much larger gain than the current sub-`0.001` endpoint probes.
+
+### Set endpoint decoder probe
+
+Purpose: test a larger endpoint-specific repair after the final FDE diagnosis. The hypothesis was that micro candidates sharing prototype-level endpoints may limit public K=20 endpoint coverage. The probe added a candidate-set endpoint decoder that lets each internal candidate predict an endpoint correction before the existing basis path reconstruction.
+
+Implementation:
+
+- Added `SetEndpointDecoder` after the coupled endpoint/coeff decoder.
+- The new head used candidate query self-attention plus endpoint/path statistics and predicted a 3D endpoint delta per candidate.
+- Rebuilt the basis anchor from the corrected endpoint, then kept the existing basis, local-basis, tail-swap, and shape-refiner path.
+- Added `lambda_set_endpoint` supervision against the GT local endpoint.
+- Initialized from the current best 111_days checkpoint with partial init.
+- Code was reverted after validation because the gain was too small for the extra module and loss.
+
+Validation setup:
+
+- Dataset: `111_days`.
+- Checkpoint: `save_model_111days_current_default_full/111_days/seed3407/best_best20.pt`.
+- Budget: 5 polish epochs, 120 train batches/epoch, 100 eval batches.
+- Device: remote `cuda:3`.
+- Main comparison used the same 100-batch `test.py` window.
+
+Results:
+
+| Probe | Trainable scope | lambda | ADE@20 | FDE@20 | rare_FDE@20 | Readout |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| old default checkpoint | none | 0.00 | 0.1888 | 0.2823 | 0.6490 | same-window reference |
+| set endpoint decoder | endpoint/shape/control new-head freeze policy | 0.05 | 0.1872 | 0.2815 | 0.6416 | small positive |
+| set endpoint decoder only | only set endpoint head | 0.05 | 0.1882 | 0.2808 | 0.6412 | confirms endpoint head can move FDE |
+| set endpoint decoder | endpoint/shape/control new-head freeze policy | 0.10 | 0.1872 | 0.2815 | 0.6415 | no extra gain over 0.05 |
+
+Decision:
+
+- Do not keep `SetEndpointDecoder` or `lambda_set_endpoint` in code/defaults.
+- The direction is not false: it gives about `0.001` to `0.0015` FDE improvement and improves rare_FDE in the short window.
+- The magnitude is too small relative to added parameters (`~168k`) and another loss term, so it is not paper-defensible as a new default module.
+- This reinforces the current conclusion: remaining endpoint/FDE weakness is a shallow residual issue after tail-swap, not a large remaining architecture bottleneck under the current candidate/prototype formulation.
