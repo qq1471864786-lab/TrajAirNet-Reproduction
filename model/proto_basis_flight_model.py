@@ -421,6 +421,68 @@ class EndpointPreservingControlPointRefiner(nn.Module):
         return local_xyz + envelope[None, None, :, None] * residual
 
 
+class EndpointSetRefiner(nn.Module):
+    def __init__(self, d_model=96, pred_len=120, hidden_dim=192, max_delta=0.4, dropout=0.1):
+        super().__init__()
+        self.max_delta = float(max_delta)
+        stats_dim = 19
+        input_dim = d_model + stats_dim
+        self.in_proj = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, d_model),
+            nn.LayerNorm(d_model),
+        )
+        self.set_attn = nn.MultiheadAttention(d_model, 4, batch_first=True, dropout=dropout)
+        self.ffn = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, d_model),
+        )
+        self.delta_head = nn.Linear(d_model, 3)
+        self.gate_head = nn.Linear(d_model, 1)
+        nn.init.zeros_(self.delta_head.weight)
+        nn.init.zeros_(self.delta_head.bias)
+        nn.init.zeros_(self.gate_head.weight)
+        nn.init.constant_(self.gate_head.bias, -2.0)
+        alpha = torch.linspace(0.0, 1.0, steps=pred_len)
+        self.register_buffer("endpoint_alpha", alpha, persistent=False)
+
+    def forward(self, local_xyz, query_feat, pred_score):
+        endpoints = local_xyz[:, :, -1]
+        endpoint_mean = endpoints.mean(dim=1, keepdim=True)
+        endpoint_std = endpoints.std(dim=1, unbiased=False, keepdim=True).clamp_min(1e-4)
+        centered_endpoint = endpoints - endpoint_mean
+        path_mean = local_xyz.mean(dim=2)
+        path_mid = local_xyz[:, :, local_xyz.size(2) // 2]
+        score_prob = pred_score.softmax(dim=-1).unsqueeze(-1)
+        stats = torch.cat(
+            [
+                endpoints,
+                centered_endpoint,
+                endpoint_mean.expand_as(endpoints),
+                endpoint_std.expand_as(endpoints),
+                path_mean,
+                path_mid,
+                score_prob,
+            ],
+            dim=-1,
+        )
+        hidden = self.in_proj(torch.cat([query_feat, stats], dim=-1))
+        attended, _ = self.set_attn(hidden, hidden, hidden, need_weights=False)
+        hidden = hidden + attended
+        hidden = hidden + self.ffn(hidden)
+        gate = torch.sigmoid(self.gate_head(hidden))
+        endpoint_delta = torch.tanh(self.delta_head(hidden)) * self.max_delta * gate
+        alpha = self.endpoint_alpha.to(device=local_xyz.device, dtype=local_xyz.dtype)
+        refined = local_xyz + alpha[None, None, :, None] * endpoint_delta[:, :, None, :]
+        return refined, endpoint_delta, gate.squeeze(-1)
+
+
 class CoupledEndpointCoeffDecoder(nn.Module):
     def __init__(self, d_model=96, basis_dim=16, iters=1, dropout=0.1):
         super().__init__()
@@ -501,6 +563,8 @@ class ProtoBasisNet(nn.Module):
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
+        endpoint_set_refiner=False,
+        endpoint_set_max_delta=0.4,
         disable_social=False,
         disable_router=False,
         disable_refiner=False,
@@ -531,6 +595,7 @@ class ProtoBasisNet(nn.Module):
         self.micro_endpoint_offsets_enabled = bool(micro_endpoint_offsets)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
+        self.endpoint_set_refiner_enabled = bool(endpoint_set_refiner)
         self.pose_normalizer = PoseNormalizer()
         self.register_buffer("anchor_alpha", torch.linspace(0.0, 1.0, steps=pred_len), persistent=False)
         self.temporal_encoder = TemporalEncoder(
@@ -659,6 +724,16 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.control_shape_refiner = None
+        if self.endpoint_set_refiner_enabled:
+            self.endpoint_set_refiner = EndpointSetRefiner(
+                d_model=d_model,
+                pred_len=pred_len,
+                hidden_dim=ff_dim,
+                max_delta=endpoint_set_max_delta,
+                dropout=dropout,
+            )
+        else:
+            self.endpoint_set_refiner = None
         keep_indices = []
         if 0 < self.candidate_dense_topk < self.topk_proto and self.n_micro > 1:
             for proto_rank in range(self.topk_proto):
@@ -766,6 +841,14 @@ class ProtoBasisNet(nn.Module):
             refined_local = self.endpoint_shape_refiner(refined_local, active_query)
         if self.control_shape_refiner is not None:
             refined_local = self.control_shape_refiner(refined_local, active_query)
+        endpoint_set_delta = None
+        endpoint_set_gate = None
+        if self.endpoint_set_refiner is not None:
+            refined_local, endpoint_set_delta, endpoint_set_gate = self.endpoint_set_refiner(
+                refined_local,
+                active_query,
+                pred_score,
+            )
 
         pred_xyz = self.pose_normalizer.inverse(refined_local, origin, rotation)
 
@@ -783,6 +866,9 @@ class ProtoBasisNet(nn.Module):
         }
         if micro_endpoint_delta is not None:
             aux["micro_endpoint_delta"] = micro_endpoint_delta
+        if endpoint_set_delta is not None:
+            aux["endpoint_set_delta"] = endpoint_set_delta
+            aux["endpoint_set_gate"] = endpoint_set_gate
 
         return {
             "pred_xyz": pred_xyz,

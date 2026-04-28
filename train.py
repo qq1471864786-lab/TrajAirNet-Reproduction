@@ -53,6 +53,9 @@ LOSS_STAT_KEYS = (
     "projection_coeff",
     "projection_path",
     "projection_rate",
+    "endpoint_coverage",
+    "endpoint_delta",
+    "endpoint_set_gate",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -104,6 +107,10 @@ def build_parser():
     parser.add_argument("--no_control_shape_refiner", dest="control_shape_refiner", action="store_false")
     parser.set_defaults(control_shape_refiner=None)
     parser.add_argument("--control_shape_points", type=int, default=None)
+    parser.add_argument("--endpoint_set_refiner", dest="endpoint_set_refiner", action="store_true")
+    parser.add_argument("--no_endpoint_set_refiner", dest="endpoint_set_refiner", action="store_false")
+    parser.set_defaults(endpoint_set_refiner=None)
+    parser.add_argument("--endpoint_set_max_delta", type=float, default=0.4)
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
@@ -174,6 +181,8 @@ def build_parser():
     )
     parser.add_argument("--lambda_projection_coeff", type=float, default=None)
     parser.add_argument("--lambda_projection_path", type=float, default=None)
+    parser.add_argument("--lambda_endpoint_coverage", type=float, default=None)
+    parser.add_argument("--lambda_endpoint_delta", type=float, default=None)
     parser.add_argument(
         "--projection_supervision",
         type=str,
@@ -211,6 +220,11 @@ def build_parser():
         "--freeze_backbone_except_micro_endpoint_offsets",
         action="store_true",
         help="Train only the per-micro endpoint offset head.",
+    )
+    parser.add_argument(
+        "--freeze_backbone_except_endpoint_set_refiner",
+        action="store_true",
+        help="Train only the endpoint set refiner.",
     )
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
@@ -301,6 +315,8 @@ def apply_training_defaults(args):
         args.control_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_points is None:
         args.control_shape_points = 32 if args.control_shape_refiner else 16
+    if args.endpoint_set_refiner is None:
+        args.endpoint_set_refiner = False
     if args.micro_coeff_anchors is None:
         args.micro_coeff_anchors = True
 
@@ -365,6 +381,10 @@ def apply_training_defaults(args):
         args.lambda_projection_coeff = 0.02 if use_projection_guidance else 0.0
     if args.lambda_projection_path is None:
         args.lambda_projection_path = 0.05 if use_projection_guidance else 0.0
+    if args.lambda_endpoint_coverage is None:
+        args.lambda_endpoint_coverage = 0.15 if args.endpoint_set_refiner else 0.0
+    if args.lambda_endpoint_delta is None:
+        args.lambda_endpoint_delta = 0.01 if args.endpoint_set_refiner else 0.0
     if args.projection_supervision is None:
         args.projection_supervision = "winner_gt_proto" if use_projection_guidance else "none"
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
@@ -510,6 +530,8 @@ def build_model(args, model_artifact):
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
+        endpoint_set_refiner=bool(args.endpoint_set_refiner),
+        endpoint_set_max_delta=args.endpoint_set_max_delta,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
         disable_refiner=args.disable_refiner,
@@ -538,6 +560,21 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
 
 
 def apply_freeze_policy(model, args):
+    if args.freeze_backbone_except_endpoint_set_refiner:
+        trainable_modules = [getattr(model, "endpoint_set_refiner", None)]
+        trainable_modules = [module for module in trainable_modules if module is not None]
+        if not trainable_modules:
+            raise RuntimeError("--freeze_backbone_except_endpoint_set_refiner requires --endpoint_set_refiner.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for module in trainable_modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] trainable_params={trainable} total_params={total}")
+        return
+
     if args.freeze_backbone_except_micro_endpoint_offsets:
         trainable_modules = [getattr(model, "micro_endpoint_head", None)]
         trainable_modules = [module for module in trainable_modules if module is not None]
@@ -561,6 +598,7 @@ def apply_freeze_policy(model, args):
             getattr(model, "micro_endpoint_head", None),
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
+            getattr(model, "endpoint_set_refiner", None),
         )
         if module is not None
     ]
@@ -993,6 +1031,8 @@ def main():
         lambda_projection_coeff=args.lambda_projection_coeff,
         lambda_projection_path=args.lambda_projection_path,
         projection_supervision=args.projection_supervision,
+        lambda_endpoint_coverage=args.lambda_endpoint_coverage,
+        lambda_endpoint_delta=args.lambda_endpoint_delta,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1021,6 +1061,8 @@ def main():
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
+        "endpoint_set_refiner": bool(args.endpoint_set_refiner),
+        "endpoint_set_max_delta": args.endpoint_set_max_delta,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
         "anchor_recon_supervision": args.anchor_recon_supervision,
         "projection_supervision": args.projection_supervision,
@@ -1031,10 +1073,13 @@ def main():
         "lambda_anchor_recon": args.lambda_anchor_recon,
         "lambda_projection_coeff": args.lambda_projection_coeff,
         "lambda_projection_path": args.lambda_projection_path,
+        "lambda_endpoint_coverage": args.lambda_endpoint_coverage,
+        "lambda_endpoint_delta": args.lambda_endpoint_delta,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
         "freeze_backbone_except_new_heads": bool(args.freeze_backbone_except_new_heads),
+        "freeze_backbone_except_endpoint_set_refiner": bool(args.freeze_backbone_except_endpoint_set_refiner),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(

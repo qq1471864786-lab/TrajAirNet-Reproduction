@@ -38,6 +38,13 @@ def _trajectory_smoothness(xyz):
     return second_diff.abs().mean()
 
 
+def _endpoint_coverage_loss(pred_xyz, gt_xyz):
+    endpoint_error = torch.linalg.norm(pred_xyz[:, :, -1] - gt_xyz[:, None, -1], dim=-1)
+    best_endpoint_idx = endpoint_error.argmin(dim=1)
+    endpoint = _gather_candidates(pred_xyz[:, :, -1], best_endpoint_idx)
+    return F.smooth_l1_loss(endpoint, gt_xyz[:, -1])
+
+
 def _soft_label_cross_entropy(logits, targets):
     return -(targets * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
 
@@ -232,6 +239,8 @@ class ProtoBasisLoss(nn.Module):
         lambda_projection_coeff=0.0,
         lambda_projection_path=0.0,
         projection_supervision="none",
+        lambda_endpoint_coverage=0.0,
+        lambda_endpoint_delta=0.0,
     ):
         super().__init__()
         if endpoint_residual_supervision not in {"all", "hit_only"}:
@@ -263,6 +272,8 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_projection_coeff = lambda_projection_coeff
         self.lambda_projection_path = lambda_projection_path
         self.projection_supervision = projection_supervision
+        self.lambda_endpoint_coverage = lambda_endpoint_coverage
+        self.lambda_endpoint_delta = lambda_endpoint_delta
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -321,6 +332,15 @@ class ProtoBasisLoss(nn.Module):
         div_loss = _diversity_repulsion(pred_xyz)
         coeff_loss = winner_coeff.pow(2).mean()
         smooth_loss = _trajectory_smoothness(winner_xyz)
+        endpoint_coverage_loss = _endpoint_coverage_loss(pred_xyz, gt_xyz)
+        endpoint_set_delta = aux.get("endpoint_set_delta")
+        if endpoint_set_delta is None:
+            endpoint_delta_loss = pred_xyz.sum() * 0.0
+            endpoint_set_gate = pred_xyz.new_tensor(0.0)
+        else:
+            endpoint_delta_loss = endpoint_set_delta.pow(2).mean()
+            endpoint_set_gate = aux.get("endpoint_set_gate", endpoint_set_delta.new_zeros(endpoint_set_delta.shape[:2]))
+            endpoint_set_gate = endpoint_set_gate.mean()
         gt_proto_shape_loss, gt_proto_fde_loss, gt_proto_hit_rate = _gt_proto_aligned_losses(
             pred_xyz,
             gt_xyz,
@@ -370,6 +390,8 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_anchor_recon * anchor_recon_loss
         total = total + self.lambda_projection_coeff * projection_coeff_loss
         total = total + self.lambda_projection_path * projection_path_loss
+        total = total + self.lambda_endpoint_coverage * endpoint_coverage_loss
+        total = total + self.lambda_endpoint_delta * endpoint_delta_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -387,6 +409,9 @@ class ProtoBasisLoss(nn.Module):
             "projection_coeff": float(projection_coeff_loss.detach().item()),
             "projection_path": float(projection_path_loss.detach().item()),
             "projection_rate": float(projection_rate.detach().item()),
+            "endpoint_coverage": float(endpoint_coverage_loss.detach().item()),
+            "endpoint_delta": float(endpoint_delta_loss.detach().item()),
+            "endpoint_set_gate": float(endpoint_set_gate.detach().item()),
             "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),
