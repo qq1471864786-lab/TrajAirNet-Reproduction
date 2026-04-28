@@ -194,6 +194,11 @@ def build_parser():
         action="store_true",
         help="Train only newly added heads after init_checkpoint.",
     )
+    parser.add_argument(
+        "--freeze_set_endpoint_only",
+        action="store_true",
+        help="Train only the set endpoint decoder after init_checkpoint.",
+    )
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
     parser.add_argument("--limit_eval_batches", type=int, default=None)
@@ -554,6 +559,18 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
 
 
 def apply_freeze_policy(model, args):
+    if args.freeze_set_endpoint_only:
+        module = getattr(model, "set_endpoint_decoder", None)
+        if module is None:
+            raise RuntimeError("--freeze_set_endpoint_only requires --set_endpoint_decoder.")
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+        total = sum(parameter.numel() for parameter in model.parameters())
+        print(f"[Freeze] set_endpoint_only trainable_params={trainable} total_params={total}")
+        return
     if not args.freeze_backbone_except_new_heads:
         return
     trainable_modules = [
@@ -1029,6 +1046,7 @@ def main():
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
         "freeze_backbone_except_new_heads": bool(args.freeze_backbone_except_new_heads),
+        "freeze_set_endpoint_only": bool(args.freeze_set_endpoint_only),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(
