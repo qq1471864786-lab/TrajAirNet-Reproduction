@@ -47,6 +47,20 @@ def build_parser():
     parser.add_argument("--latency_batch_sizes", type=str, default="1,16")
     parser.add_argument("--no_amp", action="store_true")
     parser.add_argument("--allow_cpu", action="store_true", help="Allow CPU fallback when CUDA is unavailable.")
+    parser.add_argument("--ablate_no_social", action="store_true")
+    parser.add_argument("--ablate_no_router", action="store_true")
+    parser.add_argument("--ablate_no_temporal_refiner", action="store_true")
+    parser.add_argument("--ablate_no_endpoint_shape_refiner", action="store_true")
+    parser.add_argument("--ablate_no_control_shape_refiner", action="store_true")
+    parser.add_argument("--ablate_no_shape_refiners", action="store_true")
+    parser.add_argument("--ablate_no_local_basis", action="store_true")
+    parser.add_argument("--ablate_no_support_aware_local_basis", action="store_true")
+    parser.add_argument("--ablate_no_two_stage_decoder", action="store_true")
+    parser.add_argument("--ablate_no_two_stage_endpoint", action="store_true")
+    parser.add_argument("--ablate_no_two_stage_coeff", action="store_true")
+    parser.add_argument("--ablate_no_coupled_decoder", action="store_true")
+    parser.add_argument("--ablate_no_micro_coeff_anchors", action="store_true")
+    parser.add_argument("--ablate_no_micro_endpoint_offsets", action="store_true")
     return parser
 
 
@@ -127,6 +141,39 @@ def load_checkpoint_state(model, checkpoint, dropout):
             raise RuntimeError(f"Checkpoint compatibility load mismatch: missing={missing}, unexpected={unexpected}")
         return
     model.load_state_dict(state_dict)
+
+
+def apply_eval_ablation_overrides(model, args):
+    if args.ablate_no_social:
+        model.disable_social = True
+    if args.ablate_no_router:
+        model.disable_router = True
+    if args.ablate_no_temporal_refiner:
+        model.disable_refiner = True
+    if args.ablate_no_endpoint_shape_refiner or args.ablate_no_shape_refiners:
+        model.endpoint_shape_refiner = None
+        model.endpoint_shape_refiner_enabled = False
+    if args.ablate_no_control_shape_refiner or args.ablate_no_shape_refiners:
+        model.control_shape_refiner = None
+        model.control_shape_refiner_enabled = False
+    if args.ablate_no_local_basis:
+        model.has_local_basis = False
+    if args.ablate_no_support_aware_local_basis:
+        model.support_aware_local_basis = False
+    if args.ablate_no_two_stage_decoder:
+        model.two_stage_decoder = False
+    if args.ablate_no_two_stage_endpoint:
+        model.two_stage_update_endpoint = False
+    if args.ablate_no_two_stage_coeff:
+        model.two_stage_update_coeff = False
+    if args.ablate_no_coupled_decoder:
+        model.coupled_decoder = None
+        model.coupled_decoder_enabled = False
+    if args.ablate_no_micro_coeff_anchors:
+        model.has_micro_coeff_anchors = False
+    if args.ablate_no_micro_endpoint_offsets:
+        model.micro_endpoint_head = None
+        model.micro_endpoint_offsets_enabled = False
 
 
 def resolve_eval_enable_refiner(checkpoint):
@@ -312,6 +359,7 @@ def main():
 
     model = build_model(config, checkpoint).to(device)
     load_checkpoint_state(model, checkpoint, config["dropout"])
+    apply_eval_ablation_overrides(model, args)
     metrics = evaluate(
         model,
         loader,
