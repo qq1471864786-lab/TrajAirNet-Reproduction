@@ -49,7 +49,6 @@ LOSS_STAT_KEYS = (
     "gt_proto_shape",
     "gt_proto_fde",
     "gt_proto_coeff",
-    "set_endpoint",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -91,9 +90,6 @@ def build_parser():
     parser.add_argument("--no_coupled_decoder", dest="coupled_decoder", action="store_false")
     parser.set_defaults(coupled_decoder=None)
     parser.add_argument("--coupled_decoder_iters", type=int, default=None)
-    parser.add_argument("--set_endpoint_decoder", dest="set_endpoint_decoder", action="store_true")
-    parser.add_argument("--no_set_endpoint_decoder", dest="set_endpoint_decoder", action="store_false")
-    parser.set_defaults(set_endpoint_decoder=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -168,7 +164,6 @@ def build_parser():
     parser.add_argument("--lambda_gt_proto_shape", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_fde", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_coeff", type=float, default=None)
-    parser.add_argument("--lambda_set_endpoint", type=float, default=0.0)
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
@@ -277,8 +272,6 @@ def apply_training_defaults(args):
         args.coupled_decoder = bool(uses_validated_basis_profile)
     if args.coupled_decoder_iters is None:
         args.coupled_decoder_iters = 2 if args.coupled_decoder else 0
-    if args.set_endpoint_decoder is None:
-        args.set_endpoint_decoder = False
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
@@ -477,7 +470,6 @@ def build_model(args, model_artifact):
         candidate_selection=args.candidate_selection,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
-        set_endpoint_decoder=bool(args.set_endpoint_decoder),
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
@@ -561,7 +553,6 @@ def apply_freeze_policy(model, args):
         for module in (
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
-            getattr(model, "set_endpoint_decoder", None),
         )
         if module is not None
     ]
@@ -885,7 +876,6 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"gt_shape={format_scalar(loss_stats['gt_proto_shape'])}",
         f"gt_fde={format_scalar(loss_stats['gt_proto_fde'])}",
         f"gt_coeff={format_scalar(loss_stats['gt_proto_coeff'])}",
-        f"set_ep={format_scalar(loss_stats['set_endpoint'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -981,7 +971,6 @@ def main():
         lambda_gt_proto_shape=args.lambda_gt_proto_shape,
         lambda_gt_proto_fde=args.lambda_gt_proto_fde,
         lambda_gt_proto_coeff=args.lambda_gt_proto_coeff,
-        lambda_set_endpoint=args.lambda_set_endpoint,
         score_hard_mix=args.score_hard_mix,
         score_fde_weight=args.score_fde_weight,
         score_soft_temperature=args.score_soft_temperature,
@@ -1015,7 +1004,6 @@ def main():
         "candidate_selection": args.candidate_selection,
         "coupled_decoder": bool(args.coupled_decoder),
         "coupled_decoder_iters": args.coupled_decoder_iters,
-        "set_endpoint_decoder": bool(args.set_endpoint_decoder),
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
@@ -1024,7 +1012,6 @@ def main():
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
         "lambda_gt_proto_coeff": args.lambda_gt_proto_coeff,
-        "lambda_set_endpoint": args.lambda_set_endpoint,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,

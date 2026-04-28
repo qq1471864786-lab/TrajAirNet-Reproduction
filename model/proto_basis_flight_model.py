@@ -436,38 +436,6 @@ class CoupledEndpointCoeffDecoder(nn.Module):
         return active_query, endpoint_local, coeff, coarse_local
 
 
-class SetEndpointDecoder(nn.Module):
-    def __init__(self, d_model=96, hidden_dim=256, dropout=0.1):
-        super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, 4, batch_first=True, dropout=dropout)
-        self.norm = nn.LayerNorm(d_model)
-        self.net = nn.Sequential(
-            nn.LayerNorm(d_model + 9),
-            nn.Linear(d_model + 9, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 3),
-        )
-        nn.init.zeros_(self.net[-1].weight)
-        nn.init.zeros_(self.net[-1].bias)
-
-    def forward(self, query_feat, endpoint_local, coarse_local):
-        attended, _ = self.self_attn(query_feat, query_feat, query_feat)
-        hidden = self.norm(query_feat + attended)
-        endpoint_stats = torch.cat(
-            [
-                endpoint_local,
-                coarse_local[:, :, -1],
-                coarse_local.mean(dim=2),
-            ],
-            dim=-1,
-        )
-        endpoint_delta = self.net(torch.cat([hidden, endpoint_stats], dim=-1))
-        return endpoint_local + endpoint_delta, endpoint_delta
-
-
 def build_anchor(endpoint_local, alpha):
     return alpha[None, None, :, None] * endpoint_local[:, :, None, :]
 
@@ -513,7 +481,6 @@ class ProtoBasisNet(nn.Module):
         candidate_selection="fixed",
         coupled_decoder=False,
         coupled_decoder_iters=0,
-        set_endpoint_decoder=False,
         endpoint_shape_refiner=False,
         control_shape_refiner=False,
         control_shape_points=16,
@@ -545,7 +512,6 @@ class ProtoBasisNet(nn.Module):
         self.two_stage_update_coeff = two_stage_update_coeff
         self.use_micro_coeff_anchors = bool(use_micro_coeff_anchors)
         self.coupled_decoder_enabled = bool(coupled_decoder) and int(coupled_decoder_iters or 0) > 0
-        self.set_endpoint_decoder_enabled = bool(set_endpoint_decoder)
         self.endpoint_shape_refiner_enabled = bool(endpoint_shape_refiner)
         self.control_shape_refiner_enabled = bool(control_shape_refiner)
         self.pose_normalizer = PoseNormalizer()
@@ -650,10 +616,6 @@ class ProtoBasisNet(nn.Module):
             )
         else:
             self.coupled_decoder = None
-        if self.set_endpoint_decoder_enabled:
-            self.set_endpoint_decoder = SetEndpointDecoder(d_model=d_model, dropout=dropout)
-        else:
-            self.set_endpoint_decoder = None
         if self.endpoint_shape_refiner_enabled:
             self.endpoint_shape_refiner = EndpointPreservingShapeRefiner(d_model=d_model, pred_len=pred_len)
         else:
@@ -812,15 +774,6 @@ class ProtoBasisNet(nn.Module):
                 self.anchor_alpha,
             )
             coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
-        set_endpoint_delta = None
-        if self.set_endpoint_decoder is not None:
-            endpoint_mode_local, set_endpoint_delta = self.set_endpoint_decoder(
-                active_query,
-                endpoint_mode_local,
-                coarse_local,
-            )
-            anchor_local = build_anchor(endpoint_mode_local, self.anchor_alpha.to(endpoint_mode_local))
-            coarse_local = self.basis_bank(anchor_local, coeff)
         candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
         if self.candidate_selection == "fixed":
             fixed_keep = self._fixed_keep(coeff.size(0), coeff.device)
@@ -895,7 +848,6 @@ class ProtoBasisNet(nn.Module):
             "coeff_delta": coeff_delta,
             "endpoint_residual": endpoint_residual,
             "endpoint_mode_local": endpoint_mode_local,
-            "set_endpoint_delta": set_endpoint_delta,
             "coarse_local": coarse_local,
             "candidate_proto_idx": candidate_proto_idx,
             "basis_matrix": self.basis_matrix_flat,

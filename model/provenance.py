@@ -50,7 +50,6 @@ def protocol_hash(config: Dict[str, Any]) -> str:
         "two_stage_decoder",
         "coupled_decoder",
         "coupled_decoder_iters",
-        "set_endpoint_decoder",
         "endpoint_shape_refiner",
         "control_shape_refiner",
         "control_shape_points",

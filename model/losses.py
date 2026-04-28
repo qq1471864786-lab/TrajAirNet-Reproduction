@@ -122,7 +122,6 @@ class ProtoBasisLoss(nn.Module):
         lambda_gt_proto_shape=0.0,
         lambda_gt_proto_fde=0.0,
         lambda_gt_proto_coeff=0.0,
-        lambda_set_endpoint=0.0,
         score_hard_mix=0.25,
         score_fde_weight=0.75,
         score_soft_temperature=0.35,
@@ -145,7 +144,6 @@ class ProtoBasisLoss(nn.Module):
         self.lambda_gt_proto_shape = lambda_gt_proto_shape
         self.lambda_gt_proto_fde = lambda_gt_proto_fde
         self.lambda_gt_proto_coeff = lambda_gt_proto_coeff
-        self.lambda_set_endpoint = lambda_set_endpoint
         self.score_hard_mix = min(max(score_hard_mix, 0.0), 1.0)
         self.score_fde_weight = score_fde_weight
         self.score_soft_temperature = score_soft_temperature
@@ -224,15 +222,6 @@ class ProtoBasisLoss(nn.Module):
             candidate_proto_idx,
             gt_proto_id,
         )
-        endpoint_mode_local = aux.get("endpoint_mode_local")
-        if endpoint_mode_local is not None and "fut_local" in batch:
-            gt_endpoint_local = batch["fut_local"][:, -1]
-            endpoint_l2 = torch.linalg.norm(endpoint_mode_local - gt_endpoint_local[:, None, :], dim=-1)
-            endpoint_idx = endpoint_l2.argmin(dim=1)
-            endpoint_winner = _gather_candidates(endpoint_mode_local, endpoint_idx)
-            set_endpoint_loss = F.smooth_l1_loss(endpoint_winner, gt_endpoint_local)
-        else:
-            set_endpoint_loss = pred_xyz.sum() * 0.0
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
         total = total + self.lambda_proto * proto_loss
@@ -244,7 +233,6 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_gt_proto_shape * gt_proto_shape_loss
         total = total + self.lambda_gt_proto_fde * gt_proto_fde_loss
         total = total + self.lambda_gt_proto_coeff * gt_proto_coeff_loss
-        total = total + self.lambda_set_endpoint * set_endpoint_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -258,7 +246,6 @@ class ProtoBasisLoss(nn.Module):
             "gt_proto_shape": float(gt_proto_shape_loss.detach().item()),
             "gt_proto_fde": float(gt_proto_fde_loss.detach().item()),
             "gt_proto_coeff": float(gt_proto_coeff_loss.detach().item()),
-            "set_endpoint": float(set_endpoint_loss.detach().item()),
             "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),
