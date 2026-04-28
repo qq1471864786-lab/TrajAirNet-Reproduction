@@ -226,15 +226,15 @@ def apply_training_defaults(args):
     uses_validated_basis_profile = is_unified and (is_main_dataset or is_small_dataset)
 
     if args.n_proto is None:
-        args.n_proto = 96 if is_unified and is_small_dataset else 64
+        args.n_proto = 64
     if args.topk_proto is None:
-        args.topk_proto = 15 if is_unified and is_main_dataset else 5
+        args.topk_proto = 15 if uses_validated_basis_profile else 5
     if args.micro_per_proto is None:
-        args.micro_per_proto = 2 if is_unified and is_main_dataset else 4
+        args.micro_per_proto = 2 if uses_validated_basis_profile else 4
     if args.candidate_dense_topk is None:
-        args.candidate_dense_topk = 5 if is_unified and is_main_dataset else 0
+        args.candidate_dense_topk = 5 if uses_validated_basis_profile else 0
     if args.candidate_selection is None:
-        args.candidate_selection = "tail_swap" if is_unified and is_main_dataset else "fixed"
+        args.candidate_selection = "tail_swap" if uses_validated_basis_profile else "fixed"
     if args.d_model is None:
         args.d_model = 128 if is_unified and is_main_dataset else 96
     if args.ff_dim is None:
@@ -264,7 +264,7 @@ def apply_training_defaults(args):
         if is_unified and is_main_dataset:
             args.batch_size = 512
         elif is_unified:
-            args.batch_size = 48
+            args.batch_size = 512
         else:
             args.batch_size = 48
 
@@ -281,19 +281,19 @@ def apply_training_defaults(args):
         args.grad_accum = 1
 
     if args.phase_a_epochs is None:
-        args.phase_a_epochs = 10
+        args.phase_a_epochs = 3 if is_unified and is_small_dataset else 10
     if args.phase_b_epochs is None:
-        args.phase_b_epochs = 4
+        args.phase_b_epochs = 2 if is_unified and is_small_dataset else 4
     if args.phase_c_epochs is None:
         if is_unified and is_small_dataset:
-            args.phase_c_epochs = 20
+            args.phase_c_epochs = 7
         elif is_unified and is_main_dataset:
             args.phase_c_epochs = 8
         else:
             args.phase_c_epochs = 51
     if args.extra_epochs is None:
         if is_unified and is_small_dataset:
-            args.extra_epochs = 0
+            args.extra_epochs = 6
         elif is_unified and is_main_dataset:
             args.extra_epochs = 0
         else:
@@ -304,11 +304,26 @@ def apply_training_defaults(args):
     if args.early_stop_min_epoch is None:
         args.early_stop_min_epoch = 15 if is_unified and is_main_dataset else 0
     if args.lambda_gt_proto_shape is None:
-        args.lambda_gt_proto_shape = 0.15 if is_unified and is_main_dataset else 0.0
+        if is_unified and is_main_dataset:
+            args.lambda_gt_proto_shape = 0.15
+        elif is_unified and is_small_dataset:
+            args.lambda_gt_proto_shape = 0.08
+        else:
+            args.lambda_gt_proto_shape = 0.0
     if args.lambda_gt_proto_fde is None:
-        args.lambda_gt_proto_fde = 0.05 if is_unified and is_main_dataset else 0.0
+        if is_unified and is_main_dataset:
+            args.lambda_gt_proto_fde = 0.05
+        elif is_unified and is_small_dataset:
+            args.lambda_gt_proto_fde = 0.03
+        else:
+            args.lambda_gt_proto_fde = 0.0
     if args.lambda_gt_proto_coeff is None:
-        args.lambda_gt_proto_coeff = 0.10 if is_unified and is_main_dataset else 0.0
+        if is_unified and is_main_dataset:
+            args.lambda_gt_proto_coeff = 0.10
+        elif is_unified and is_small_dataset:
+            args.lambda_gt_proto_coeff = 0.05
+        else:
+            args.lambda_gt_proto_coeff = 0.0
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
 

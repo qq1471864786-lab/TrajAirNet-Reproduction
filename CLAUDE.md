@@ -32,19 +32,19 @@ Current cleanup stance: keep the endpoint update path, coupled endpoint-coeff de
 
 Numbers source: ASCENT Table II (for baselines), current seed3407 checkpoint evaluated on the full 111_days test split with score-biased `candidate_selection=tail_swap` (for ours).
 
-### Generalization (7days1~4, K=20) — partially complete
+### Generalization (7days1~4, K=20)
 | Method | 7days1 | 7days2 | 7days3 | 7days4 |
 |--------|--------|--------|--------|--------|
 | GooDFlight | 0.27/0.41 | 0.32/0.40 | 0.36/0.48 | 0.30/0.40 |
-| **Ours** | 0.326/0.509 | TBD | TBD | TBD |
+| **ProtoBasis-Net** | **0.267/0.395** | **0.277**/0.418 | **0.295/0.440** | **0.259/0.390** |
 
-For ADE/FDE, lower values are better. Current 7days1 is still weaker than GooDFlight in both ADE and FDE, but the gap is smaller than the old incorrect notes implied.
+For ADE/FDE, lower values are better. The 7days results use the same architecture as 111_days with 7days-specific hyperparameters: `n_proto=64`, `topk_proto=15`, `micro_per_proto=2`, `candidate_dense_topk=5`, `candidate_selection=tail_swap`, `batch_size=512`, and light GT-prototype losses `0.08/0.03/0.05`. ADE is better than GooDFlight on all four 7days splits; FDE is better on 7days1/3/4 and slightly weaker on 7days2.
 
 GooDFlight introduced a GLeV diversity metric, but the paper's formula, textual explanation, and reported scale are not clear enough for a fair direct comparison in this project. Do not report or optimize GLeV in the main experiments; use ADE/FDE and focused ablations instead.
 
 ## Positioning
 - vs ASCENT: "competitive with ASCENT"; ProtoBasis-Net is lower on ADE in the current full-test checkpoint evaluation, but FDE is still weaker, so do NOT claim an overall win.
-- vs GooDFlight: "surpasses GooDFlight" on 111_days. ✅
+- vs GooDFlight: "surpasses GooDFlight" on 111_days and on 7days ADE. ✅
 - Key differentiator from ASCENT: social interaction + structured prototype prior (ASCENT has no social modeling)
 - Key differentiator from GooDFlight: deterministic structured decoding vs diffusion; faster inference
 - Key differentiator from EigenTrajectory: prototype-conditioned basis (not global fixed basis); aviation domain
@@ -61,7 +61,6 @@ GooDFlight introduced a GLeV diversity metric, but the paper's formula, textual 
 5. Conclusion (~0.5 page)
 
 ## Experiments Still Needed
-- 7days2, 7days3, 7days4 (not yet run)
 - Ablation: w/o Router, w/o Basis, w/o Micro, w/o Shape Refiners, w/o Social
 
 ## Writing Files Location

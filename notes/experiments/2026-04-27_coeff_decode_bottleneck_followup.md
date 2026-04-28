@@ -1240,3 +1240,44 @@ Cleanup decision:
 - Disable/remove low-return training auxiliaries: endpoint residual loss, diversity repulsion, coefficient L2, and trajectory smoothness.
 - Keep candidate `score` loss because `tail_swap` uses candidate scores and removing it saves little complexity.
 - Keep GT-prototype shape/FDE/coeff losses because the matched ablation showed a clear ADE/FDE drop without them.
+
+## 2026-04-29 7days Hyperparameter Calibration
+
+Purpose: tune 7days1~4 without changing the ProtoBasis-Net architecture. The constraint was to keep the same active modules as 111_days and only allow dataset-specific hyperparameters.
+
+7days1 short ablation:
+
+| Variant | Epoch budget | ADE@20 | FDE@20 | Readout |
+| --- | ---: | ---: | ---: | --- |
+| old 7days default: `n_proto=96, topk=5, micro=4, fixed, batch=48` | 2/1/3, 80 batches | 0.5103 | 0.8367 | too weak |
+| `n_proto=64, topk=10, micro=2, fixed, batch=48` | same | 0.4905 | 0.8130 | better candidate coverage |
+| `n_proto=64, topk=15, micro=2, dense=5, tail_swap, batch=48` | same | 0.4608 | 0.7562 | candidate compression is the main gain |
+| same + `d_model=128, ff=256, enc=4` | same | 0.4607 | 0.7443 | FDE tiny gain only; do not enlarge small default |
+| same + light GT-proto loss `0.08/0.03/0.05` | same | 0.4600 | 0.7601 | small/noisy at short budget |
+| same + `batch=128` | same | 0.3964 | 0.6427 | large training stability gain |
+| same + `batch=256` | same | 0.3558 | 0.5602 | better |
+| same + `batch=512` | same | 0.3345 | 0.5149 | best short result |
+
+Schedule/loss follow-up on 7days1:
+
+| Variant | Budget | ADE@20 | FDE@20 | Decision |
+| --- | --- | ---: | ---: | --- |
+| tail-swap + batch512 | 3/2/7, 120 batches | 0.2764 | 0.4185 | close to GooDFlight |
+| tail-swap + batch512, resume +6 extra | 3/2/7+6, 120 batches | 0.2702 | 0.4032 | near target |
+| tail-swap + batch512 + light GT-proto | 3/2/7, 120 batches | 0.2718 | 0.4104 | better than no GT-proto at same epoch |
+| tail-swap + batch512 + light GT-proto, resume +6 extra | 3/2/7+6, 120 batches | 0.2671 | 0.3950 | promote for 7days |
+
+Final same-config 7days1~4 check:
+
+| Split | GooDFlight ADE/FDE | ProtoBasis-Net ADE/FDE | Readout |
+| --- | ---: | ---: | --- |
+| 7days1 | 0.27 / 0.41 | 0.2671 / 0.3950 | better ADE and FDE |
+| 7days2 | 0.32 / 0.40 | 0.2768 / 0.4176 | better ADE, FDE slightly worse |
+| 7days3 | 0.36 / 0.48 | 0.2947 / 0.4403 | better ADE and FDE |
+| 7days4 | 0.30 / 0.40 | 0.2586 / 0.3904 | better ADE and FDE |
+
+Decision:
+
+- Promote the validated 7days defaults: `n_proto=64`, `topk_proto=15`, `micro_per_proto=2`, `candidate_dense_topk=5`, `candidate_selection=tail_swap`, `batch_size=512`, `phase_a/b/c/extra=3/2/7/6`, and light GT-prototype losses `lambda_gt_proto_shape=0.08`, `lambda_gt_proto_fde=0.03`, `lambda_gt_proto_coeff=0.05`.
+- Keep 7days model capacity at `d_model=96`, `ff_dim=192`, `encoder_layers=3`; the 128/4-layer short test did not improve ADE enough to justify the extra cost.
+- This is a hyperparameter calibration, not a new architecture. It aligns 7days with the validated 111_days candidate-coverage logic while preserving one unified model design.

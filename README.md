@@ -31,10 +31,18 @@ The model builds 30 internal candidates from 15 routed prototypes x 2 micro mode
 
 Low-contribution training auxiliaries are disabled by default after the 2026-04-29 cleanup: endpoint residual supervision, diversity repulsion, coefficient L2, smoothness, and the two-stage coefficient update were not retained in matched short ablations.
 
+7days1~4 use the same architecture with dataset-tuned training defaults: `batch_size=512`, `phase_a/b/c/extra = 3/2/7/6`, and light GT-prototype losses `0.08/0.03/0.05`. The validated 7days profile keeps `n_proto=64`, `topk_proto=15`, `micro_per_proto=2`, `candidate_dense_topk=5`, and `candidate_selection=tail_swap`.
+
 Current default training command:
 
 ```bash
 python train.py 111_days --device cuda:0
+```
+
+7days default training command:
+
+```bash
+python train.py 7days1 --device cuda:0
 ```
 
 Continue training the same run:
