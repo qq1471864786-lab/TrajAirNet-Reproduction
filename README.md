@@ -55,7 +55,6 @@ Ablation switches:
 
 - `--disable_social`
 - `--disable_router`
-- `--disable_refiner`
 
 Protocol scaffolding:
 

@@ -49,7 +49,6 @@ def build_parser():
     parser.add_argument("--allow_cpu", action="store_true", help="Allow CPU fallback when CUDA is unavailable.")
     parser.add_argument("--ablate_no_social", action="store_true")
     parser.add_argument("--ablate_no_router", action="store_true")
-    parser.add_argument("--ablate_no_temporal_refiner", action="store_true")
     parser.add_argument("--ablate_no_endpoint_shape_refiner", action="store_true")
     parser.add_argument("--ablate_no_control_shape_refiner", action="store_true")
     parser.add_argument("--ablate_no_shape_refiners", action="store_true")
@@ -60,7 +59,6 @@ def build_parser():
     parser.add_argument("--ablate_no_two_stage_coeff", action="store_true")
     parser.add_argument("--ablate_no_coupled_decoder", action="store_true")
     parser.add_argument("--ablate_no_micro_coeff_anchors", action="store_true")
-    parser.add_argument("--ablate_no_micro_endpoint_offsets", action="store_true")
     return parser
 
 
@@ -106,20 +104,30 @@ def build_model(config, checkpoint):
         candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
-        micro_endpoint_offsets=bool(config.get("micro_endpoint_offsets", False)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
         control_shape_refiner=bool(config.get("control_shape_refiner", False)),
         control_shape_points=int(config.get("control_shape_points", 16)),
-        endpoint_set_refiner=bool(config.get("endpoint_set_refiner", False)),
-        endpoint_set_max_delta=float(config.get("endpoint_set_max_delta", 0.4)),
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
-        disable_refiner=config.get("disable_refiner", False),
     )
 
 
+def drop_removed_state_keys(state_dict):
+    removed_prefixes = (
+        "refiner.",
+        "micro_endpoint_head.",
+        "endpoint_set_refiner.",
+        "query_decoder.gate_head.",
+    )
+    return {
+        key: value
+        for key, value in state_dict.items()
+        if not any(key.startswith(prefix) for prefix in removed_prefixes)
+    }
+
+
 def load_checkpoint_state(model, checkpoint, dropout):
-    state_dict = checkpoint["model"]
+    state_dict = drop_removed_state_keys(checkpoint["model"])
     if "prototype_router.endpoint_head.0.weight" in state_dict:
         device = next(model.parameters()).device
         first_weight = state_dict["prototype_router.endpoint_head.0.weight"]
@@ -148,8 +156,6 @@ def apply_eval_ablation_overrides(model, args):
         model.disable_social = True
     if args.ablate_no_router:
         model.disable_router = True
-    if args.ablate_no_temporal_refiner:
-        model.disable_refiner = True
     if args.ablate_no_endpoint_shape_refiner or args.ablate_no_shape_refiners:
         model.endpoint_shape_refiner = None
         model.endpoint_shape_refiner_enabled = False
@@ -171,14 +177,6 @@ def apply_eval_ablation_overrides(model, args):
         model.coupled_decoder_enabled = False
     if args.ablate_no_micro_coeff_anchors:
         model.has_micro_coeff_anchors = False
-    if args.ablate_no_micro_endpoint_offsets:
-        model.micro_endpoint_head = None
-        model.micro_endpoint_offsets_enabled = False
-
-
-def resolve_eval_enable_refiner(checkpoint):
-    meta = checkpoint.get("meta", {})
-    return bool(meta.get("eval_enable_refiner", True))
 
 
 def evaluate(
@@ -186,7 +184,6 @@ def evaluate(
     loader,
     device,
     config,
-    enable_refiner=True,
     use_amp=False,
     limit_eval_batches=0,
     progress_desc="test eval",
@@ -222,7 +219,6 @@ def evaluate(
                 outputs = model(
                     batch["obs_xyz"],
                     batch["obs_mask"],
-                    enable_refiner=enable_refiner,
                 )
             metrics, batch_count, _ = summarize_batch_metrics(
                 outputs,
@@ -242,7 +238,7 @@ def evaluate(
 
 
 @torch.no_grad()
-def measure_latency_ms(model, batch, enable_refiner=True, warmup=30, iters=100):
+def measure_latency_ms(model, batch, warmup=30, iters=100):
     if next(model.parameters()).device.type != "cuda":
         return None
     model.eval()
@@ -252,7 +248,6 @@ def measure_latency_ms(model, batch, enable_refiner=True, warmup=30, iters=100):
         _ = model(
             batch["obs_xyz"],
             batch["obs_mask"],
-            enable_refiner=enable_refiner,
         )
     torch.cuda.synchronize()
 
@@ -262,7 +257,6 @@ def measure_latency_ms(model, batch, enable_refiner=True, warmup=30, iters=100):
         _ = model(
             batch["obs_xyz"],
             batch["obs_mask"],
-            enable_refiner=enable_refiner,
         )
         ender.record()
         torch.cuda.synchronize()
@@ -316,7 +310,6 @@ def main():
     use_amp = device.type == "cuda" and not args.no_amp
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
-    eval_enable_refiner = resolve_eval_enable_refiner(checkpoint)
     dataset_variant = args.dataset_variant or config["dataset_variant"]
     dataset_name = args.dataset_name or config["dataset_name"]
 
@@ -365,7 +358,6 @@ def main():
         loader,
         device,
         config,
-        enable_refiner=eval_enable_refiner,
         use_amp=use_amp,
         limit_eval_batches=args.limit_eval_batches,
     )
@@ -375,7 +367,7 @@ def main():
             latency_loader = build_loader(dataset, bs, args, config["max_agents"])
             batch = next(iter(latency_loader))
             batch = {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items()}
-            latency = measure_latency_ms(model, batch, enable_refiner=eval_enable_refiner)
+            latency = measure_latency_ms(model, batch)
             if latency is not None:
                 metrics[f"latency_bs{bs}_mean_ms"] = latency["latency_mean_ms"]
                 metrics[f"latency_bs{bs}_p50_ms"] = latency["latency_p50_ms"]

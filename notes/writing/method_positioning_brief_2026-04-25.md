@@ -31,16 +31,13 @@ ProtoBasis-Net 是面向 TrajAir 非塔台终端空域的多模态 3D 航迹预�
    对训练集未来轨迹的 5 维摘要做 K-Means，默认 64 个原型。摘要为局部终点 xyz、累计 yaw 变化、累计 pitch 变化。`111_days` 默认从 64 个原型中选 top-15，并预测终点残差。
 
 5. `PrototypeConditionedQueryDecoder`
-   `111_days` 默认每个路由原型生成 2 个 micro modes，再用 `candidate_dense_topk=5` 保留 20 条候选。query 由原型 token、终点 token、micro embedding、目标上下文以及可选 micro coefficient anchor 组成。输出 basis coefficient、score、difficulty gate。
+   `111_days` 默认每个路由原型生成 2 个 micro modes，再用 `candidate_dense_topk=5` 保留 20 条候选。query 由原型 token、终点 token、micro embedding、目标上下文以及可选 micro coefficient anchor 组成。输出 basis coefficient 和 candidate score。
 
 6. `BasisBank`
    对训练集 future local trajectory 减去线性 endpoint anchor 后做 SVD，默认取 16 维基。候选轨迹为 endpoint anchor 加 basis residual。
 
-7. `TemporalResidualRefiner`
-   depthwise conv + pointwise conv 对 coarse trajectory 做时序残差修正，修正幅度由 decoder gate 控制。
-
-8. 主数据集默认增强项
-   当前 `train.py` 对 `111_days` 默认启用 `local_basis_dim=2`、`support_aware_local_basis=True`、`two_stage_decoder=True`。因此 Method 草稿如果只写“全局 SVD 基”会漏掉当前正式默认实现。
+7. 主数据集默认增强项
+   当前 `train.py` 对 `111_days` 默认启用 `local_basis_dim=2`、`support_aware_local_basis=True`、`two_stage_decoder=True`、`coupled_decoder=True`、endpoint/control shape refiners。Method 草稿如果只写“全局 SVD 基”会漏掉当前正式默认实现。
 
 ## 3. 数据与评测协议
 
@@ -74,10 +71,10 @@ ProtoBasis-Net 是面向 TrajAir 非塔台终端空域的多模态 3D 航迹预�
 
 `train.py` 当前默认阶段：
 
-- Stage A: 10 epochs, `basis_warmup`, 强制 GT prototype, 不启用 refiner
-- Stage B: 4 epochs, `joint_no_refiner`, 释放 router, 不启用 refiner
-- Stage C: `111_days` 51 epochs, `7days*` 20 epochs, 启用 refiner
-- Extra tail: 当前代码对 `111_days` 默认为 0，但旧 roadmap 曾写 35；需要以实际 run config 或最新正式命令为准
+- Stage A: 10 epochs, `basis_warmup`, 强制 GT prototype
+- Stage B: 4 epochs, `joint_router`, 释放 router
+- Stage C: `111_days` 8 epochs, `7days*` 20 epochs, `joint_polish`
+- Extra tail: 当前代码对 `111_days` 默认为 0，只有显式传 `--extra_epochs` 才追加
 
 当前推荐正式主实验命令来自 notes：
 
@@ -173,7 +170,7 @@ SingularTrajectory 进一步把 SVD/Singular space 与 adaptive anchor、diffusi
 
 - 这些方法主要面向行人/通用视觉轨迹。
 - EigenTrajectory 是全局低秩描述；ProtoBasis-Net 是原型路由条件下的局部/结构化 basis decoding。
-- SingularTrajectory 用 diffusion 增强 prototype paths；ProtoBasis-Net 用轻量 residual refiner。
+- SingularTrajectory 用 diffusion 增强 prototype paths；ProtoBasis-Net 用 endpoint-preserving shape/control refiners。
 
 写法：
 
@@ -199,7 +196,7 @@ MTR 用 learnable motion query pairs 同时做 global intention localization 和
    不逐点回归未来 120 步，而是预测低维 basis coefficients，在 endpoint anchor 上重建完整 3D trajectory。强调长时预测的结构先验和平滑性。
 
 3. Structured multi-candidate decoding with social context
-   每个 prototype 下扩展 micro modes，并结合 social cross-attention 与 temporal residual refiner，提高多样性和局部细节。
+   每个 prototype 下扩展 micro modes，并结合 social cross-attention 与 endpoint-preserving shape/control refiners，提高多样性和局部细节。
 
 不要把 `Transformer encoder`、`cross-attention`、`SVD` 单独写成新贡献。它们是支撑模块，不是核心新意。
 
@@ -211,11 +208,11 @@ GooDFlight 提出了 GLeV，但原文公式、解释文字和表格量级不够�
 
 ### Method 草稿和代码默认组件有漂移
 
-`notes/writing/method_zh.md` 主要描述 global basis + refiner，但当前 `111_days` 默认还包含 local basis 和 two-stage decoder。论文 Method 必须和最终正式实验配置一致。
+`notes/writing/method_zh.md` 主要描述 global basis + refiner，但当前 `111_days` 默认还包含 local basis、two-stage decoder、coupled decoder 和 endpoint/control shape refiners。论文 Method 必须和最终正式实验配置一致。
 
-### `test.py` artifact 字段需注意
+### 测试和训练默认组件需一致
 
-`test.py` 构建 `model_artifact` 时未写入 `micro_endpoint_anchors`，且 build_model 也未传 `micro_endpoint_scale`。当前默认 `micro_endpoint_scale=0.0` 时无影响，但若未来启用 micro endpoint anchor，需要同步测试脚本。
+已清理旧的 micro endpoint offset/anchor 方向；当前测试与训练只保留 micro coefficient anchors。
 
 ### 气象/上下文未使用
 
@@ -231,7 +228,7 @@ TrajAir 原始数据包含 METAR/风等上下文，当前 dataset 只使用 xyz�
    - w/o router
    - w/o basis
    - w/o micro modes
-   - w/o refiner
+   - w/o endpoint/control shape refiners
    - w/o social
 4. latency: `bs=1` 和 `bs=16`，用于对比 GooDFlight diffusion 与 ASCENT lightweight claim。
 
@@ -241,7 +238,7 @@ TrajAir 原始数据包含 METAR/风等上下文，当前 dataset 只使用 xyz�
 - basis 证明低维重建不是装饰
 - micro 证明 top-20 多样性来自结构化展开
 - social 证明多机交互有收益
-- refiner 证明基分解后仍需要局部细节修正
+- endpoint/control shape refiners 证明基分解后仍需要局部细节修正
 
 ## 10. 推荐论文叙事
 

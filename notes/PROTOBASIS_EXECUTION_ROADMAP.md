@@ -7,36 +7,28 @@
 - main datasets: `111_days`, `7days1`, `7days2`, `7days3`, `7days4`
 - obs: `40`
 - preds: `120`
-- modes: `topk_proto=5`, `micro_per_proto=4`, total `20`
+- modes: `topk_proto=15`, `micro_per_proto=2`, `candidate_dense_topk=5`, total `20`
 - primary metrics: `ADE@5`, `FDE@5`, `ADE@20`, `FDE@20`
-- secondary metrics: `GLeV@5/@20`, `rare_FDE@20`, `Top1_ADE/FDE`, `latency_bs1/bs16`
+- secondary metrics: `rare_FDE@20`, `Top1_ADE/FDE`, `latency_bs1/bs16`
 
 ## Current Code Defaults Under Validation
 
 - Stage A: `10 epochs`
   - `force_gt_proto=True`
-  - `enable_refiner=False`
-  - `rank_weight=0.0`
   - `div_weight=0.0`
   - `lr=3e-4`
 - Stage B: `4 epochs`
   - `force_gt_proto=False`
-  - `enable_refiner=False`
-  - `rank_weight=0.0`
   - `div_weight=0.0`
   - `lr starts at 2e-4`
-- Stage C: `51 epochs`
+- Stage C: `8 epochs` on `111_days`, `20 epochs` on `7days*`
   - `force_gt_proto=False`
-  - `enable_refiner=True`
-  - `rank_weight=1.0`
   - `div_weight=1.0`
   - `lr starts at 8e-5`
   - `rare_weight=1.5`
-- Extra refiner tail: `35 epochs`
-  - continues `joint_refiner`
-  - keeps the validated `65`-epoch total while shifting more budget into `joint_refiner`
-  - extends total default training length to `100 epochs`
-  - runs with a dedicated constant tail lr: `4e-5`
+- Extra polish tail: default `0 epochs`
+  - runs only when explicitly passed with `--extra_epochs`
+  - uses a dedicated constant tail lr: `4e-5`
 - low-lr floor:
   - `min_lr=1.5e-5`
   - `extra_lr=4e-5`
@@ -55,7 +47,7 @@
 - supporting default loss changes:
   - `lambda_fde=1.0`
   - `lambda_proto=0.35`
-  - `lambda_score=0.30`
+  - `lambda_score=0.03`
 
 ## Required Main Experiments
 
@@ -65,7 +57,6 @@
 4. `111_days` strongest kinematic baseline 3 seeds.
 5. Core ablations:
    - `--disable_router`
-   - `--disable_refiner`
    - `--disable_social`
 6. `7days1~4` unified 40/120 runs.
 7. `111_days` and `7days1~4` final 5-seed runs.

@@ -38,13 +38,6 @@ def _trajectory_smoothness(xyz):
     return second_diff.abs().mean()
 
 
-def _endpoint_coverage_loss(pred_xyz, gt_xyz):
-    endpoint_error = torch.linalg.norm(pred_xyz[:, :, -1] - gt_xyz[:, None, -1], dim=-1)
-    best_endpoint_idx = endpoint_error.argmin(dim=1)
-    endpoint = _gather_candidates(pred_xyz[:, :, -1], best_endpoint_idx)
-    return F.smooth_l1_loss(endpoint, gt_xyz[:, -1])
-
-
 def _soft_label_cross_entropy(logits, targets):
     return -(targets * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
 
@@ -115,104 +108,6 @@ def _gt_proto_coeff_loss(coeff, gt_basis_coeff, top_proto_idx, gt_proto_id):
     return F.smooth_l1_loss(aligned_coeff[hit_mask], gt_basis_coeff[hit_mask])
 
 
-def _anchor_reconstruction_loss(
-    coarse_local,
-    endpoint_mode_local,
-    gt_local,
-    basis_pinv,
-    basis_matrix,
-    top_proto_idx,
-    gt_proto_id,
-    mode,
-):
-    if (
-        mode == "none"
-        or coarse_local is None
-        or endpoint_mode_local is None
-        or basis_pinv is None
-        or basis_matrix is None
-    ):
-        return gt_local.sum() * 0.0
-
-    if top_proto_idx is None or top_proto_idx.size(1) != coarse_local.size(1) or endpoint_mode_local.shape[:2] != coarse_local.shape[:2]:
-        return coarse_local.sum() * 0.0
-
-    alpha = torch.linspace(0.0, 1.0, steps=gt_local.size(1), device=gt_local.device, dtype=gt_local.dtype)
-    anchor = alpha[None, None, :, None] * endpoint_mode_local[:, :, None, :]
-    residual = (gt_local[:, None, :, :] - anchor).reshape(-1, gt_local.size(1) * gt_local.size(2))
-    target_coeff = residual @ basis_pinv.to(device=gt_local.device, dtype=gt_local.dtype)
-    target_recon = target_coeff @ basis_matrix.to(device=gt_local.device, dtype=gt_local.dtype)
-    target_path = anchor + target_recon.reshape_as(coarse_local)
-
-    if mode == "all":
-        return F.smooth_l1_loss(coarse_local, target_path.detach())
-    if mode == "gt_proto":
-        match_mode = top_proto_idx.eq(gt_proto_id[:, None])
-        if not match_mode.any():
-            return coarse_local.sum() * 0.0
-        return F.smooth_l1_loss(coarse_local[match_mode], target_path.detach()[match_mode])
-    raise ValueError(f"Unsupported anchor_recon_supervision: {mode}")
-
-
-def _projection_guided_losses(
-    coeff,
-    coarse_local,
-    endpoint_mode_local,
-    gt_local,
-    basis_pinv,
-    basis_matrix,
-    candidate_proto_idx,
-    gt_proto_id,
-    best_idx,
-    mode,
-):
-    if (
-        mode == "none"
-        or coeff is None
-        or coarse_local is None
-        or endpoint_mode_local is None
-        or basis_pinv is None
-        or basis_matrix is None
-    ):
-        zero = gt_local.sum() * 0.0
-        return zero, zero, gt_local.new_tensor(0.0)
-
-    if endpoint_mode_local.shape[:2] != coeff.shape[:2] or coarse_local.shape[:2] != coeff.shape[:2]:
-        zero = coeff.sum() * 0.0
-        return zero, zero, coeff.new_tensor(0.0)
-
-    batch_size, num_modes, basis_dim = coeff.shape
-    select_mask = torch.zeros(batch_size, num_modes, dtype=torch.bool, device=coeff.device)
-    if mode in {"winner", "winner_gt_proto"}:
-        select_mask.scatter_(1, best_idx[:, None], True)
-    if mode in {"gt_proto", "winner_gt_proto"}:
-        if candidate_proto_idx is None or candidate_proto_idx.shape[:2] != coeff.shape[:2]:
-            if mode == "gt_proto":
-                zero = coeff.sum() * 0.0
-                return zero, zero, coeff.new_tensor(0.0)
-        else:
-            select_mask = select_mask | candidate_proto_idx.eq(gt_proto_id[:, None])
-    if mode == "all":
-        select_mask.fill_(True)
-    if mode not in {"winner", "gt_proto", "winner_gt_proto", "all"}:
-        raise ValueError(f"Unsupported projection_supervision: {mode}")
-    if not select_mask.any():
-        zero = coeff.sum() * 0.0
-        return zero, zero, coeff.new_tensor(0.0)
-
-    alpha = torch.linspace(0.0, 1.0, steps=gt_local.size(1), device=gt_local.device, dtype=gt_local.dtype)
-    anchor = alpha[None, None, :, None] * endpoint_mode_local[:, :, None, :]
-    residual = (gt_local[:, None, :, :] - anchor).reshape(-1, gt_local.size(1) * gt_local.size(2))
-    target_coeff = residual @ basis_pinv.to(device=gt_local.device, dtype=gt_local.dtype)
-    target_coeff = target_coeff.reshape(batch_size, num_modes, basis_dim)
-    target_recon = target_coeff.reshape(-1, basis_dim) @ basis_matrix.to(device=gt_local.device, dtype=gt_local.dtype)
-    target_path = anchor + target_recon.reshape_as(coarse_local)
-
-    coeff_loss = F.smooth_l1_loss(coeff[select_mask], target_coeff.detach()[select_mask])
-    path_loss = F.smooth_l1_loss(coarse_local[select_mask], target_path.detach()[select_mask])
-    return coeff_loss, path_loss, select_mask.float().mean()
-
-
 class ProtoBasisLoss(nn.Module):
     def __init__(
         self,
@@ -234,21 +129,10 @@ class ProtoBasisLoss(nn.Module):
         proto_freq_weight_power=0.0,
         proto_freq_weight_max=5.0,
         endpoint_residual_supervision="all",
-        lambda_anchor_recon=0.0,
-        anchor_recon_supervision="none",
-        lambda_projection_coeff=0.0,
-        lambda_projection_path=0.0,
-        projection_supervision="none",
-        lambda_endpoint_coverage=0.0,
-        lambda_endpoint_delta=0.0,
     ):
         super().__init__()
         if endpoint_residual_supervision not in {"all", "hit_only"}:
             raise ValueError(f"Unsupported endpoint_residual_supervision: {endpoint_residual_supervision}")
-        if anchor_recon_supervision not in {"none", "gt_proto", "all"}:
-            raise ValueError(f"Unsupported anchor_recon_supervision: {anchor_recon_supervision}")
-        if projection_supervision not in {"none", "winner", "gt_proto", "winner_gt_proto", "all"}:
-            raise ValueError(f"Unsupported projection_supervision: {projection_supervision}")
         self.lambda_xyz = lambda_xyz
         self.lambda_fde = lambda_fde
         self.lambda_proto = lambda_proto
@@ -267,13 +151,6 @@ class ProtoBasisLoss(nn.Module):
         self.proto_freq_weight_power = proto_freq_weight_power
         self.proto_freq_weight_max = proto_freq_weight_max
         self.endpoint_residual_supervision = endpoint_residual_supervision
-        self.lambda_anchor_recon = lambda_anchor_recon
-        self.anchor_recon_supervision = anchor_recon_supervision
-        self.lambda_projection_coeff = lambda_projection_coeff
-        self.lambda_projection_path = lambda_projection_path
-        self.projection_supervision = projection_supervision
-        self.lambda_endpoint_coverage = lambda_endpoint_coverage
-        self.lambda_endpoint_delta = lambda_endpoint_delta
 
     def forward(self, outputs, batch, stage_cfg):
         pred_xyz = outputs["pred_xyz"]
@@ -332,15 +209,6 @@ class ProtoBasisLoss(nn.Module):
         div_loss = _diversity_repulsion(pred_xyz)
         coeff_loss = winner_coeff.pow(2).mean()
         smooth_loss = _trajectory_smoothness(winner_xyz)
-        endpoint_coverage_loss = _endpoint_coverage_loss(pred_xyz, gt_xyz)
-        endpoint_set_delta = aux.get("endpoint_set_delta")
-        if endpoint_set_delta is None:
-            endpoint_delta_loss = pred_xyz.sum() * 0.0
-            endpoint_set_gate = pred_xyz.new_tensor(0.0)
-        else:
-            endpoint_delta_loss = endpoint_set_delta.pow(2).mean()
-            endpoint_set_gate = aux.get("endpoint_set_gate", endpoint_set_delta.new_zeros(endpoint_set_delta.shape[:2]))
-            endpoint_set_gate = endpoint_set_gate.mean()
         gt_proto_shape_loss, gt_proto_fde_loss, gt_proto_hit_rate = _gt_proto_aligned_losses(
             pred_xyz,
             gt_xyz,
@@ -354,28 +222,6 @@ class ProtoBasisLoss(nn.Module):
             candidate_proto_idx,
             gt_proto_id,
         )
-        anchor_recon_loss = _anchor_reconstruction_loss(
-            aux.get("coarse_local"),
-            aux.get("endpoint_mode_local"),
-            batch["fut_local"],
-            aux.get("basis_pinv"),
-            aux.get("basis_matrix"),
-            candidate_proto_idx,
-            gt_proto_id,
-            self.anchor_recon_supervision,
-        )
-        projection_coeff_loss, projection_path_loss, projection_rate = _projection_guided_losses(
-            aux["coeff"],
-            aux.get("coarse_local"),
-            aux.get("endpoint_mode_local"),
-            batch["fut_local"],
-            aux.get("basis_pinv"),
-            aux.get("basis_matrix"),
-            candidate_proto_idx,
-            gt_proto_id,
-            best_idx,
-            self.projection_supervision,
-        )
         total = self.lambda_xyz * xyz_loss
         total = total + self.lambda_fde * fde_loss
         total = total + self.lambda_proto * proto_loss
@@ -387,11 +233,6 @@ class ProtoBasisLoss(nn.Module):
         total = total + self.lambda_gt_proto_shape * gt_proto_shape_loss
         total = total + self.lambda_gt_proto_fde * gt_proto_fde_loss
         total = total + self.lambda_gt_proto_coeff * gt_proto_coeff_loss
-        total = total + self.lambda_anchor_recon * anchor_recon_loss
-        total = total + self.lambda_projection_coeff * projection_coeff_loss
-        total = total + self.lambda_projection_path * projection_path_loss
-        total = total + self.lambda_endpoint_coverage * endpoint_coverage_loss
-        total = total + self.lambda_endpoint_delta * endpoint_delta_loss
 
         stats = {
             "xyz": float(xyz_loss.detach().item()),
@@ -405,13 +246,6 @@ class ProtoBasisLoss(nn.Module):
             "gt_proto_shape": float(gt_proto_shape_loss.detach().item()),
             "gt_proto_fde": float(gt_proto_fde_loss.detach().item()),
             "gt_proto_coeff": float(gt_proto_coeff_loss.detach().item()),
-            "anchor_recon": float(anchor_recon_loss.detach().item()),
-            "projection_coeff": float(projection_coeff_loss.detach().item()),
-            "projection_path": float(projection_path_loss.detach().item()),
-            "projection_rate": float(projection_rate.detach().item()),
-            "endpoint_coverage": float(endpoint_coverage_loss.detach().item()),
-            "endpoint_delta": float(endpoint_delta_loss.detach().item()),
-            "endpoint_set_gate": float(endpoint_set_gate.detach().item()),
             "gt_proto_hit_rate": float(gt_proto_hit_rate.detach().item()),
             "winner_ade": float(ade.min(dim=1).values.mean().detach().item()),
             "res_hit_rate": float(hit_mask.float().mean().detach().item()),

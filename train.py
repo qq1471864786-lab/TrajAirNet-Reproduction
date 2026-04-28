@@ -49,13 +49,6 @@ LOSS_STAT_KEYS = (
     "gt_proto_shape",
     "gt_proto_fde",
     "gt_proto_coeff",
-    "anchor_recon",
-    "projection_coeff",
-    "projection_path",
-    "projection_rate",
-    "endpoint_coverage",
-    "endpoint_delta",
-    "endpoint_set_gate",
     "gt_proto_hit_rate",
     "winner_ade",
     "res_hit_rate",
@@ -97,9 +90,6 @@ def build_parser():
     parser.add_argument("--no_coupled_decoder", dest="coupled_decoder", action="store_false")
     parser.set_defaults(coupled_decoder=None)
     parser.add_argument("--coupled_decoder_iters", type=int, default=None)
-    parser.add_argument("--micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_true")
-    parser.add_argument("--no_micro_endpoint_offsets", dest="micro_endpoint_offsets", action="store_false")
-    parser.set_defaults(micro_endpoint_offsets=None)
     parser.add_argument("--endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_true")
     parser.add_argument("--no_endpoint_shape_refiner", dest="endpoint_shape_refiner", action="store_false")
     parser.set_defaults(endpoint_shape_refiner=None)
@@ -107,10 +97,6 @@ def build_parser():
     parser.add_argument("--no_control_shape_refiner", dest="control_shape_refiner", action="store_false")
     parser.set_defaults(control_shape_refiner=None)
     parser.add_argument("--control_shape_points", type=int, default=None)
-    parser.add_argument("--endpoint_set_refiner", dest="endpoint_set_refiner", action="store_true")
-    parser.add_argument("--no_endpoint_set_refiner", dest="endpoint_set_refiner", action="store_false")
-    parser.set_defaults(endpoint_set_refiner=None)
-    parser.add_argument("--endpoint_set_max_delta", type=float, default=0.4)
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
@@ -136,14 +122,14 @@ def build_parser():
     parser.add_argument("--phase_a_epochs", type=int, default=None)
     parser.add_argument("--phase_b_epochs", type=int, default=None)
     parser.add_argument("--phase_c_epochs", type=int, default=None)
-    parser.add_argument("--extra_epochs", type=int, default=None, help="Extra refiner-stage epochs appended after phase C.")
+    parser.add_argument("--extra_epochs", type=int, default=None, help="Extra polish-stage epochs appended after phase C.")
     parser.add_argument("--early_stop_patience", type=int, default=None, help="Stop after this many epochs without a best20 update. Use 0 to disable.")
     parser.add_argument("--early_stop_min_epoch", type=int, default=None, help="Earliest epoch where early stopping may trigger.")
     parser.add_argument("--stage_a_lr", type=float, default=3e-4)
     parser.add_argument("--stage_b_lr", type=float, default=2e-4)
     parser.add_argument("--stage_c_lr", type=float, default=8e-5)
     parser.add_argument("--min_lr", type=float, default=1.5e-5)
-    parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra refiner epochs.")
+    parser.add_argument("--extra_lr", type=float, default=4e-5, help="Constant LR used for appended extra polish epochs.")
     parser.add_argument("--stage_b_div_weight", type=float, default=0.0)
     parser.add_argument("--stage_c_div_weight", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
@@ -171,25 +157,6 @@ def build_parser():
     parser.add_argument("--lambda_gt_proto_shape", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_fde", type=float, default=None)
     parser.add_argument("--lambda_gt_proto_coeff", type=float, default=None)
-    parser.add_argument("--lambda_anchor_recon", type=float, default=None)
-    parser.add_argument(
-        "--anchor_recon_supervision",
-        type=str,
-        default=None,
-        choices=["none", "gt_proto", "all"],
-        help="Coarse-path distillation to the LS reconstruction around each predicted endpoint anchor.",
-    )
-    parser.add_argument("--lambda_projection_coeff", type=float, default=None)
-    parser.add_argument("--lambda_projection_path", type=float, default=None)
-    parser.add_argument("--lambda_endpoint_coverage", type=float, default=None)
-    parser.add_argument("--lambda_endpoint_delta", type=float, default=None)
-    parser.add_argument(
-        "--projection_supervision",
-        type=str,
-        default=None,
-        choices=["none", "winner", "gt_proto", "winner_gt_proto", "all"],
-        help="Supervise selected candidates toward the LS coeff/path under each predicted endpoint anchor.",
-    )
     parser.add_argument("--score_hard_mix", type=float, default=0.25)
     parser.add_argument("--score_fde_weight", type=float, default=0.75)
     parser.add_argument("--score_soft_temperature", type=float, default=0.35)
@@ -206,7 +173,6 @@ def build_parser():
 
     parser.add_argument("--disable_social", action="store_true")
     parser.add_argument("--disable_router", action="store_true")
-    parser.add_argument("--disable_refiner", action="store_true")
 
     parser.add_argument("--save_dir", type=str, default="save_model")
     parser.add_argument("--init_checkpoint", type=str, default="", help="Initialize model weights from a checkpoint.")
@@ -215,16 +181,6 @@ def build_parser():
         "--freeze_backbone_except_new_heads",
         action="store_true",
         help="Train only newly added heads after init_checkpoint.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_micro_endpoint_offsets",
-        action="store_true",
-        help="Train only the per-micro endpoint offset head.",
-    )
-    parser.add_argument(
-        "--freeze_backbone_except_endpoint_set_refiner",
-        action="store_true",
-        help="Train only the endpoint set refiner.",
     )
     parser.add_argument("--device", type=str, default="")
     parser.add_argument("--limit_train_batches", type=int, default=0)
@@ -307,16 +263,12 @@ def apply_training_defaults(args):
         args.coupled_decoder = bool(uses_validated_basis_profile)
     if args.coupled_decoder_iters is None:
         args.coupled_decoder_iters = 2 if args.coupled_decoder else 0
-    if args.micro_endpoint_offsets is None:
-        args.micro_endpoint_offsets = bool(uses_validated_basis_profile)
     if args.endpoint_shape_refiner is None:
         args.endpoint_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_refiner is None:
         args.control_shape_refiner = bool(uses_validated_basis_profile)
     if args.control_shape_points is None:
         args.control_shape_points = 32 if args.control_shape_refiner else 16
-    if args.endpoint_set_refiner is None:
-        args.endpoint_set_refiner = False
     if args.micro_coeff_anchors is None:
         args.micro_coeff_anchors = True
 
@@ -372,21 +324,6 @@ def apply_training_defaults(args):
         args.lambda_gt_proto_fde = 0.05 if is_unified and is_main_dataset else 0.0
     if args.lambda_gt_proto_coeff is None:
         args.lambda_gt_proto_coeff = 0.10 if is_unified and is_main_dataset else 0.0
-    if args.lambda_anchor_recon is None:
-        args.lambda_anchor_recon = 0.10 if is_unified and is_main_dataset else 0.0
-    if args.anchor_recon_supervision is None:
-        args.anchor_recon_supervision = "gt_proto" if is_unified and is_main_dataset else "none"
-    use_projection_guidance = bool(is_unified and is_main_dataset and args.coupled_decoder)
-    if args.lambda_projection_coeff is None:
-        args.lambda_projection_coeff = 0.02 if use_projection_guidance else 0.0
-    if args.lambda_projection_path is None:
-        args.lambda_projection_path = 0.05 if use_projection_guidance else 0.0
-    if args.lambda_endpoint_coverage is None:
-        args.lambda_endpoint_coverage = 0.15 if args.endpoint_set_refiner else 0.0
-    if args.lambda_endpoint_delta is None:
-        args.lambda_endpoint_delta = 0.01 if args.endpoint_set_refiner else 0.0
-    if args.projection_supervision is None:
-        args.projection_supervision = "winner_gt_proto" if use_projection_guidance else "none"
     args.epochs = args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs + max(args.extra_epochs, 0)
 
 
@@ -408,25 +345,22 @@ def stage_config(epoch, args):
     if epoch <= args.phase_a_epochs:
         return {
             "name": "basis_warmup",
-            "enable_refiner": False,
             "force_gt_proto": True,
             "div_weight": 0.0,
             "rare_weight": 1.0,
         }
     if epoch <= args.phase_a_epochs + args.phase_b_epochs:
         return {
-            "name": "joint_no_refiner",
-            "enable_refiner": False,
+            "name": "joint_router",
             "force_gt_proto": False,
             "div_weight": args.stage_b_div_weight,
             "rare_weight": 1.0,
         }
-    stage_name = "joint_refiner"
+    stage_name = "joint_polish"
     if epoch > args.phase_a_epochs + args.phase_b_epochs + args.phase_c_epochs:
-        stage_name = "joint_refiner_extra"
+        stage_name = "joint_polish_extra"
     return {
         "name": stage_name,
-        "enable_refiner": True,
         "force_gt_proto": False,
         "div_weight": args.stage_c_div_weight,
         "rare_weight": 1.5,
@@ -526,23 +460,33 @@ def build_model(args, model_artifact):
         candidate_dense_topk=args.candidate_dense_topk,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
-        micro_endpoint_offsets=bool(args.micro_endpoint_offsets),
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
         control_shape_refiner=bool(args.control_shape_refiner),
         control_shape_points=args.control_shape_points,
-        endpoint_set_refiner=bool(args.endpoint_set_refiner),
-        endpoint_set_max_delta=args.endpoint_set_max_delta,
         disable_social=args.disable_social,
         disable_router=args.disable_router,
-        disable_refiner=args.disable_refiner,
     )
+
+
+def drop_removed_state_keys(state_dict):
+    removed_prefixes = (
+        "refiner.",
+        "micro_endpoint_head.",
+        "endpoint_set_refiner.",
+        "query_decoder.gate_head.",
+    )
+    return {
+        key: value
+        for key, value in state_dict.items()
+        if not any(key.startswith(prefix) for prefix in removed_prefixes)
+    }
 
 
 def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=False):
     if not checkpoint_path:
         return None
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("model", checkpoint)
+    state_dict = drop_removed_state_keys(checkpoint.get("model", checkpoint))
     if allow_partial:
         model_state = model.state_dict()
         compatible_state = {}
@@ -592,45 +536,13 @@ def initialize_from_checkpoint(model, checkpoint_path, device, allow_partial=Fal
 
 
 def apply_freeze_policy(model, args):
-    if args.freeze_backbone_except_endpoint_set_refiner:
-        trainable_modules = [getattr(model, "endpoint_set_refiner", None)]
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_endpoint_set_refiner requires --endpoint_set_refiner.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
-    if args.freeze_backbone_except_micro_endpoint_offsets:
-        trainable_modules = [getattr(model, "micro_endpoint_head", None)]
-        trainable_modules = [module for module in trainable_modules if module is not None]
-        if not trainable_modules:
-            raise RuntimeError("--freeze_backbone_except_micro_endpoint_offsets requires --micro_endpoint_offsets.")
-        for parameter in model.parameters():
-            parameter.requires_grad = False
-        for module in trainable_modules:
-            for parameter in module.parameters():
-                parameter.requires_grad = True
-        trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-        total = sum(parameter.numel() for parameter in model.parameters())
-        print(f"[Freeze] trainable_params={trainable} total_params={total}")
-        return
-
     if not args.freeze_backbone_except_new_heads:
         return
     trainable_modules = [
         module
         for module in (
-            getattr(model, "micro_endpoint_head", None),
             getattr(model, "endpoint_shape_refiner", None),
             getattr(model, "control_shape_refiner", None),
-            getattr(model, "endpoint_set_refiner", None),
         )
         if module is not None
     ]
@@ -756,7 +668,6 @@ def evaluate(
     loader,
     device,
     args,
-    enable_refiner,
     use_amp=False,
     limit_eval_batches=0,
     progress_desc="eval",
@@ -787,7 +698,6 @@ def evaluate(
                 outputs = model(
                     batch["obs_xyz"],
                     batch["obs_mask"],
-                    enable_refiner=enable_refiner,
                 )
             metrics, count, rare = summarize_batch_metrics(
                 outputs,
@@ -823,8 +733,11 @@ def load_resume_checkpoint(args, run_dir, model, optimizer, device):
         return 1, 0, best_records
 
     checkpoint = torch.load(last_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
+    model.load_state_dict(drop_removed_state_keys(checkpoint["model"]))
+    try:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+    except ValueError as exc:
+        print(f"[Resume] optimizer state skipped after architecture cleanup: {exc}")
 
     saved_best = checkpoint.get("best", {})
     for key, record in best_records.items():
@@ -953,9 +866,6 @@ def format_epoch_summary(args, epoch, total_epochs, phase_name, train_loss, loss
         f"gt_shape={format_scalar(loss_stats['gt_proto_shape'])}",
         f"gt_fde={format_scalar(loss_stats['gt_proto_fde'])}",
         f"gt_coeff={format_scalar(loss_stats['gt_proto_coeff'])}",
-        f"anchor_recon={format_scalar(loss_stats['anchor_recon'])}",
-        f"proj_coeff={format_scalar(loss_stats['projection_coeff'])}",
-        f"proj_path={format_scalar(loss_stats['projection_path'])}",
         f"gt_hit={format_scalar(loss_stats['gt_proto_hit_rate'])}",
         f"winner_ADE={format_scalar(loss_stats['winner_ade'])}",
     ]
@@ -1058,13 +968,6 @@ def main():
         proto_freq_weight_power=args.proto_freq_weight_power,
         proto_freq_weight_max=args.proto_freq_weight_max,
         endpoint_residual_supervision=args.endpoint_residual_supervision,
-        lambda_anchor_recon=args.lambda_anchor_recon,
-        anchor_recon_supervision=args.anchor_recon_supervision,
-        lambda_projection_coeff=args.lambda_projection_coeff,
-        lambda_projection_path=args.lambda_projection_path,
-        projection_supervision=args.projection_supervision,
-        lambda_endpoint_coverage=args.lambda_endpoint_coverage,
-        lambda_endpoint_delta=args.lambda_endpoint_delta,
     )
 
     run_dir = os.path.join(args.save_dir, args.dataset_name, f"seed{args.seed}")
@@ -1093,25 +996,15 @@ def main():
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),
         "control_shape_refiner": bool(args.control_shape_refiner),
         "control_shape_points": args.control_shape_points,
-        "endpoint_set_refiner": bool(args.endpoint_set_refiner),
-        "endpoint_set_max_delta": args.endpoint_set_max_delta,
         "endpoint_residual_supervision": args.endpoint_residual_supervision,
-        "anchor_recon_supervision": args.anchor_recon_supervision,
-        "projection_supervision": args.projection_supervision,
         "micro_coeff_anchors": bool(args.micro_coeff_anchors),
         "lambda_gt_proto_shape": args.lambda_gt_proto_shape,
         "lambda_gt_proto_fde": args.lambda_gt_proto_fde,
         "lambda_gt_proto_coeff": args.lambda_gt_proto_coeff,
-        "lambda_anchor_recon": args.lambda_anchor_recon,
-        "lambda_projection_coeff": args.lambda_projection_coeff,
-        "lambda_projection_path": args.lambda_projection_path,
-        "lambda_endpoint_coverage": args.lambda_endpoint_coverage,
-        "lambda_endpoint_delta": args.lambda_endpoint_delta,
         "proto_focal_gamma": args.proto_focal_gamma,
         "proto_freq_weight_power": args.proto_freq_weight_power,
         "init_checkpoint": args.init_checkpoint,
         "freeze_backbone_except_new_heads": bool(args.freeze_backbone_except_new_heads),
-        "freeze_backbone_except_endpoint_set_refiner": bool(args.freeze_backbone_except_endpoint_set_refiner),
         "amp_enabled": use_amp,
     }
     recorder = RunRecorder(
@@ -1165,7 +1058,6 @@ def main():
                         batch["obs_mask"],
                         gt_proto_id=batch["gt_proto_id"],
                         force_gt_proto=cfg["force_gt_proto"],
-                        enable_refiner=cfg["enable_refiner"],
                     )
                     loss, loss_stats = loss_fn(outputs, batch, cfg)
 
@@ -1210,7 +1102,6 @@ def main():
                 eval_loader,
                 device=device,
                 args=args,
-                enable_refiner=cfg["enable_refiner"],
                 use_amp=use_amp,
                 limit_eval_batches=args.limit_eval_batches,
                 progress_desc=f"V{epoch:03d}/{args.epochs:03d} eval",
@@ -1270,7 +1161,6 @@ def main():
                 )
 
             epoch_meta = dict(meta)
-            epoch_meta["eval_enable_refiner"] = cfg["enable_refiner"]
             ckpt = checkpoint_payload(
                 model=model,
                 optimizer=optimizer,

@@ -716,3 +716,37 @@ Conclusion:
 - Candidate for simplification if speed/code clarity matters: temporal residual refiner and micro endpoint offsets; their current checkpoint contribution is only about `0.0006` and `0.0012` ADE respectively, though removing them from training still needs a fresh short train before changing defaults.
 - For losses, the only clearly important late-stage objectives are `xyz` and especially `fde`. Most prototype/coeff/projection auxiliary losses now behave like early-training scaffolding or weak regularizers rather than final ADE drivers.
 - Do not remove `proto` loss from from-scratch defaults based only on this continuation test; the structure audit still shows the router is essential, and proto supervision may be needed to learn it initially.
+
+## 2026-04-28 Low-Contribution Cleanup
+
+Purpose: remove low-contribution or failed branches from the active code path after the contribution audit, while keeping the confirmed core modules intact.
+
+Removed from model/code:
+
+- `TemporalResidualRefiner`: current checkpoint contribution was only `+0.0006` ADE when disabled.
+- `micro_endpoint_offsets`: current checkpoint contribution was only `+0.0012` ADE and it added an extra head plus compatibility burden.
+- `EndpointSetRefiner`: multiple FDE repair attempts showed no validation gain.
+- `query_decoder.gate_head`: only fed the removed temporal residual refiner.
+
+Removed from training losses/flags:
+
+- `anchor_recon` and predicted-anchor projection losses (`projection_coeff`, `projection_path`): late-stage contribution was noise-level and aggressive variants were worse.
+- endpoint coverage/delta losses tied to the failed endpoint-set refiner.
+- corresponding CLI flags, freeze modes, logging fields, and metadata fields.
+
+Kept:
+
+- Core architecture: router, social aggregation, micro coeff anchors, two-stage endpoint/coeff decoder, coupled endpoint-coeff decoder, local basis, endpoint shape refiner, control shape refiner.
+- Core losses/regularizers: `xyz`, `fde`, `proto`, endpoint residual, score, diversity, coeff L2, smoothness, and GT-prototype shape/FDE/coeff. Some are weak in late continuation, but they may still stabilize from-scratch training and are cheaper than the removed branches.
+
+Compatibility:
+
+- Old checkpoints can still be evaluated/initialized: removed state keys are filtered (`refiner.*`, `micro_endpoint_head.*`, `endpoint_set_refiner.*`, `query_decoder.gate_head.*`).
+- Old optimizer state may be skipped on resume after architecture cleanup because the parameter set changed.
+
+Smoke check:
+
+- Remote compile passed after cleanup.
+- Old best checkpoint still loads under the cleaned model.
+- 111_days 50-batch eval using the cleaned code: `ADE@20=0.1858`, `FDE@20=0.2806`.
+- Pre-cleanup 50-batch reference was `ADE@20=0.1839`, `FDE@20=0.2774`; the cleanup costs about `+0.0019` ADE on old weights, which matches the prior low-contribution diagnosis and should be rechecked by fresh training if this cleaned profile becomes the final default.

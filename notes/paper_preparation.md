@@ -13,7 +13,7 @@
 - 原型路由（Prototype Routing）：64个聚类原型中选 top-15，条件化生成
 - SVD基分解（Basis Decomposition）：16维全局基 + 2维原型局部基重建轨迹形状
 - 结构化候选扩展（Structured Candidate Expansion）：top-5 原型保留2个 micro 候选，其余路由原型保留1个候选，共20条轨迹
-- 形状精炼器（Shape Refinement）：时序残差精炼 + endpoint-preserving shape/control-point refiners
+- 形状精炼器（Shape Refinement）：endpoint-preserving shape/control-point refiners
 
 **目标期刊**（按优先级）:
 1. Scientific Reports (Q2, IF~4.6) — 概率 60-70%
@@ -112,7 +112,6 @@ ASCENT Table II 也使用相同协议（明确写了 "following the setup of [Go
 | w/o Prototype Router (--disable_router) | 待填 | 待填 |
 | w/o SVD Basis Bank | 待填 | 待填 |
 | w/o Micro expansion (`--topk_proto 20 --micro_per_proto 1 --candidate_dense_topk 0`) | 待填 | 待填 |
-| w/o Temporal Refiner (--disable_refiner) | 待填 | 待填 |
 | w/o Social Aggregator (--disable_social) | 待填 | 待填 |
 
 ### 不做的实验
@@ -138,7 +137,6 @@ ASCENT Table II 也使用相同协议（明确写了 "following the setup of [Go
 | 消融: w/o Router | 111_days | ⏳ 未开始 | — |
 | 消融: w/o Basis | 111_days | ⏳ 未开始 | — |
 | 消融: w/o Micro | 111_days | ⏳ 未开始 | — |
-| 消融: w/o Refiner | 111_days | ⏳ 未开始 | — |
 | 消融: w/o Social | 111_days | ⏳ 未开始 | — |
 
 ### 当前成绩 vs 竞争对手（111_days）
@@ -257,7 +255,7 @@ Method → Experiments → Related Work → Introduction → Abstract
 - 3.4 Prototype Router
 - 3.5 Basis Decomposition
 - 3.6 Micro-Mode Expansion & Query Decoder
-- 3.7 Temporal Residual Refiner
+- 3.7 Endpoint-Preserving Shape Refinement
 - 3.8 Training Strategy（3-stage curriculum）
 - Figure 1: 架构总图
 

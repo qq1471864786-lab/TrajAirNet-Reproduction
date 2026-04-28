@@ -16,7 +16,7 @@ Language: English academic. Writing style: direct, precise, no overclaiming.
 2. **SVD Basis Decomposition**: 16-dim global basis plus 2-dim prototype-local basis reconstruct trajectory shape
 3. **Structured Candidate Expansion**: top-5 routed prototypes keep 2 micro candidates and the remaining routed prototypes keep 1, giving K=20
 4. **Social Aggregator**: cross-attention over neighboring aircraft (ASCENT has none)
-5. **Shape Refinement**: temporal residual refiner plus endpoint-preserving shape/control-point refiners
+5. **Shape Refinement**: endpoint-preserving shape/control-point refiners
 
 ## Verified Numbers (do not change without re-running experiments)
 ### Main Table (111_days, K=20)
@@ -54,13 +54,13 @@ GooDFlight introduced a GLeV diversity metric, but the paper's formula, textual 
 ## Paper Structure
 1. Introduction (~1 page)
 2. Related Work (~1 page): Aircraft Trajectory Prediction / Multi-Modal Forecasting / Basis Decomposition
-3. Method (~2 pages): Problem Formulation → Encoder → Social → Router → Basis → Micro-mode → Refiner → Training
+3. Method (~2 pages): Problem Formulation → Encoder → Social → Router → Basis → Micro-mode → Shape Refinement → Training
 4. Experiments (~2 pages): Main Table / Generalization / Ablation / Case Study
 5. Conclusion (~0.5 page)
 
 ## Experiments Still Needed
 - 7days2, 7days3, 7days4 (not yet run)
-- Ablation: w/o Router, w/o Basis, w/o Micro, w/o Refiner, w/o Social (not yet run)
+- Ablation: w/o Router, w/o Basis, w/o Micro, w/o Shape Refiners, w/o Social
 
 ## Writing Files Location
 - Drafts: `notes/writing/`
