@@ -59,6 +59,13 @@ def build_parser():
     parser.add_argument("--ablate_no_two_stage_coeff", action="store_true")
     parser.add_argument("--ablate_no_coupled_decoder", action="store_true")
     parser.add_argument("--ablate_no_micro_coeff_anchors", action="store_true")
+    parser.add_argument(
+        "--candidate_selection",
+        type=str,
+        default="",
+        choices=["", "fixed", "tail_swap"],
+        help="Override checkpoint candidate compression rule at evaluation time.",
+    )
     return parser
 
 
@@ -102,6 +109,7 @@ def build_model(config, checkpoint):
         use_micro_coeff_anchors=bool(config.get("micro_coeff_anchors", False)),
         endpoint_conditioning=config.get("endpoint_conditioning", "rank"),
         candidate_dense_topk=int(config.get("candidate_dense_topk", 0)),
+        candidate_selection=config.get("candidate_selection", "fixed"),
         coupled_decoder=bool(config.get("coupled_decoder", False)),
         coupled_decoder_iters=int(config.get("coupled_decoder_iters", 0)),
         endpoint_shape_refiner=bool(config.get("endpoint_shape_refiner", False)),
@@ -110,6 +118,20 @@ def build_model(config, checkpoint):
         disable_social=config.get("disable_social", False),
         disable_router=config.get("disable_router", False),
     )
+
+
+def default_candidate_selection(config):
+    if "candidate_selection" in config:
+        return config["candidate_selection"]
+    is_main_protocol = config.get("protocol_name") == "trajair_40to120_best20"
+    has_dense_pool = (
+        int(config.get("topk_proto", 0)) == 15
+        and int(config.get("micro_per_proto", 0)) == 2
+        and int(config.get("candidate_dense_topk", 0)) == 5
+    )
+    if is_main_protocol and has_dense_pool:
+        return "tail_swap"
+    return "fixed"
 
 
 def drop_removed_state_keys(state_dict):
@@ -177,6 +199,8 @@ def apply_eval_ablation_overrides(model, args):
         model.coupled_decoder_enabled = False
     if args.ablate_no_micro_coeff_anchors:
         model.has_micro_coeff_anchors = False
+    if args.candidate_selection:
+        model.candidate_selection = args.candidate_selection
 
 
 def evaluate(
@@ -309,7 +333,8 @@ def main():
         raise SystemExit("CUDA is not available. Use --allow_cpu only if you really want to run on CPU.")
     use_amp = device.type == "cuda" and not args.no_amp
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    config = checkpoint["config"]
+    config = dict(checkpoint["config"])
+    config["candidate_selection"] = args.candidate_selection or default_candidate_selection(config)
     dataset_variant = args.dataset_variant or config["dataset_variant"]
     dataset_name = args.dataset_name or config["dataset_name"]
 

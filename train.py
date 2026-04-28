@@ -100,6 +100,13 @@ def build_parser():
     parser.add_argument("--topk_proto", type=int, default=None)
     parser.add_argument("--micro_per_proto", type=int, default=None)
     parser.add_argument("--candidate_dense_topk", type=int, default=None)
+    parser.add_argument(
+        "--candidate_selection",
+        type=str,
+        default=None,
+        choices=["fixed", "tail_swap"],
+        help="Compress internal candidates to the public K budget with a fixed mask or validated tail-swap rule.",
+    )
     parser.add_argument("--micro_coeff_anchors", dest="micro_coeff_anchors", action="store_true")
     parser.add_argument("--no_micro_coeff_anchors", dest="micro_coeff_anchors", action="store_false")
     parser.set_defaults(micro_coeff_anchors=None)
@@ -247,6 +254,8 @@ def apply_training_defaults(args):
         args.micro_per_proto = 2 if is_unified and is_main_dataset else 4
     if args.candidate_dense_topk is None:
         args.candidate_dense_topk = 5 if is_unified and is_main_dataset else 0
+    if args.candidate_selection is None:
+        args.candidate_selection = "tail_swap" if is_unified and is_main_dataset else "fixed"
     if args.d_model is None:
         args.d_model = 128 if is_unified and is_main_dataset else 96
     if args.ff_dim is None:
@@ -458,6 +467,7 @@ def build_model(args, model_artifact):
         use_micro_coeff_anchors=bool(args.micro_coeff_anchors),
         endpoint_conditioning=args.endpoint_conditioning,
         candidate_dense_topk=args.candidate_dense_topk,
+        candidate_selection=args.candidate_selection,
         coupled_decoder=bool(args.coupled_decoder),
         coupled_decoder_iters=args.coupled_decoder_iters,
         endpoint_shape_refiner=bool(args.endpoint_shape_refiner),
@@ -991,6 +1001,7 @@ def main():
         "basis_dim": args.basis_dim,
         "endpoint_conditioning": args.endpoint_conditioning,
         "candidate_dense_topk": args.candidate_dense_topk,
+        "candidate_selection": args.candidate_selection,
         "coupled_decoder": bool(args.coupled_decoder),
         "coupled_decoder_iters": args.coupled_decoder_iters,
         "endpoint_shape_refiner": bool(args.endpoint_shape_refiner),

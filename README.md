@@ -16,6 +16,7 @@ Current default protocol:
 - `topk_proto = 15`
 - `micro_per_proto = 2`
 - `candidate_dense_topk = 5`
+- `candidate_selection = tail_swap`
 - `basis_dim = 16`
 - `local_basis_dim = 2`
 - `endpoint_shape_refiner = true`
@@ -23,7 +24,7 @@ Current default protocol:
 - `control_shape_points = 32`
 - `best@5 / best@20`
 
-The effective candidate budget is still K=20: the top 5 routed prototypes keep 2 micro candidates each, and the remaining 10 routed prototypes keep 1 candidate each.
+The model builds 30 internal candidates from 15 routed prototypes x 2 micro modes, then compresses them to the public K=20 budget. The current default is score-biased `tail_swap`: high-confidence early slots are preserved, and up to two low-confidence tail slots can be replaced by better-scored, diverse internal candidates. Use `--candidate_selection fixed` to reproduce the previous fixed top-5-dense K20 mask.
 
 Current default training command:
 
@@ -41,6 +42,14 @@ Current default evaluation command:
 
 ```bash
 python test.py save_model/111_days/seed3407/last.pt --device cuda:0
+```
+
+For old main-protocol checkpoints that do not store `candidate_selection`, `test.py` resolves the default to `tail_swap`.
+
+Reproduce the old fixed candidate mask:
+
+```bash
+python test.py save_model/111_days/seed3407/last.pt --device cuda:0 --candidate_selection fixed
 ```
 
 Primary reported metrics:

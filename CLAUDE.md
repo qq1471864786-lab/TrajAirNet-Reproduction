@@ -14,7 +14,7 @@ Language: English academic. Writing style: direct, precise, no overclaiming.
 ## Core Innovations (never dilute or omit these)
 1. **Prototype Router**: 64 K-Means trajectory prototypes, top-15 routing, intent classification
 2. **SVD Basis Decomposition**: 16-dim global basis plus 2-dim prototype-local basis reconstruct trajectory shape
-3. **Structured Candidate Expansion**: top-5 routed prototypes keep 2 micro candidates and the remaining routed prototypes keep 1, giving K=20
+3. **Structured Candidate Expansion**: 30 internal prototype/micro candidates are compressed to K=20 with tail-swap candidate selection
 4. **Social Aggregator**: cross-attention over neighboring aircraft (ASCENT has none)
 5. **Shape Refinement**: endpoint-preserving shape/control-point refiners
 
@@ -23,12 +23,12 @@ Language: English academic. Writing style: direct, precise, no overclaiming.
 | Method | ADE@20 | FDE@20 |
 |--------|--------|--------|
 | ASCENT | 0.19 | 0.26 |
-| **ProtoBasis-Net** | **0.228** | **0.329** |
+| **ProtoBasis-Net** | **0.1842** | **0.2730** |
 | GooDFlight | 0.29 | 0.39 |
 | MID | 0.55 | 0.87 |
 | TrajAirNet | 0.79 | 1.58 |
 
-Numbers source: ASCENT Table II (for baselines), our seed3407 100-epoch run (for ours).
+Numbers source: ASCENT Table II (for baselines), current seed3407 checkpoint evaluated on the full 111_days test split with score-biased `candidate_selection=tail_swap` (for ours).
 
 ### Generalization (7days1~4, K=20) — partially complete
 | Method | 7days1 | 7days2 | 7days3 | 7days4 |
@@ -41,7 +41,7 @@ For ADE/FDE, lower values are better. Current 7days1 is still weaker than GooDFl
 GooDFlight introduced a GLeV diversity metric, but the paper's formula, textual explanation, and reported scale are not clear enough for a fair direct comparison in this project. Do not report or optimize GLeV in the main experiments; use ADE/FDE and focused ablations instead.
 
 ## Positioning
-- vs ASCENT: "competitive with ASCENT" — do NOT claim to beat it. ASCENT=0.19, ours=0.228.
+- vs ASCENT: "competitive with ASCENT"; ProtoBasis-Net is lower on ADE in the current full-test checkpoint evaluation, but FDE is still weaker, so do NOT claim an overall win.
 - vs GooDFlight: "surpasses GooDFlight" on 111_days. ✅
 - Key differentiator from ASCENT: social interaction + structured prototype prior (ASCENT has no social modeling)
 - Key differentiator from GooDFlight: deterministic structured decoding vs diffusion; faster inference

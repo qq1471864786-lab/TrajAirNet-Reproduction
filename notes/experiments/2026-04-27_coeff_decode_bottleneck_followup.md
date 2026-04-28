@@ -1039,3 +1039,79 @@ Decision:
 - The current FDE bottleneck is now best stated as: **candidate generation has hidden headroom, but public K=20 compression is structurally brittle.** The useful extra candidates are sample-specific and cannot be recovered by simple score loss, static masks, or shallow post-hoc selectors.
 - The only positive FDE signal in this sweep is greedy diversity/score selection from the all-30 internal pool: `current_fixed FDE=0.2862`, best greedy `FDE=0.2811`, `rare_FDE=0.3269` vs `0.3342`, but `ADE=0.1891` vs `0.1881`. This is not good enough to promote, but it identifies a concrete mechanism: preserve high-confidence early modes, then fill the remaining public slots with diverse lower-rank candidates instead of fixed even-index micro slots.
 - Next credible direction should integrate this selection pressure into the main candidate generation path rather than using a post-hoc heuristic. A plausible next probe is a trainable diversity-aware K=20 candidate keeper that is optimized jointly with ADE/FDE and initialized to the current fixed mask, or a direct exactly-20 endpoint generator whose later slots are trained with a diversity/coverage objective.
+
+### Tail-swap candidate compression
+
+Purpose: turn the only positive compression signal above into the default inference path without adding trainable parameters, extra losses, or another endpoint source.
+
+Mechanism:
+
+- Keep the internal candidate pool at `topk_proto=15, micro_per_proto=2` (`30` internal candidates).
+- Preserve the high-confidence early public slots.
+- Replace at most two low-confidence tail slots with lower-rank internal candidates when their endpoint diversity/score/rank tradeoff is better.
+- Run local-basis reconstruction over the internal pool before compression, then apply the public `K=20` budget before endpoint/control refiners.
+
+Validation:
+
+| Eval | Candidate selection | ADE@20 | FDE@20 | Readout |
+| --- | --- | ---: | ---: | --- |
+| 111_days, 100 batches | fixed | 0.1858 | 0.2806 | old public K20 mask |
+| 111_days, 100 batches | tail_swap | 0.1862 | 0.2761 | ADE neutral, FDE better |
+| 111_days, full test | fixed | about 0.1848 | about 0.2773 | old public K20 mask |
+| 111_days, full test | tail_swap | 0.1844 | 0.2733 | ADE and FDE both improve |
+
+Full-test official tail-swap metrics:
+
+- `ADE@5=0.3694`
+- `FDE@5=0.7367`
+- `ADE@20=0.1844`
+- `FDE@20=0.2733`
+- `rare_FDE@20=0.6545`
+- `Top1_ADE=0.5562`
+- `Top1_FDE=1.1715`
+- `proto_top1_acc=0.3753`
+- `proto_rare_recall=0.3934`
+- `score_entropy=2.7253`
+- `endpoint_var=3.5773`
+
+Decision:
+
+- Promote `candidate_selection=tail_swap` as the 111_days default.
+- Keep `candidate_selection=fixed` as the reproduction path for old checkpoints and ablations.
+- This is a compression/endpoint-coverage repair, not a new decoder. It should be described as an extension of structured candidate expansion.
+- The bottleneck is not fully solved: FDE remains weaker than ASCENT's reported `0.26`, so the next search should target endpoint coverage and final-displacement calibration rather than router or coeff decoding.
+
+### Tail-swap weighting recheck
+
+Purpose: verify whether the default tail-swap rule should prioritize endpoint diversity or the learned candidate score more strongly.
+
+Setup:
+
+- Checkpoint: `save_model_111days_current_default_full/111_days/seed3407/best_best20.pt`.
+- Full 111_days test split.
+- No retraining, no new parameters, no new losses.
+- Candidate pool and public budget remain `30 -> K=20`.
+
+Results:
+
+| Rule | ADE@20 | FDE@20 | rare_FDE@20 | Readout |
+| --- | ---: | ---: | ---: | --- |
+| fixed K20 mask | 0.184792 | 0.277313 | 0.665223 | old baseline |
+| current tail-swap, score 0.25 | 0.184410 | 0.273309 | 0.654524 | validated default before this recheck |
+| add-distance 0.10 | 0.184380 | 0.275530 | 0.661114 | ADE tiny gain, FDE/rare worse |
+| score 0.50 | 0.184199 | 0.272982 | 0.654390 | best balanced ADE/FDE/rare |
+| score 0.75 | 0.184185 | 0.273195 | 0.655096 | best ADE, rare slightly worse |
+| rank 1.50 | 0.184268 | 0.273562 | 0.655502 | neutral |
+
+Decision:
+
+- Promote the score-biased rule (`add_score=0.50`, `add_dist=0.25`, `rank=1.0`, two tail swaps, protect slots `<18`) as the default tail-swap rule.
+- Do not use score `0.75`: its ADE is only `0.000013` lower than score `0.50`, while FDE and rare_FDE are worse.
+- This confirms the current FDE repair is candidate compression, not endpoint generation or coeff decoding. The remaining gap to ASCENT FDE is now small but persistent, and likely requires training-time endpoint calibration rather than more post-hoc slot heuristics.
+
+Default-chain smoke:
+
+- Remote py_compile passed for `train.py`, `test.py`, `model/proto_basis_flight_model.py`, and `model/provenance.py`.
+- `test.py` now resolves old main-protocol checkpoints without a stored `candidate_selection` field to `tail_swap`; `--candidate_selection fixed` remains the explicit old-mask reproduction path.
+- 111_days 100-batch default smoke, no candidate override: `ADE@20=0.1860`, `FDE@20=0.2760`, `rare_FDE@20=0.6783`.
+- 111_days 100-batch fixed override: `ADE@20=0.1858`, `FDE@20=0.2806`, `rare_FDE@20=0.6896`.

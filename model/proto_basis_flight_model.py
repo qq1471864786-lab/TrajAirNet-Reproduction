@@ -440,6 +440,15 @@ def build_anchor(endpoint_local, alpha):
     return alpha[None, None, :, None] * endpoint_local[:, :, None, :]
 
 
+def _gather_modes(tensor, indices):
+    if tensor.dim() == 2:
+        return torch.gather(tensor, 1, indices)
+    view_shape = [indices.size(0), indices.size(1)] + [1] * (tensor.dim() - 2)
+    expand_shape = [indices.size(0), indices.size(1)] + list(tensor.shape[2:])
+    gather_index = indices.view(*view_shape).expand(*expand_shape)
+    return torch.gather(tensor, 1, gather_index)
+
+
 class ProtoBasisNet(nn.Module):
     def __init__(
         self,
@@ -469,6 +478,7 @@ class ProtoBasisNet(nn.Module):
         use_micro_coeff_anchors=False,
         endpoint_conditioning="rank",
         candidate_dense_topk=0,
+        candidate_selection="fixed",
         coupled_decoder=False,
         coupled_decoder_iters=0,
         endpoint_shape_refiner=False,
@@ -484,6 +494,8 @@ class ProtoBasisNet(nn.Module):
             raise ValueError("basis_bank is required for ProtoBasis-Net.")
         if proto_frequency is None:
             proto_frequency = torch.ones(proto_summary_5d.size(0), dtype=torch.float32)
+        if candidate_selection not in {"fixed", "tail_swap"}:
+            raise ValueError(f"Unsupported candidate_selection: {candidate_selection}")
 
         self.obs_len = obs_len
         self.pred_len = pred_len
@@ -491,6 +503,7 @@ class ProtoBasisNet(nn.Module):
         self.n_micro = n_micro
         self.num_modes = topk_proto * n_micro
         self.candidate_dense_topk = int(candidate_dense_topk or 0)
+        self.candidate_selection = candidate_selection
         self.disable_social = disable_social
         self.disable_router = disable_router
         self.support_aware_local_basis = support_aware_local_basis
@@ -628,6 +641,82 @@ class ProtoBasisNet(nn.Module):
             keep_tensor = torch.empty(0, dtype=torch.long)
         self.register_buffer("candidate_keep_indices", keep_tensor, persistent=False)
 
+    def _fixed_keep(self, batch_size, device):
+        if self.candidate_keep_indices.numel() == 0:
+            return None
+        keep = self.candidate_keep_indices.to(device=device)
+        return keep[None, :].expand(batch_size, -1)
+
+    def _tail_swap_keep(self, coarse_local, pred_score):
+        fixed = self._fixed_keep(coarse_local.size(0), coarse_local.device)
+        if fixed is None:
+            return None
+        num_modes = coarse_local.size(1)
+        # Validated for the current 15 prototype x 2 micro internal pool.
+        if num_modes != 30 or fixed.size(1) != 20:
+            return fixed
+
+        with torch.no_grad():
+            endpoint_feat = coarse_local[:, :, -1].detach().float()
+            scale = endpoint_feat.norm(dim=-1).mean(dim=1, keepdim=True).clamp_min(1e-6)
+            endpoint_feat = endpoint_feat / scale[:, :, None]
+
+            score = pred_score.detach().float()
+            score_z = (score - score.mean(dim=1, keepdim=True)) / score.std(dim=1, keepdim=True).clamp_min(1e-6)
+            rank_prior = -torch.arange(num_modes, device=coarse_local.device, dtype=torch.float32)
+            rank_prior = rank_prior / max(num_modes - 1, 1)
+            rank_prior = rank_prior[None, :].expand(coarse_local.size(0), -1)
+
+            selected = fixed.clone()
+            for _ in range(2):
+                selected_feat = _gather_modes(endpoint_feat, selected)
+                dist_to_selected = torch.cdist(endpoint_feat, selected_feat).min(dim=2).values
+                dist_z = dist_to_selected / dist_to_selected.mean(dim=1, keepdim=True).clamp_min(1e-6)
+                add_value = 0.5 * score_z + 0.25 * dist_z + rank_prior
+
+                current_mask = torch.zeros(
+                    coarse_local.size(0),
+                    num_modes,
+                    dtype=torch.bool,
+                    device=coarse_local.device,
+                )
+                current_mask.scatter_(1, selected, True)
+                add_value = add_value.masked_fill(current_mask, -1e9)
+                add_idx = add_value.argmax(dim=1)
+
+                pair_dist = torch.cdist(selected_feat, selected_feat)
+                eye = torch.eye(selected.size(1), dtype=torch.bool, device=coarse_local.device)[None, :, :]
+                nearest = pair_dist.masked_fill(eye, 1e9).min(dim=2).values
+                nearest_z = nearest / nearest.mean(dim=1, keepdim=True).clamp_min(1e-6)
+                selected_score = _gather_modes(score_z, selected)
+                selected_rank_prior = -selected.float() / max(num_modes - 1, 1)
+                keep_value = 0.25 * selected_score + nearest_z + 0.25 * selected_rank_prior
+
+                # Only the tail slots are replaceable; early slots carry the high-confidence modes.
+                keep_value = keep_value.masked_fill(selected < 18, 1e9)
+                drop_pos = keep_value.argmin(dim=1)
+                drop_value = keep_value.gather(1, drop_pos[:, None]).squeeze(1)
+                gain = add_value.gather(1, add_idx[:, None]).squeeze(1) - drop_value
+                do_swap = gain > 0.0
+                if not do_swap.any():
+                    break
+                selected[do_swap, drop_pos[do_swap]] = add_idx[do_swap]
+        return selected
+
+    def _apply_candidate_keep(self, keep, query_feat, coeff, pred_score, coeff_delta, endpoint_mode_local, coarse_local, active_query, candidate_proto_idx):
+        if keep is None:
+            return query_feat, coeff, pred_score, coeff_delta, endpoint_mode_local, coarse_local, active_query, candidate_proto_idx
+        return (
+            _gather_modes(query_feat, keep),
+            _gather_modes(coeff, keep),
+            _gather_modes(pred_score, keep),
+            _gather_modes(coeff_delta, keep),
+            _gather_modes(endpoint_mode_local, keep),
+            _gather_modes(coarse_local, keep),
+            _gather_modes(active_query, keep),
+            _gather_modes(candidate_proto_idx, keep),
+        )
+
     def forward(self, obs_xyz, obs_mask, gt_proto_id=None, force_gt_proto=False):
         local_xyz, _, _, origin, rotation = self.pose_normalizer(obs_xyz)
         feats_local = build_local_features(local_xyz)
@@ -686,16 +775,28 @@ class ProtoBasisNet(nn.Module):
             )
             coeff_delta = coeff_delta + (coeff - coeff_before_coupled)
         candidate_proto_idx = top_proto_idx.repeat_interleave(self.n_micro, dim=1)
-        if self.candidate_keep_indices.numel() > 0:
-            keep = self.candidate_keep_indices.to(device=coeff.device)
-            query_feat = query_feat.index_select(1, keep)
-            coeff = coeff.index_select(1, keep)
-            pred_score = pred_score.index_select(1, keep)
-            coeff_delta = coeff_delta.index_select(1, keep)
-            endpoint_mode_local = endpoint_mode_local.index_select(1, keep)
-            coarse_local = coarse_local.index_select(1, keep)
-            active_query = active_query.index_select(1, keep)
-            candidate_proto_idx = candidate_proto_idx.index_select(1, keep)
+        if self.candidate_selection == "fixed":
+            fixed_keep = self._fixed_keep(coeff.size(0), coeff.device)
+            (
+                query_feat,
+                coeff,
+                pred_score,
+                coeff_delta,
+                endpoint_mode_local,
+                coarse_local,
+                active_query,
+                candidate_proto_idx,
+            ) = self._apply_candidate_keep(
+                fixed_keep,
+                query_feat,
+                coeff,
+                pred_score,
+                coeff_delta,
+                endpoint_mode_local,
+                coarse_local,
+                active_query,
+                candidate_proto_idx,
+            )
         if self.has_local_basis:
             proto_mean_path = self.prototype_mean_path[candidate_proto_idx]
             proto_mean_endpoint = proto_mean_path[:, :, -1, :]
@@ -712,6 +813,28 @@ class ProtoBasisNet(nn.Module):
                 support_scale = support_scale.unsqueeze(-1).unsqueeze(-1)
                 local_gate = local_gate * support_scale
             coarse_local = coarse_local + local_gate * (local_path - coarse_local)
+        if self.candidate_selection == "tail_swap":
+            keep = self._tail_swap_keep(coarse_local, pred_score)
+            (
+                query_feat,
+                coeff,
+                pred_score,
+                coeff_delta,
+                endpoint_mode_local,
+                coarse_local,
+                active_query,
+                candidate_proto_idx,
+            ) = self._apply_candidate_keep(
+                keep,
+                query_feat,
+                coeff,
+                pred_score,
+                coeff_delta,
+                endpoint_mode_local,
+                coarse_local,
+                active_query,
+                candidate_proto_idx,
+            )
         refined_local = coarse_local
         if self.endpoint_shape_refiner is not None:
             refined_local = self.endpoint_shape_refiner(refined_local, active_query)
