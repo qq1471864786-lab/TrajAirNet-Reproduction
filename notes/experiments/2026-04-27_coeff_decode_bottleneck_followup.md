@@ -657,3 +657,62 @@ Decision:
 - Do not promote these FDE repair attempts to default.
 - Revert the failed router-margin and tail-balanced code paths after recording the results.
 - Keep the current best default checkpoint/config as baseline. The next credible FDE direction needs a new endpoint/intention generator trained from scratch or a new external intent signal; partial continuation patches are not showing enough headroom.
+
+## 2026-04-28 Module and Loss Contribution Audit
+
+Purpose: re-check each active structure and each active loss under the current best default, using short but matched comparisons instead of old mixed-window evidence.
+
+Reference:
+
+- Checkpoint: `save_model_111days_current_default_full/111_days/seed3407/best_best20.pt`
+- Structure audit: same checkpoint, 111_days first 50 test batches, batch size 1024, one inference module disabled at a time.
+- Loss audit: same checkpoint init, 111_days, 3 joint-refiner epochs, 80 train batches/epoch, 50 eval batches/epoch; compare best short-run ADE against the all-loss continuation.
+- `Delta ADE` is variant minus baseline, so positive means the removed structure/loss was helping.
+
+Structure contribution:
+
+| Variant | ADE@20 | Delta ADE | FDE@20 | Delta FDE | Readout |
+| --- | ---: | ---: | ---: | ---: | --- |
+| default eval | 0.1839 | +0.0000 | 0.2774 | +0.0000 | baseline |
+| no social | 0.2004 | +0.0165 | 0.3047 | +0.0273 | useful |
+| no router / generic modes | 0.4900 | +0.3061 | 1.1226 | +0.8452 | essential |
+| no temporal refiner | 0.1845 | +0.0006 | 0.2770 | -0.0004 | negligible at current checkpoint |
+| no endpoint shape refiner | 0.3154 | +0.1315 | 0.2774 | +0.0000 | essential for mid-path ADE |
+| no control shape refiner | 0.3534 | +0.1695 | 0.2774 | +0.0000 | essential for mid-path ADE |
+| no shape refiners | 0.2229 | +0.0390 | 0.2774 | +0.0000 | keep; endpoint-preserving |
+| no local basis | 0.1932 | +0.0093 | 0.2774 | +0.0000 | small useful ADE term |
+| no support-aware local basis | 0.1901 | +0.0062 | 0.2774 | +0.0000 | small useful stabilizer |
+| no two-stage decoder | 0.3939 | +0.2100 | 0.6327 | +0.3553 | essential |
+| no two-stage endpoint update | 0.2041 | +0.0202 | 0.3583 | +0.0809 | important for endpoint/FDE |
+| no two-stage coeff update | 0.1863 | +0.0024 | 0.2786 | +0.0012 | minor |
+| no coupled decoder | 0.2120 | +0.0281 | 0.3870 | +0.1096 | important |
+| no micro coeff anchors | 0.2973 | +0.1134 | 0.3629 | +0.0855 | essential candidate-shape prior |
+| no micro endpoint offsets | 0.1851 | +0.0012 | 0.2803 | +0.0029 | small at current checkpoint |
+
+Loss contribution:
+
+| Variant | Best ADE@20 | Delta ADE | Best FDE@20 | Delta FDE | Readout |
+| --- | ---: | ---: | ---: | ---: | --- |
+| all losses continue | 0.1843 | +0.0000 | 0.2779 | +0.0000 | short-run baseline |
+| no xyz | 0.1859 | +0.0016 | 0.2779 | +0.0000 | useful |
+| no fde | 0.1879 | +0.0036 | 0.2927 | +0.0148 | important, especially FDE |
+| no proto | 0.1835 | -0.0008 | 0.2766 | -0.0013 | not useful in late continuation; still needed for from-scratch router training unless separately proven |
+| no endpoint residual | 0.1843 | +0.0000 | 0.2779 | -0.0001 | negligible late |
+| no score | 0.1844 | +0.0001 | 0.2782 | +0.0002 | negligible late |
+| no diversity | 0.1842 | -0.0001 | 0.2785 | +0.0006 | no ADE gain; may only regularize spread |
+| no coeff L2 | 0.1845 | +0.0002 | 0.2780 | +0.0001 | negligible late |
+| no smooth | 0.1845 | +0.0002 | 0.2782 | +0.0003 | negligible late |
+| no gt proto shape | 0.1842 | -0.0001 | 0.2781 | +0.0002 | negligible late |
+| no gt proto fde | 0.1845 | +0.0002 | 0.2783 | +0.0003 | negligible late |
+| no gt proto coeff | 0.1846 | +0.0003 | 0.2781 | +0.0001 | negligible late |
+| no anchor recon | 0.1843 | -0.0000 | 0.2779 | -0.0000 | negligible late |
+| no projection coeff | 0.1844 | +0.0001 | 0.2778 | -0.0001 | negligible late |
+| no projection path | 0.1843 | -0.0000 | 0.2778 | -0.0001 | negligible late |
+
+Conclusion:
+
+- Keep as core architecture: prototype router, two-stage decoder, coupled endpoint-coeff decoder, micro coeff anchors, endpoint shape refiner, control shape refiner, social aggregation.
+- Keep but do not over-claim: local basis and support-aware local basis; they add small ADE gains.
+- Candidate for simplification if speed/code clarity matters: temporal residual refiner and micro endpoint offsets; their current checkpoint contribution is only about `0.0006` and `0.0012` ADE respectively, though removing them from training still needs a fresh short train before changing defaults.
+- For losses, the only clearly important late-stage objectives are `xyz` and especially `fde`. Most prototype/coeff/projection auxiliary losses now behave like early-training scaffolding or weak regularizers rather than final ADE drivers.
+- Do not remove `proto` loss from from-scratch defaults based only on this continuation test; the structure audit still shows the router is essential, and proto supervision may be needed to learn it initially.
