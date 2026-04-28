@@ -1030,10 +1030,12 @@ All use the same clean checkpoint and short validation windows.
 | learned internal selector over 30 candidates | 0.3205 FDE | 0.2920 | improves over bad score-top20 but far below fixed20 |
 | candidate allocation `top10 x micro3` | 0.3086 FDE | 0.2789 short-train control | worse |
 | candidate allocation `top12 x micro3` | 0.2989 FDE | 0.2789 short-train control | worse |
+| heuristic greedy selection from all30 | 0.2811 FDE | 0.2862 fixed20 | FDE improves, ADE worsens slightly |
 
 Decision:
 
 - Do not add late endpoint source selection, static slot replacement, pair averaging, or a detached internal selector as default.
 - Do not switch to `micro_per_proto=3` candidate allocation from the current checkpoint; it does not recover the hidden all-30 headroom under short validation.
 - The current FDE bottleneck is now best stated as: **candidate generation has hidden headroom, but public K=20 compression is structurally brittle.** The useful extra candidates are sample-specific and cannot be recovered by simple score loss, static masks, or shallow post-hoc selectors.
-- Next credible direction should integrate selection into the main candidate generation path rather than post-filtering after the fact. A plausible next probe is to train a candidate set where the model directly emits exactly 20 endpoint candidates with learned micro diversity per selected prototype, or to replace fixed micro slots with a differentiable top-k/set prediction objective during normal training.
+- The only positive FDE signal in this sweep is greedy diversity/score selection from the all-30 internal pool: `current_fixed FDE=0.2862`, best greedy `FDE=0.2811`, `rare_FDE=0.3269` vs `0.3342`, but `ADE=0.1891` vs `0.1881`. This is not good enough to promote, but it identifies a concrete mechanism: preserve high-confidence early modes, then fill the remaining public slots with diverse lower-rank candidates instead of fixed even-index micro slots.
+- Next credible direction should integrate this selection pressure into the main candidate generation path rather than using a post-hoc heuristic. A plausible next probe is a trainable diversity-aware K=20 candidate keeper that is optimized jointly with ADE/FDE and initialized to the current fixed mask, or a direct exactly-20 endpoint generator whose later slots are trained with a diversity/coverage objective.
