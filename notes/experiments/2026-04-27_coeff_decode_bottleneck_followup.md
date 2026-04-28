@@ -919,3 +919,121 @@ Decision:
 - Do not implement retrieval as direct endpoint replacement, fixed-slot candidate injection, shallow learned selector, or prototype-filtered retrieval.
 - Retrieval is still informative as an analysis tool and may be useful as an auxiliary prior for training a new endpoint generator, but current evidence does not justify adding a retrieval module to the default architecture.
 - Next non-ASCENT direction should move away from late retrieval selection and test a trainable endpoint distribution/latent endpoint sampler that improves `endpoint_min_fde` inside public K=20 from the start.
+
+## 2026-04-28 Endpoint Sampler and Source-Gate Probe
+
+Purpose: test whether a trainable endpoint sampler can cover tail endpoints missed by the current prototype endpoint generator, and whether a learned source gate can convert the larger candidate-pool oracle into the public `K=20` budget.
+
+Setup:
+
+- Checkpoint: `save_model_clean_bottleneck_e3_111_short/111_days/seed3407/best_best20.pt`.
+- Eval window: 111_days first 50 test batches, `51200` samples.
+- Frozen-backbone endpoint heads trained on `163840` train samples.
+- Source gate trained on a disjoint `81920` train samples.
+- Metrics are endpoint minFDE in local coordinates; lower is better.
+
+Endpoint sampler results:
+
+| Candidate source | Endpoint minFDE | rare | router-miss | Readout |
+| --- | ---: | ---: | ---: | --- |
+| current model K=20 | 0.2799 | - | - | baseline |
+| direct generated K=20 | 0.3546 | - | 0.9095 | worse overall, better on miss tail |
+| residual generated K=20 | 0.2797 | - | 1.0770 | effectively baseline |
+| hybrid generated K=20 | 0.2775 | 0.3228 | 1.0744 | tiny gain, not enough |
+| current20 + direct20 oracle union | 0.2102 | 0.2463 | 0.6822 | strong complement exists |
+| current20 + residual20 oracle union | 0.2531 | 0.2934 | - | smaller complement |
+| current20 + hybrid20 oracle union | 0.2551 | - | - | smaller complement |
+
+Source-gate results:
+
+| Selection rule | Direct chosen / sample | Endpoint minFDE | rare | router-hit | router-miss | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| current K=20 | 0.0% | 0.2799 | 0.3202 | 0.2333 | 1.0806 | baseline |
+| direct K=20 | 100.0% | 0.3596 | 0.4353 | 0.3278 | 0.9052 | tail improves, average fails |
+| oracle choose current/direct source | oracle | 0.2130 | 0.2498 | 0.1853 | 0.6900 | headroom exists |
+| learned gate threshold 0.5 | 50.0% | 0.2902 | 0.3382 | 0.2472 | 1.0289 | worse |
+| learned gate threshold 0.6 | 29.2% | 0.2840 | 0.3296 | 0.2390 | 1.0575 | worse |
+| learned gate threshold 0.7 | 8.8% | 0.2797 | 0.3205 | 0.2331 | 1.0812 | negligible `0.0002` gain |
+| learned gate threshold 0.8 | 0.2% | 0.2799 | 0.3202 | 0.2334 | 1.0806 | baseline |
+
+Readout:
+
+- A direct endpoint sampler learns complementary tail endpoints, especially for router-miss samples, but its average K=20 endpoints are too noisy.
+- The K40 oracle gap (`0.2799 -> 0.2102/0.2130`) proves there is still endpoint headroom, but late source selection cannot reliably identify which samples should use the sampler.
+- This repeats the retrieval result: extra endpoints help in oracle union but do not survive a public K=20 selection rule.
+
+Decision:
+
+- Do not add a direct endpoint sampler, residual sampler, hybrid sampler, or late source gate as a default module.
+- The next credible endpoint repair should change the built-in endpoint allocation/training itself, for example prototype-conditioned endpoint residuals, hit-only endpoint residual supervision, or candidate-budget reallocation. It should not rely on appending a second endpoint source and selecting after the fact.
+
+## 2026-04-28 Endpoint/FDE Repair Sweep
+
+Purpose: continue automated short validation after the endpoint bottleneck diagnosis. The goal was to find a public `K=20` change that improves endpoint minFDE/FDE, not only an oracle candidate-pool gain.
+
+### Endpoint residual supervision and allocation
+
+Setup:
+
+- Init checkpoint: `save_model_clean_bottleneck_e3_111_short/111_days/seed3407/best_best20.pt`.
+- Short train: `5 epochs`, `50 train batches/epoch`, `50 eval batches`.
+- Control uses the current default candidate allocation and endpoint residual supervision.
+
+Results:
+
+| Variant | ADE@20 | FDE@20 | rare FDE@20 | Readout |
+| --- | ---: | ---: | ---: | --- |
+| control rank/all | 0.1856 | 0.2789 | 0.6844 | same-budget control |
+| endpoint residual hit-only | 0.1863 | 0.2802 | 0.6860 | worse |
+| prototype-conditioned endpoint + hit-only | 0.1849 | 0.2790 | 0.6818 | tiny ADE gain, FDE unchanged |
+| `topk_proto=20, micro=1` | 0.1908 | 0.2806 | 0.6931 | worse ADE |
+| `topk_proto=10, micro=2` | 0.1923 | 0.2999 | 0.7208 | worse |
+
+Decision:
+
+- Do not promote `endpoint_residual_supervision=hit_only`.
+- Do not switch default candidate allocation to `topk20/m1` or `topk10/m2`.
+- `endpoint_conditioning=proto` has a small ADE signal but no FDE repair; it is not enough to justify changing the default alone.
+
+### Internal 30-candidate diagnosis
+
+Observation: with current `topk_proto=15, micro=2`, the model internally has 30 candidates before `candidate_dense_topk=5` keeps only 20. Disabling the fixed keep mask exposes all 30 candidates.
+
+No-training diagnostic on 111_days first 100 test batches:
+
+| Candidate view | ADE | FDE | endpoint minFDE | rare FDE | miss FDE | Readout |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| default fixed K=20 | 0.1881 | 0.2862 | 0.2862 | 0.6520 | 1.1584 | current public view |
+| all 30 oracle | 0.1767 | 0.2563 | 0.2563 | 0.3010 | 1.0516 | real headroom exists |
+| no-keep score top20 | 0.2064 | 0.3322 | 0.3322 | 0.7578 | 1.6139 | current score fails to select |
+
+Readout:
+
+- The model already creates useful extra endpoints outside the public fixed K=20 view.
+- The gap is not pure endpoint generation anymore; it is candidate compression/selection: 30 candidates contain better endpoints, but neither the existing score head nor a static slot policy selects them correctly.
+
+### Failed compression/selection probes
+
+All use the same clean checkpoint and short validation windows.
+
+| Probe | Best public K=20 FDE / endpoint minFDE | Baseline in same window | Readout |
+| --- | ---: | ---: | --- |
+| complement head `current15 + gen5` | 0.2859 endpoint minFDE | 0.2799 | generated slots help over current15 but do not beat current20 |
+| complement head `current10 + gen10` | 0.3015 endpoint minFDE | 0.2799 | worse |
+| complement head `current12 + gen8` | 0.2922 endpoint minFDE | 0.2799 | worse |
+| no-keep training, default score | 0.3209 FDE | about 0.286 fixed20 | score training cannot recover the 30-candidate oracle |
+| no-keep training, score x5 | 0.3220 FDE | about 0.286 fixed20 | worse |
+| no-keep training, score x10 | 0.3208 FDE | about 0.286 fixed20 | worse |
+| static slot mask by train mean/win/rare-win | 0.3085-0.3171 FDE | 0.2862 | fixed global slot selection fails |
+| pair compression score-pick | 0.2947 FDE | 0.2862 | worse |
+| pair compression average/score-average | 0.2895/0.2896 FDE | 0.2862 | close but still worse |
+| learned internal selector over 30 candidates | 0.3205 FDE | 0.2920 | improves over bad score-top20 but far below fixed20 |
+| candidate allocation `top10 x micro3` | 0.3086 FDE | 0.2789 short-train control | worse |
+| candidate allocation `top12 x micro3` | 0.2989 FDE | 0.2789 short-train control | worse |
+
+Decision:
+
+- Do not add late endpoint source selection, static slot replacement, pair averaging, or a detached internal selector as default.
+- Do not switch to `micro_per_proto=3` candidate allocation from the current checkpoint; it does not recover the hidden all-30 headroom under short validation.
+- The current FDE bottleneck is now best stated as: **candidate generation has hidden headroom, but public K=20 compression is structurally brittle.** The useful extra candidates are sample-specific and cannot be recovered by simple score loss, static masks, or shallow post-hoc selectors.
+- Next credible direction should integrate selection into the main candidate generation path rather than post-filtering after the fact. A plausible next probe is to train a candidate set where the model directly emits exactly 20 endpoint candidates with learned micro diversity per selected prototype, or to replace fixed micro slots with a differentiable top-k/set prediction objective during normal training.
